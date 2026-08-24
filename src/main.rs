@@ -48,6 +48,7 @@ impl ZellijPlugin for State {
             EventType::PermissionRequestResult,
             EventType::RunCommandResult,
             EventType::Timer,
+            EventType::Visible,
         ]);
         request_permission(&[
             PermissionType::ReadApplicationState,
@@ -77,6 +78,15 @@ impl ZellijPlugin for State {
                 set_timeout(1.0);
                 true
             }
+            // LaunchOrFocusPlugin reuses the pane; Zellij often restores the
+            // default small float, so re-apply 94% whenever we become visible.
+            Event::Visible(true) => {
+                self.enlarged_once = false;
+                self.enlarge_pending = false;
+                self.enlarge_if_floating();
+                true
+            }
+            Event::Visible(false) => false,
             Event::SessionUpdate(sessions, _) => {
                 if let Some(session) = sessions.iter().find(|session| session.is_current_session) {
                     self.current_session = Some(session.name.clone());

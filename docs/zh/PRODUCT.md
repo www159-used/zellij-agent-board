@@ -44,7 +44,7 @@ overview 继续只做 session / tab。扫描、hook、名单都在 `agent-board.
 - `--workspace`（能从 argv 抠就显示）
 - 状态（见下）
 
-丢掉 `agent ls`、`status`、`whoami` 等子命令，避免污染名单。
+丢掉纯 `agent ls` 选单（未打开 chat）、以及 `status` / `whoami` 等子命令。从 `ls` 里选中会话后 argv 往往仍是 `ls`，但已打开 `~/.cursor/chats/.../store.db`，扫描会保留。
 
 `pi` / `claude` / `codex` 以后加匹配行，不挡第一期。
 

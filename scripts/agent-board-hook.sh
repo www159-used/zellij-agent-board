@@ -42,7 +42,7 @@ fi
 
 [ -n "$event" ] || exit 0
 
-line="HOOK ${ZELLIJ_SESSION_NAME} ${ZELLIJ_PANE_ID} ${event}"
+line="HOOK ${ZELLIJ_SESSION_NAME} ${ZELLIJ_PANE_ID} ${event} @$(date '+%m-%dT%H:%M')"
 if [ -n "${detail:-}" ]; then
   line="${line} ${detail}"
 fi

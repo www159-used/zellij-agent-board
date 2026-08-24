@@ -18,7 +18,10 @@ pub struct Agent {
     pub tab_position: Option<usize>,
     pub pane_title: String,
     pub detail: String,
+    /// Tick clock when the current status began (for working elapsed).
     pub status_since: u64,
+    /// Wall-clock stamp when the agent finished, e.g. `08-24 15:21`.
+    pub finished_at: Option<String>,
 }
 
 impl Agent {
@@ -71,7 +74,11 @@ pub struct PanePlace {
     pub pane_title: String,
 }
 
-/// Cursor CLI wrapper argv: keep interactive `agent`, drop `agent ls` and friends.
+/// Cursor CLI wrapper argv: keep interactive `agent`, drop one-shot subcommands.
+///
+/// `agent ls` is special: the session picker keeps argv=`ls` even after you
+/// resume a chat. The host scan decides whether a `ls` process is a live chat
+/// (chat store open) or a pure picker; this filter must not drop `ls` alone.
 pub fn keep_cursor_agent(argv: &[String]) -> bool {
     let bin = argv
         .first()
@@ -81,7 +88,7 @@ pub fn keep_cursor_agent(argv: &[String]) -> bool {
         return false;
     }
     let skip = [
-        "ls", "status", "whoami", "login", "logout", "update", "about",
+        "status", "whoami", "login", "logout", "update", "about",
     ];
     !argv.iter().skip(1).any(|arg| skip.contains(&arg.as_str()))
 }
@@ -116,7 +123,8 @@ mod tests {
             "/tmp/w",
             "--continue"
         ])));
-        assert!(!keep_cursor_agent(&argv(&[
+        // `ls` may be a resumed chat; the host scan drops pure pickers.
+        assert!(keep_cursor_agent(&argv(&[
             "/Users/ww/.local/bin/agent",
             "ls"
         ])));
@@ -125,7 +133,7 @@ mod tests {
             "/Users/ww/.local/bin/agent",
             "--use-system-ca",
             "index.js",
-            "ls"
+            "status"
         ])));
         assert!(keep_cursor_agent(&argv(&[
             "/Users/ww/.local/bin/agent",
@@ -133,6 +141,12 @@ mod tests {
             "index.js",
             "--workspace",
             "/tmp/w"
+        ])));
+        assert!(keep_cursor_agent(&argv(&[
+            "/Users/ww/.local/bin/agent",
+            "--use-system-ca",
+            "index.js",
+            "ls"
         ])));
     }
 
@@ -153,6 +167,7 @@ mod tests {
             pane_title: String::new(),
             detail: String::new(),
             status_since: 0,
+            finished_at: None,
         };
         assert_eq!(agent.project(), "api");
     }

@@ -285,11 +285,12 @@ fn agent_row(
         format!("{:<9}", agent.status.label()),
         status_style,
     ));
-    let elapsed = match agent.status {
-        Status::Done => fmt_elapsed(now.saturating_sub(agent.status_since)),
+    let when = match agent.status {
+        Status::Working => fmt_elapsed(now.saturating_sub(agent.status_since)),
+        Status::Done => agent.finished_at.clone().unwrap_or_default(),
         _ => String::new(),
     };
-    spans.push(Span::raw(format!(" {elapsed:>6}")));
+    spans.push(Span::raw(format!(" {when:>11}")));
     if show_cwd {
         let foreign = !home.is_empty() && agent.id.session != home;
         let col = if foreign {
@@ -438,6 +439,7 @@ mod tests {
             pane_title: "Add retry".into(),
             detail: "Shell cargo test --lib".into(),
             status_since: 0,
+            finished_at: None,
         }
     }
 
@@ -462,6 +464,7 @@ mod tests {
             "●",
             "agent",
             "working",
+            "2m14s",
             "api",
             "Add retry",
             "└",
@@ -471,22 +474,26 @@ mod tests {
         ] {
             assert!(text.contains(expect), "missing {expect:?} in {text:?}");
         }
-        assert!(!text.contains("2m14s"), "working has no clock: {text:?}");
     }
 
     #[test]
-    fn only_done_shows_how_long_it_has_been_finished() {
+    fn working_counts_up_and_done_shows_a_date() {
         let mut board = Board {
             hooks_installed: true,
             now: 134,
             ..Board::default()
         };
+        board.agents.push(agent());
         let mut done = agent();
+        done.id.pane_id = 9;
         done.status = Status::Done;
+        done.finished_at = Some("08-24 15:21".into());
         board.agents.push(done);
-        let text = painted(&board, 16, 110, "");
-        assert!(text.contains("done"));
+        let text = painted(&board, 20, 110, "");
+        assert!(text.contains("working"));
         assert!(text.contains("2m14s"));
+        assert!(text.contains("done"));
+        assert!(text.contains("08-24 15:21"));
     }
 
     #[test]

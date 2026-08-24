@@ -72,26 +72,41 @@ impl Board {
 
     fn apply_notices(&mut self, hooks: Vec<HookNotice>) {
         for notice in hooks {
-            self.apply_hook_event(&notice.id, &notice.event, &notice.detail);
+            self.apply_hook_event(&notice.id, &notice.event, &notice.detail, notice.at.as_deref());
         }
     }
 
-    pub fn apply_hook_event(&mut self, id: &AgentId, event: &str, detail: &str) {
+    pub fn apply_hook_event(&mut self, id: &AgentId, event: &str, detail: &str, at: Option<&str>) {
         if let Some(status) = Status::from_cursor_hook(event) {
-            self.apply_hook(id, status, detail);
+            self.apply_hook(id, status, detail, at);
         }
     }
 
-    pub fn apply_hook(&mut self, id: &AgentId, status: Status, detail: &str) {
+    pub fn apply_hook(&mut self, id: &AgentId, status: Status, detail: &str, at: Option<&str>) {
         if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == *id) {
             if agent.status != status {
                 agent.status_since = self.now;
             }
             agent.status = status;
             match status {
-                Status::Idle | Status::Ended => agent.detail.clear(),
-                _ if !detail.is_empty() => agent.detail = detail.to_string(),
-                _ => {}
+                Status::Done => {
+                    if let Some(stamp) = at.filter(|s| !s.is_empty()) {
+                        agent.finished_at = Some(stamp.to_string());
+                    }
+                    if !detail.is_empty() {
+                        agent.detail = detail.to_string();
+                    }
+                }
+                Status::Idle | Status::Ended => {
+                    agent.detail.clear();
+                    agent.finished_at = None;
+                }
+                _ => {
+                    agent.finished_at = None;
+                    if !detail.is_empty() {
+                        agent.detail = detail.to_string();
+                    }
+                }
             }
         }
     }
@@ -189,6 +204,7 @@ impl Board {
                     .unwrap_or_default(),
                 detail: prior.map(|agent| agent.detail.clone()).unwrap_or_default(),
                 status_since: prior.map(|agent| agent.status_since).unwrap_or(self.now),
+                finished_at: prior.and_then(|agent| agent.finished_at.clone()),
             });
         }
         self.agents = next;
@@ -268,13 +284,18 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert!(joined.contains("working"));
         assert!(joined.contains("Shell cargo test --lib"));
         assert!(joined.contains('└'));
+        board.ingest_notice("HOOK ww 3 stop @08-24T15:21\n");
+        assert_eq!(board.agents[1].status, Status::Done);
+        assert_eq!(board.agents[1].finished_at.as_deref(), Some("08-24 15:21"));
+        let joined = board.lines().join("\n");
+        assert!(joined.contains("08-24 15:21"));
         assert_eq!(board.agents.len(), 2);
     }
 
     #[test]
     fn drops_subcommands_and_gone_processes() {
         let mut board = Board::default();
-        board.ingest("SCAN ww 3 agent /Users/ww/.local/bin/agent ls\n");
+        board.ingest("SCAN ww 3 agent /Users/ww/.local/bin/agent status\n");
         assert!(board.agents.is_empty());
 
         ingest_two(&mut board);
@@ -315,6 +336,7 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
             },
             Status::Working,
             "Shell cargo test",
+            None,
         );
         board.decide(Key::Down);
         board.ingest(

@@ -32,6 +32,13 @@ is_cursor_agent() {
   [[ "$comm" == "agent" || "$comm" == "cursor-agent" ]]
 }
 
+# `agent ls` keeps argv=`ls` after you pick a session and chat. A pure picker
+# has no chat store open; a live chat holds ~/.cursor/chats/.../store.db.
+holding_chat_store() {
+  local pid=$1
+  lsof -p "$pid" 2>/dev/null | grep -q '/.cursor/chats/.*/store\.db'
+}
+
 live_keys=()
 pids="$(pgrep -x agent || true)
 $(pgrep -x cursor-agent || true)"
@@ -44,6 +51,11 @@ while read -r pid; do
 
   args=$(command_line "$pid")
   [[ -n "$args" ]] || continue
+
+  last=${args##* }
+  if [[ "$last" == "ls" ]]; then
+    holding_chat_store "$pid" || continue
+  fi
 
   blob=$(env_blob "$pid")
   [[ "$blob" == *ZELLIJ_PANE_ID=* && "$blob" == *ZELLIJ_SESSION_NAME=* ]] || continue
