@@ -1,0 +1,25 @@
+[package]
+name = "agent-board"
+version = "0.1.0"
+edition = "2021"
+description = "Floating dashboard of running coding agents for Zellij"
+license = "AGPL-3.0-only"
+
+[dependencies]
+zellij-tile = "0.44"
+
+[lib]
+name = "agent_board"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent-board"
+path = "src/main.rs"
+test = false
+doctest = false
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

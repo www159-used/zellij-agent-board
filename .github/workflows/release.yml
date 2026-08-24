@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy, rustfmt
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify
+        run: |
+          cargo fmt --check
+          cargo lint
+          cargo test --lib
+
+      - name: Build WASM
+        run: cargo wasm
+
+      - name: Package checksums
+        run: |
+          cp target/wasm32-wasip1/release/agent-board.wasm "agent-board-${GITHUB_REF_NAME}.wasm"
+          sha256sum "agent-board-${GITHUB_REF_NAME}.wasm" > "agent-board-${GITHUB_REF_NAME}.wasm.sha256"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            agent-board-${{ github.ref_name }}.wasm
+            agent-board-${{ github.ref_name }}.wasm.sha256
