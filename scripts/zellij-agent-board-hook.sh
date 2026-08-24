@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cursor hook → agent-board. Always exit 0. Only report inside a Zellij pane.
+# Cursor hook → zellij-agent-board. Always exit 0. Only report inside a Zellij pane.
 set -u
 trap 'exit 0' EXIT
 
@@ -42,17 +42,19 @@ fi
 
 [ -n "$event" ] || exit 0
 
-line="HOOK ${ZELLIJ_SESSION_NAME} ${ZELLIJ_PANE_ID} ${event} @$(date '+%m-%dT%H:%M')"
+epoch=$(date +%s)
+stamp=$(date '+%m-%dT%H:%M')
+line="HOOK ${ZELLIJ_SESSION_NAME} ${ZELLIJ_PANE_ID} ${event} @${epoch} +${stamp}"
 if [ -n "${detail:-}" ]; then
   line="${line} ${detail}"
 fi
 
-plugin="${AGENT_BOARD_PLUGIN_PATH:-${HOME}/.config/zellij/plugins/agent-board.wasm}"
+plugin="${ZELLIJ_AGENT_BOARD_PLUGIN_PATH:-${HOME}/.config/zellij/plugins/zellij-agent-board.wasm}"
 if command -v zellij >/dev/null 2>&1 && [ -f "$plugin" ]; then
-  zellij pipe --plugin "file:${plugin}" --name agent-board -- "$line" >/dev/null 2>&1 || true
+  zellij pipe --plugin "file:${plugin}" --name zellij-agent-board -- "$line" >/dev/null 2>&1 || true
 fi
 
-spool_dir="${TMPDIR:-/tmp}/agent-board-spool"
+spool_dir="${TMPDIR:-/tmp}/zellij-agent-board-spool"
 mkdir -p "$spool_dir"
 tmp="${spool_dir}/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}.tmp.$$"
 printf '%s\n' "$line" >"$tmp"

@@ -1,16 +1,16 @@
-//! Zellij WASM adapter. Core list / jump / hook merge lives in `agent_board`.
+//! Zellij WASM adapter. Core list / jump / hook merge lives in `zellij_agent_board`.
 
 use std::collections::BTreeMap;
 
-use agent_board::{
+use zellij_agent_board::{
     float_size_from_config, Action, AgentId, Board, FloatSize, FloatingLayerState, Key, PaintCtx,
     PanePlace,
 };
 use zellij_tile::prelude::*;
 
-const PLUGIN_NAME: &str = "agent-board";
+const PLUGIN_NAME: &str = "zellij-agent-board";
 const SCAN_LAUNCHER: &str = r#"
-s="${AGENT_BOARD_SCAN:-$HOME/.config/zellij/plugins/agent-board-scan.sh}"
+s="${ZELLIJ_AGENT_BOARD_SCAN:-$HOME/.config/zellij/plugins/zellij-agent-board-scan.sh}"
 if [ -x "$s" ]; then exec "$s"; fi
 if [ -x ./scripts/scan-agents.sh ]; then exec ./scripts/scan-agents.sh; fi
 printf 'META hooks=0\n'
@@ -112,7 +112,7 @@ impl ZellijPlugin for State {
                 true
             }
             Event::RunCommandResult(_code, stdout, _stderr, context) => {
-                if context.get("agent_board").map(String::as_str) != Some("scan") {
+                if context.get("zellij_agent_board").map(String::as_str) != Some("scan") {
                     return false;
                 }
                 self.scan_inflight = false;
@@ -122,7 +122,7 @@ impl ZellijPlugin for State {
                 true
             }
             Event::Key(key) => {
-                let Some(mapped) = map_key(key) else {
+                let Some(mapped) = map_key(key, self.board.is_hinting()) else {
                     return false;
                 };
                 let action = self.board.decide(mapped);
@@ -217,7 +217,7 @@ impl State {
         }
         self.scan_inflight = true;
         let mut context = BTreeMap::new();
-        context.insert("agent_board".to_string(), "scan".to_string());
+        context.insert("zellij_agent_board".to_string(), "scan".to_string());
         run_command(&["/bin/bash", "-lc", SCAN_LAUNCHER], context);
     }
 
@@ -283,8 +283,10 @@ impl State {
     }
 
     fn dismiss(&self) {
+        // Match overview: restore the floating layer, then close this plugin.
+        // hide_self() leaves the pane around and breaks LaunchOrFocusPlugin.
         if self.floating_layer.should_hide_on_close() {
-            hide_self();
+            let _ = hide_floating_panes(None);
         }
         close_self();
     }
@@ -400,15 +402,22 @@ fn write_plugin_lines(lines: &[String]) {
     print!("{last}");
 }
 
-fn map_key(key: KeyWithModifier) -> Option<Key> {
+fn map_key(key: KeyWithModifier, hinting: bool) -> Option<Key> {
     if !key.has_no_modifiers() {
         return None;
     }
     match key.bare_key {
         BareKey::Esc | BareKey::Char('q') => Some(Key::Dismiss),
-        BareKey::Char('?') => Some(Key::ToggleHelp),
-        BareKey::Up | BareKey::Char('k') | BareKey::Left | BareKey::Char('h') => Some(Key::Up),
-        BareKey::Down | BareKey::Char('j') | BareKey::Right | BareKey::Char('l') => Some(Key::Down),
+        BareKey::Char('?') if !hinting => Some(Key::ToggleHelp),
+        BareKey::Backspace if hinting => Some(Key::Backspace),
+        BareKey::Char('s') if !hinting => Some(Key::StartHint),
+        BareKey::Char(ch) if hinting => Some(Key::Input(ch)),
+        BareKey::Up | BareKey::Char('k') | BareKey::Left | BareKey::Char('h') if !hinting => {
+            Some(Key::Up)
+        }
+        BareKey::Down | BareKey::Char('j') | BareKey::Right | BareKey::Char('l') if !hinting => {
+            Some(Key::Down)
+        }
         BareKey::Enter | BareKey::Char('e') => Some(Key::Confirm),
         _ => None,
     }

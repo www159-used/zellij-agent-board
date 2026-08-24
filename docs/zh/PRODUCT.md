@@ -1,4 +1,4 @@
-# agent-board 产品说明
+# zellij-agent-board 产品说明
 
 在 Zellij 浮动窗口里看本机还在跑的 coding agent，并用 Cursor hook 更新状态，按一下跳到那个 pane。
 
@@ -8,7 +8,7 @@
 
 人同时开着好几路 Cursor `agent`（`ww`、`lp`、`mysql_syncer` 各 session 里都有）。现在要知道谁在干活、谁做完了，并且马上落到那一格。
 
-不是给「唤起一个日常 agent」用的，那是 [zellij-agent](../../zellij-agent/docs/zh/PRODUCT.md)（`Alt+a`）。
+不是给「唤起一个日常 agent」用的，那是 [zellij-agent](../../zellij-agent/docs/zh/PRODUCT.md)。
 
 ## 一句话目标
 
@@ -22,7 +22,7 @@
 | zellij-agent | 弹出/收回日常浮动 agent | 无关，不要塞功能 |
 | zj-agent-mob | Claude / Codex 舰队监控 | 只模仿「hook 报状态 + 名单 + 跳转」 |
 
-overview 继续只做 session / tab。扫描、hook、名单都在 `agent-board.wasm`。hook 的 `zellij pipe --plugin` 打到 board，可以在藏着的时候收状态。
+overview 继续只做 session / tab。扫描、hook、名单都在 `zellij-agent-board.wasm`。hook 的 `zellij pipe --plugin` 打到 board，可以在藏着的时候收状态。
 
 门厅（后做，不挡第一期）：
 
@@ -31,7 +31,7 @@ overview 继续只做 session / tab。扫描、hook、名单都在 `agent-board.
 3. overview `hide_self`，聚焦已有的 board 浮窗
 4. board 里 `Esc` 先只关 board；要不要回到 overview 以后再定
 
-第一期必须能用自己的快捷键打开（`Alt+g`）。
+第一期必须能用自己的快捷键打开（`Alt+a`）。
 
 ## 第一期做什么
 
@@ -54,7 +54,7 @@ overview 继续只做 session / tab。扫描、hook、名单都在 `agent-board.
 
 ### Hook 状态
 
-用户级 `~/.cursor/hooks.json` 挂上 `scripts/agent-board-hook.sh`（不写进各仓库）。
+用户级 `~/.cursor/hooks.json` 挂上 `scripts/zellij-agent-board-hook.sh`（不写进各仓库）。
 
 脚本：没有 pane id 就退出；永远 exit 0，不挡 agent。
 
@@ -79,7 +79,8 @@ overview 继续只做 session / tab。扫描、hook、名单都在 `agent-board.
 
 ### 跳转与开关
 
-- `hjkl` / 方向键移动，`Enter` 或数字键跳（跨 session 用 `switch_session_with_focus`）
+- `hjkl` / 方向键移动，`Enter` / `e` 跳（跨 session 用 `switch_session_with_focus`）
+- `s` 进 Flash（对齐 overview）：匹配 **session / 项目名 / tab 名**，不匹配 pane title、状态与 detail。唯一命中直接跳；多个命中出 tip；`Esc` 取消搜索
 - 再按打开键或 `q` / `Esc` 关掉；浮动层恢复打开前的显隐（对齐 overview）
 
 ## 明确不做
@@ -102,7 +103,7 @@ overview 继续只做 session / tab。扫描、hook、名单都在 `agent-board.
 - Zellij 0.44+，`wasm32-wasip1`
 - Cursor hook 先按本机 macOS CLI；Linux 同版本曾经不跑
 - 不要在每次 `update` 后面扫进程（抢 stdin）；跟 pane / session 事件走，有跨 session 行时再低频读 spool
-- 快捷键用 `file:` URL；不要抢 overview 的 `Ctrl+y`、zellij-agent 的 `Alt+a`
+- 快捷键用 `file:` URL；不要抢 overview 的 `Ctrl+y`（board 用 `Alt+a`）
 
 ## 仓库里现在有什么
 
@@ -114,7 +115,7 @@ src/discover.rs      扫描行解析（空实现）
 src/floating_state.rs 浮动层恢复
 src/main.rs          WASM 适配：加载、权限、占位文案、q/Esc 关掉
 scripts/install.sh   拷 wasm
-scripts/install-hooks.sh / agent-board-hook.sh  占位
+scripts/install-hooks.sh / zellij-agent-board-hook.sh  占位
 ```
 
 实现顺序建议：探测 hook 是否在本机 CLI 开火 → 扫描出名单 → pipe / spool → 跳转 → overview 门厅。

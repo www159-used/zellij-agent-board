@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Host scan for agent-board. Prints SCAN / HOOK / META lines on stdout.
+# Host scan for zellij-agent-board. Prints SCAN / HOOK / META lines on stdout.
 # Existence comes from live processes with Zellij pane + session env.
 set -u
 trap 'exit 0' EXIT
 
-spool_dir="${TMPDIR:-/tmp}/agent-board-spool"
+spool_dir="${TMPDIR:-/tmp}/zellij-agent-board-spool"
 hooks_json="${HOME}/.cursor/hooks.json"
 
-if [[ -f "$hooks_json" ]] && grep -q 'agent-board-hook' "$hooks_json"; then
-  printf 'META hooks=1\n'
+epoch=$(date +%s)
+if [[ -f "$hooks_json" ]] && grep -q 'zellij-agent-board-hook' "$hooks_json"; then
+  printf 'META hooks=1 epoch=%s\n' "$epoch"
 else
-  printf 'META hooks=0\n'
+  printf 'META hooks=0 epoch=%s\n' "$epoch"
 fi
 
 env_blob() {
@@ -40,8 +41,10 @@ holding_chat_store() {
 }
 
 live_keys=()
-pids="$(pgrep -x agent || true)
-$(pgrep -x cursor-agent || true)"
+# macOS/BSD pgrep omits ancestors by default. Without -a, a scan started
+# under an agent pane never sees that agent — the "current" session vanishes.
+pids="$(pgrep -a -x agent || true)
+$(pgrep -a -x cursor-agent || true)"
 
 while read -r pid; do
   [[ -n "${pid:-}" ]] || continue

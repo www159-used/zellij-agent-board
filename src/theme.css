@@ -1,4 +1,4 @@
-/* agent-board 配色，和 overview 同一套变量。
+/* zellij-agent-board 配色，和 overview 同一套变量。
    改默认：编辑本文件并重新编译。 */
 
 :root {
@@ -6,14 +6,14 @@
   --focus: #e4d4ff;
   --focus-fill: #3a2f52;
 
-  /* session：◆、底栏 session 药丸 */
+  /* session：◆ 组头、底栏 session 药丸 */
   --session: #69d0c4;
 
   /* 钉 / 出错：沿用 overview 的粉 */
   --pin-mark: #f9a9b6;
   --pin-border: #f192a1;
 
-  /* Flash 位先留着，和 overview 对齐，以后搜名单能直接用 */
+  /* Flash / done 状态：暖色 */
   --match: #ebbb8b;
   --match-border: #cba77d;
   --mask: #161a22;
@@ -23,7 +23,7 @@
   --card-border: #61687c;
   --separator: var(--card-border);
 
-  /* 底栏药丸 */
+  /* 底栏药丸；名单里时间列也用 tip-bg 做 gutter */
   --tip-fg: #161a22;
   --tip-bg: #a2c5ce;
   --tip-typed: var(--focus);

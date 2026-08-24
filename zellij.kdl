@@ -10,7 +10,7 @@ layout {
     }
     floating_panes {
         pane {
-            plugin location="file:target/wasm32-wasip1/release/agent-board.wasm"
+            plugin location="file:target/wasm32-wasip1/release/zellij-agent-board.wasm"
         }
     }
 }

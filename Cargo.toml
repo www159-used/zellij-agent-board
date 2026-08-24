@@ -1,5 +1,5 @@
 [package]
-name = "agent-board"
+name = "zellij-agent-board"
 version = "0.1.0"
 edition = "2021"
 description = "Floating dashboard of running coding agents for Zellij"
@@ -10,11 +10,11 @@ ratatui = { version = "0.30.2", default-features = false }
 zellij-tile = "0.44"
 
 [lib]
-name = "agent_board"
+name = "zellij_agent_board"
 path = "src/lib.rs"
 
 [[bin]]
-name = "agent-board"
+name = "zellij-agent-board"
 path = "src/main.rs"
 test = false
 doctest = false

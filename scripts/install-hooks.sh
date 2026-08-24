@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Merge agent-board-hook.sh into ~/.cursor/hooks.json (user-level, not per-repo).
+# Merge zellij-agent-board-hook.sh into ~/.cursor/hooks.json (user-level, not per-repo).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-src="$root/scripts/agent-board-hook.sh"
+src="$root/scripts/zellij-agent-board-hook.sh"
 dest_dir="${HOME}/.cursor/hooks"
-dest="$dest_dir/agent-board-hook.sh"
+dest="$dest_dir/zellij-agent-board-hook.sh"
 hooks_json="${HOME}/.cursor/hooks.json"
 
 mkdir -p "$dest_dir"
 cp "$src" "$dest"
 chmod +x "$dest"
+rm -f "$dest_dir/agent-board-hook.sh"
 
 command="${dest}"
 python3 - "$hooks_json" "$command" <<'PY'
@@ -51,7 +52,24 @@ for event in events:
     if not isinstance(entries, list):
         raise SystemExit(f"hooks.json {event} is not a list")
     wanted = f"{command} {event}"
+    # Drop legacy agent-board-hook entries for this event (not zellij-agent-board-hook).
+    filtered = []
+    for item in entries:
+        if not isinstance(item, dict):
+            filtered.append(item)
+            continue
+        cmd = item.get("command")
+        if (
+            isinstance(cmd, str)
+            and "agent-board-hook.sh" in cmd
+            and "zellij-agent-board-hook" not in cmd
+        ):
+            changed = True
+            continue
+        filtered.append(item)
+    entries = filtered
     if any(isinstance(item, dict) and item.get("command") == wanted for item in entries):
+        hooks[event] = entries
         continue
     entries.append({"command": wanted})
     hooks[event] = entries

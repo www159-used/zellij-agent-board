@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
-use crate::{theme::theme, Agent, Board, Status};
+use crate::{theme::theme, Agent, Board, HintField, Status};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PaintCtx<'a> {
@@ -80,6 +80,7 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
     let lines = vec![
         Line::from("h/j/k/l, arrows  move"),
         Line::from("e / Enter         jump to pane"),
+        Line::from("s                 flash search"),
         Line::from("q / Esc           close"),
         Line::from("?                 close help"),
     ];
@@ -98,12 +99,15 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
     }
 
     let cols = usize::from(area.width);
-    let show_detail = cols >= 60 && area.height >= 6;
-    let show_cwd = cols >= 50;
+    let wide = cols >= 50;
     let multi = board
         .agents
         .windows(2)
         .any(|pair| pair[0].id.session != pair[1].id.session);
+    let flash = board.is_hinting() && !board.hint_query().is_empty();
+    if flash {
+        buffer.set_style(area, Style::default().bg(theme().mask));
+    }
 
     let mut y = area.y;
     y = draw_line(area, buffer, y, header_line(board));
@@ -124,7 +128,7 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         return;
     }
 
-    let per = if show_detail { 2 } else { 1 };
+    let per = if wide { 2 } else { 1 };
     let budget = usize::from(body.height);
     let max_agents = (budget / per).max(1).min(board.agents.len());
     let (start, end) = window(board.agents.len(), board.selected, max_agents);
@@ -137,12 +141,21 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
             if last_session.is_some() {
                 y = draw_separator(body, buffer, y);
             }
-            y = draw_line(body, buffer, y, session_head(&agent.id.session));
+            y = draw_line(
+                body,
+                buffer,
+                y,
+                session_head(board, &agent.id.session, flash),
+            );
             last_session = Some(agent.id.session.as_str());
         }
+
+        let candidate = board.agent_matches(index);
+        let masked = flash && !candidate;
+        let activity = wide.then(|| activity_text(agent)).flatten();
         let selected = index == board.selected;
-        if selected {
-            let height = if show_detail { 2 } else { 1 };
+        if selected && !masked {
+            let height = if activity.is_some() { 2 } else { 1 };
             let fill = Rect::new(
                 body.x,
                 y,
@@ -157,10 +170,15 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
             body,
             buffer,
             y,
-            agent_row(agent, index, selected, board.now, cols, show_cwd, home),
+            agent_row(board, index, selected, cols, home, multi, masked),
         );
-        if show_detail {
-            y = draw_line(body, buffer, y, agent_detail(agent, cols));
+        if let Some(text) = activity {
+            y = draw_line(
+                body,
+                buffer,
+                y,
+                activity_line(&text, cols, masked),
+            );
         }
         if y >= body.bottom() {
             break;
@@ -187,6 +205,27 @@ fn render_scroll_arrows(area: Rect, start: usize, end: usize, total: usize, buff
 fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
     let line = if board.help_visible {
         Line::from("? / q / Esc close help")
+    } else if board.is_hinting() {
+        Line::from(vec![
+            Span::styled(
+                " FLASH ",
+                Style::default().fg(theme().tip_fg).bg(theme().tip_bg),
+            ),
+            Span::raw(" type to search"),
+            Span::styled(
+                format!("  /{}█", board.hint_query()),
+                Style::default()
+                    .fg(ratatui::style::Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  tip:{}", board.hint_jump_prefix()),
+                Style::default()
+                    .fg(theme().tip_typed)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  Esc cancel", Style::default().fg(theme().mask_fg)),
+        ])
     } else {
         let mut spans = Vec::new();
         if !home.is_empty() {
@@ -196,7 +235,7 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
             ));
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::raw("hjkl move   e go   q close   ? help"));
+        spans.push(Span::raw("hjkl move   e go   s search   q close   ? help"));
         Line::from(spans)
     };
     Paragraph::new(line).render(area, buffer);
@@ -213,15 +252,12 @@ fn header_line(board: &Board) -> Line<'static> {
 
     if parts.is_empty() {
         return Line::from(Span::styled(
-            "agent-board",
+            "no status yet",
             Style::default().fg(theme().mask_fg),
         ));
     }
 
-    let mut spans = vec![Span::styled(
-        "agent-board  ",
-        Style::default().fg(theme().mask_fg),
-    )];
+    let mut spans = Vec::new();
     for (i, (n, label, status)) in parts.into_iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" · ", Style::default().fg(theme().mask_fg)));
@@ -250,25 +286,47 @@ fn push_count(
     }
 }
 
-fn session_head(name: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("◆ ", Style::default().fg(theme().session)),
-        Span::styled(name.to_string(), Style::default().fg(theme().session)),
-    ])
+fn session_head(board: &Board, name: &str, flash: bool) -> Line<'static> {
+    let any_candidate = board
+        .agents
+        .iter()
+        .enumerate()
+        .any(|(index, agent)| agent.id.session == name && board.agent_matches(index));
+    let muted = flash && !any_candidate;
+    let mark = Style::default().fg(if muted {
+        theme().mask_fg
+    } else {
+        theme().session
+    });
+    let mut spans = vec![Span::styled("◆ ", mark)];
+    let range = (!muted)
+        .then(|| text_match_range_local(name, board.hint_query()))
+        .flatten();
+    if range.is_some() {
+        spans.extend(highlight_text(name, range, mark));
+    } else {
+        spans.push(Span::styled(name.to_string(), mark));
+    }
+    Line::from(spans)
 }
 
 fn agent_row(
-    agent: &Agent,
+    board: &Board,
     index: usize,
     selected: bool,
-    now: u64,
     cols: usize,
-    show_cwd: bool,
     home: &str,
+    multi: bool,
+    masked: bool,
 ) -> Line<'static> {
-    let status_style = Style::default().fg(status_color(agent.status));
+    let agent = &board.agents[index];
+    let status_style = if masked {
+        Style::default().fg(theme().mask_fg)
+    } else {
+        Style::default().fg(status_color(agent.status))
+    };
     let mut spans = Vec::new();
-    if selected {
+    if selected && !masked {
         spans.push(Span::styled(
             "› ",
             Style::default()
@@ -278,65 +336,222 @@ fn agent_row(
     } else {
         spans.push(Span::raw("  "));
     }
-    spans.push(Span::raw(format!("{} ", index + 1)));
-    spans.push(Span::styled(agent.status.icon().to_string(), status_style));
-    spans.push(Span::raw(format!(" {:<7} ", agent.tool)));
+    if let Some(label) = board.hint_label(index) {
+        spans.extend(hint_badge(label, board.hint_jump_prefix().len()));
+        spans.push(Span::raw(" "));
+    }
     spans.push(Span::styled(
-        format!("{:<9}", agent.status.label()),
+        format!("{} ", agent.status.icon()),
         status_style,
     ));
+    spans.push(Span::styled(pad_right(agent.status.label(), 8), status_style));
+
     let when = match agent.status {
-        Status::Working => fmt_elapsed(now.saturating_sub(agent.status_since)),
+        Status::Working | Status::Compact => agent
+            .started_at
+            .map(|started| fmt_elapsed(board.wall_now.saturating_sub(started)))
+            .unwrap_or_default(),
         Status::Done => agent.finished_at.clone().unwrap_or_default(),
         _ => String::new(),
     };
-    spans.push(Span::raw(format!(" {when:>11}")));
-    if show_cwd {
-        let foreign = !home.is_empty() && agent.id.session != home;
-        let col = if foreign {
-            agent.id.session.as_str()
-        } else {
-            agent.project()
-        };
-        let style = if foreign {
-            Style::default().fg(theme().session)
-        } else {
-            Style::default()
-        };
-        spans.push(Span::styled(format!(" {:<10}", truncate(col, 10)), style));
+    let when_style = Style::default().fg(if masked {
+        theme().mask_fg
+    } else {
+        time_color(agent.status)
+    });
+    spans.push(Span::styled(
+        format!(" {}", pad_right(&when, 11)),
+        when_style,
+    ));
+
+    let field = board.hint_match_field(index);
+    // Flash highlights the matched field. The normal place column may show
+    // project while the hit was tab/session — swap in the hit text so the
+    // match (and tip row) always has a visible highlight.
+    let place = if !masked && board.is_hinting() && !board.hint_query().is_empty() {
+        place_for_match(agent, field, home, multi)
+    } else {
+        place_label(agent, home, multi)
+    };
+    let place_range = (!masked && !board.hint_query().is_empty())
+        .then(|| text_match_range_local(&place, board.hint_query()))
+        .flatten();
+    spans.push(Span::raw(" "));
+    if masked {
+        spans.push(Span::styled(
+            pad_right(&truncate(&place, 12), 12),
+            Style::default().fg(theme().mask_fg),
+        ));
+    } else if let Some(range) = place_range {
+        spans.extend(highlight_padded(&place, range, 12));
+    } else {
+        spans.push(Span::raw(pad_right(&truncate(&place, 12), 12)));
     }
+
     let used = line_width(&spans);
     let room = cols.saturating_sub(used + 1);
-    if room > 6 {
-        let task = agent.display_task();
-        if !task.is_empty() {
-            spans.push(Span::raw(format!(" {}", truncate(task, room))));
+    let task = agent.display_task();
+    if room > 3 && !task.is_empty() {
+        let clipped = truncate(task, room);
+        spans.push(Span::raw(" "));
+        if masked {
+            spans.push(Span::styled(clipped, Style::default().fg(theme().mask_fg)));
+        } else {
+            spans.push(Span::raw(clipped));
         }
     }
     Line::from(spans)
 }
 
-fn agent_detail(agent: &Agent, cols: usize) -> Line<'static> {
-    let mut bits = Vec::new();
-    if agent.status == Status::Found && agent.detail.is_empty() {
-        bits.push("no report yet".to_string());
-    } else if !agent.detail.is_empty() {
-        bits.push(agent.detail.clone());
+fn place_label(agent: &Agent, home: &str, multi: bool) -> String {
+    // Session name lives in ◆ headers when multiple sessions are listed.
+    // Alone and away from home, the place column still needs the session.
+    if !multi && !home.is_empty() && agent.id.session != home {
+        return agent.id.session.clone();
     }
-    bits.push(format!("tab:{}", agent.tab_label()));
-    bits.push(format!("pane:{}", agent.id.pane_id));
+    let project = agent.project();
+    if project != "-" {
+        project.to_string()
+    } else if !agent.tab_name.is_empty() {
+        agent.tab_name.clone()
+    } else {
+        String::new()
+    }
+}
+
+fn place_for_match(
+    agent: &Agent,
+    field: Option<HintField>,
+    home: &str,
+    multi: bool,
+) -> String {
+    match field {
+        Some(HintField::Session) => agent.id.session.clone(),
+        Some(HintField::Project) => {
+            let project = agent.project();
+            if project != "-" {
+                project.to_string()
+            } else {
+                place_label(agent, home, multi)
+            }
+        }
+        Some(HintField::Tab) if !agent.tab_name.is_empty() => agent.tab_name.clone(),
+        _ => place_label(agent, home, multi),
+    }
+}
+
+fn activity_text(agent: &Agent) -> Option<String> {
+    if !agent.detail.is_empty() {
+        Some(agent.detail.clone())
+    } else if agent.status == Status::Found {
+        Some("no report yet".to_string())
+    } else {
+        None
+    }
+}
+
+fn activity_line(text: &str, cols: usize, masked: bool) -> Line<'static> {
+    let _ = masked;
     Line::from(Span::styled(
-        truncate(&format!("      └ {}", bits.join(" · ")), cols),
+        truncate(&format!("      └ {text}"), cols),
         Style::default().fg(theme().mask_fg),
     ))
+}
+
+fn hint_badge(label: &str, prefix_len: usize) -> Vec<Span<'static>> {
+    let prefix_len = prefix_len.min(label.len());
+    let (typed, remaining) = label.split_at(prefix_len);
+    let mut spans = Vec::new();
+    if !typed.is_empty() {
+        spans.push(Span::styled(
+            typed.to_string(),
+            Style::default()
+                .fg(theme().tip_typed)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if !remaining.is_empty() {
+        spans.push(Span::styled(
+            remaining.to_string(),
+            Style::default().fg(theme().tip_fg).bg(theme().tip_bg),
+        ));
+    }
+    spans
+}
+
+fn highlight_text(
+    text: &str,
+    range: Option<(usize, usize)>,
+    base: Style,
+) -> Vec<Span<'static>> {
+    let Some((start, len)) = range else {
+        return vec![Span::styled(text.to_string(), base)];
+    };
+    let chars: Vec<char> = text.chars().collect();
+    if start >= chars.len() {
+        return vec![Span::styled(text.to_string(), base)];
+    }
+    let end = (start + len).min(chars.len());
+    let before: String = chars[..start].iter().collect();
+    let matched: String = chars[start..end].iter().collect();
+    let after: String = chars[end..].iter().collect();
+    vec![
+        Span::styled(before, base),
+        Span::styled(
+            matched,
+            Style::default()
+                .fg(theme().match_fg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(after, base),
+    ]
+}
+
+fn highlight_padded(text: &str, range: (usize, usize), width: usize) -> Vec<Span<'static>> {
+    let clipped = truncate(text, width);
+    let mut spans = highlight_text(&clipped, Some(range), Style::default());
+    let used = spans.iter().map(Span::width).sum::<usize>();
+    if used < width {
+        spans.push(Span::raw(" ".repeat(width - used)));
+    }
+    spans
+}
+
+fn text_match_range_local(text: &str, query: &str) -> Option<(usize, usize)> {
+    if query.is_empty() {
+        return None;
+    }
+    let text_chars: Vec<char> = text.chars().map(|ch| ch.to_ascii_lowercase()).collect();
+    let query_chars: Vec<char> = query.chars().map(|ch| ch.to_ascii_lowercase()).collect();
+    text_chars
+        .windows(query_chars.len())
+        .position(|window| window == query_chars)
+        .map(|start| (start, query_chars.len()))
+}
+
+fn pad_right(text: &str, width: usize) -> String {
+    let used = Span::raw(text).width();
+    if used >= width {
+        text.to_string()
+    } else {
+        format!("{text}{}", " ".repeat(width - used))
+    }
 }
 
 fn status_color(status: Status) -> ratatui::style::Color {
     match status {
         Status::Working | Status::Compact => theme().focus,
-        Status::Done => theme().session,
+        Status::Done => theme().match_fg,
         Status::Failed | Status::Waiting | Status::IdleWait => theme().pin_mark,
         Status::Idle | Status::Found | Status::Unknown | Status::Ended => theme().mask_fg,
+    }
+}
+
+/// Clock column uses tip-bg so it reads as its own gutter, not another status chip.
+fn time_color(status: Status) -> ratatui::style::Color {
+    match status {
+        Status::Working | Status::Compact | Status::Done => theme().tip_bg,
+        _ => theme().mask_fg,
     }
 }
 
@@ -361,7 +576,7 @@ fn draw_separator(area: Rect, buffer: &mut Buffer, y: u16) -> u16 {
 }
 
 fn line_width(spans: &[Span<'_>]) -> usize {
-    spans.iter().map(|span| span.content.chars().count()).sum()
+    spans.iter().map(Span::width).sum()
 }
 
 fn window(len: usize, selected: usize, max_items: usize) -> (usize, usize) {
@@ -423,7 +638,7 @@ fn strip_ansi(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{fmt_elapsed, paint, strip_ansi, PaintCtx};
-    use crate::{Agent, AgentId, Board, Key, Status};
+    use crate::{Action, Agent, AgentId, Board, Key, Status};
 
     fn agent() -> Agent {
         Agent {
@@ -439,6 +654,7 @@ mod tests {
             pane_title: "Add retry".into(),
             detail: "Shell cargo test --lib".into(),
             status_since: 0,
+            started_at: Some(1_700_000_000),
             finished_at: None,
         }
     }
@@ -450,30 +666,30 @@ mod tests {
     }
 
     #[test]
-    fn working_row_uses_mob_columns_and_overview_cursor() {
+    fn working_row_keeps_status_time_place_and_activity() {
         let mut board = Board {
             hooks_installed: true,
             now: 134,
+            wall_now: 1_700_000_134,
             ..Board::default()
         };
         board.agents.push(agent());
         let text = painted(&board, 16, 110, "");
         for expect in [
             "›",
-            "1",
             "●",
-            "agent",
             "working",
             "2m14s",
             "api",
             "Add retry",
             "└",
             "Shell cargo test --lib",
-            "tab:notes",
-            "pane:3",
         ] {
             assert!(text.contains(expect), "missing {expect:?} in {text:?}");
         }
+        assert!(!text.contains("agent "), "tool name is noise: {text:?}");
+        assert!(!text.contains("tab:"), "tab id is noise: {text:?}");
+        assert!(!text.contains("pane:"), "pane id is noise: {text:?}");
     }
 
     #[test]
@@ -481,12 +697,14 @@ mod tests {
         let mut board = Board {
             hooks_installed: true,
             now: 134,
+            wall_now: 1_700_000_134,
             ..Board::default()
         };
         board.agents.push(agent());
         let mut done = agent();
         done.id.pane_id = 9;
         done.status = Status::Done;
+        done.started_at = None;
         done.finished_at = Some("08-24 15:21".into());
         board.agents.push(done);
         let text = painted(&board, 20, 110, "");
@@ -501,6 +719,7 @@ mod tests {
         let mut board = Board {
             hooks_installed: true,
             now: 134,
+            wall_now: 1_700_000_134,
             ..Board::default()
         };
         let mut agent = agent();
@@ -536,11 +755,12 @@ mod tests {
         let text = painted(&board, 12, 80, "ww");
         assert!(text.contains(" ww "));
         assert!(text.contains("e go"));
+        assert!(text.contains("s search"));
         assert!(text.contains("? help"));
     }
 
     #[test]
-    fn groups_foreign_sessions() {
+    fn groups_foreign_sessions_with_session_heads() {
         let mut board = Board {
             hooks_installed: true,
             ..Board::default()
@@ -553,6 +773,78 @@ mod tests {
         let text = painted(&board, 20, 80, "ww");
         assert!(text.contains('◆'));
         assert!(text.contains("lp"));
+        assert!(text.contains("ww"));
+    }
+
+    #[test]
+    fn columns_share_a_gutter_across_statuses() {
+        let mut board = Board {
+            hooks_installed: true,
+            now: 134,
+            wall_now: 1_700_000_134,
+            ..Board::default()
+        };
+        board.agents.push(agent());
+        let mut done = agent();
+        done.id.pane_id = 9;
+        done.status = Status::Done;
+        done.started_at = None;
+        done.finished_at = Some("08-24 15:21".into());
+        done.pane_title = "Ship it".into();
+        board.agents.push(done);
+        let text = painted(&board, 20, 110, "ww");
+        let working = text
+            .lines()
+            .find(|line| line.contains("2m14s"))
+            .expect("working row");
+        let finished = text
+            .lines()
+            .find(|line| line.contains("08-24 15:21"))
+            .expect("done row");
+        let w = char_index(working, "api").expect("working place");
+        let d = char_index(finished, "api").expect("done place");
+        assert_eq!(w, d, "place column drifted:\n{working}\n{finished}");
+    }
+
+    fn char_index(text: &str, needle: &str) -> Option<usize> {
+        text.find(needle)
+            .map(|bytes| text[..bytes].chars().count())
+    }
+
+    #[test]
+    fn flash_shows_place_for_tab_and_project_hits() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        let mut tab_hit = agent();
+        tab_hit.id.session = "lp".into();
+        tab_hit.id.pane_id = 8;
+        tab_hit.workspace = Some("/tmp/learn".into());
+        tab_hit.tab_name = "notes".into();
+        let mut project_hit = agent();
+        project_hit.id.session = "ww".into();
+        project_hit.id.pane_id = 3;
+        project_hit.workspace = Some("/tmp/openapi".into());
+        project_hit.tab_name = "main".into();
+        board.agents = vec![tab_hit, project_hit];
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Input('o')), Action::None);
+        assert_eq!(board.hint_query(), "o");
+        assert!(board.agent_matches(0));
+        assert!(board.agent_matches(1));
+        let text = painted(&board, 20, 110, "ww");
+        // Tab hit must show tab text (not project "learn"); project hit shows "openapi".
+        assert!(
+            text.contains("notes"),
+            "tab hit missing from place column:\n{text}"
+        );
+        assert!(
+            text.contains("openapi"),
+            "project hit missing from place column:\n{text}"
+        );
+        assert!(board.hint_label(0).is_some());
+        assert!(board.hint_label(1).is_some());
     }
 
     #[test]

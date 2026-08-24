@@ -31,8 +31,8 @@ jobs:
 
       - name: Package checksums
         run: |
-          cp target/wasm32-wasip1/release/agent-board.wasm "agent-board-${GITHUB_REF_NAME}.wasm"
-          sha256sum "agent-board-${GITHUB_REF_NAME}.wasm" > "agent-board-${GITHUB_REF_NAME}.wasm.sha256"
+          cp target/wasm32-wasip1/release/zellij-agent-board.wasm "zellij-agent-board-${GITHUB_REF_NAME}.wasm"
+          sha256sum "zellij-agent-board-${GITHUB_REF_NAME}.wasm" > "zellij-agent-board-${GITHUB_REF_NAME}.wasm.sha256"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -40,5 +40,5 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            agent-board-${{ github.ref_name }}.wasm
-            agent-board-${{ github.ref_name }}.wasm.sha256
+            zellij-agent-board-${{ github.ref_name }}.wasm
+            zellij-agent-board-${{ github.ref_name }}.wasm.sha256

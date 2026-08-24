@@ -18,8 +18,10 @@ pub struct Agent {
     pub tab_position: Option<usize>,
     pub pane_title: String,
     pub detail: String,
-    /// Tick clock when the current status began (for working elapsed).
+    /// Plugin tick when status last changed (legacy; working elapsed uses started_at).
     pub status_since: u64,
+    /// Host unix epoch when this working turn began.
+    pub started_at: Option<u64>,
     /// Wall-clock stamp when the agent finished, e.g. `08-24 15:21`.
     pub finished_at: Option<String>,
 }
@@ -167,6 +169,7 @@ mod tests {
             pane_title: String::new(),
             detail: String::new(),
             status_since: 0,
+            started_at: None,
             finished_at: None,
         };
         assert_eq!(agent.project(), "api");

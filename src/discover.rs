@@ -15,15 +15,21 @@ pub struct HookNotice {
     pub id: AgentId,
     pub event: String,
     pub detail: String,
-    /// Optional host wall clock from the hook script, e.g. `08-24 15:21`.
-    pub at: Option<String>,
+    /// Host unix epoch when the hook fired (survives plugin reopen).
+    pub at_epoch: Option<u64>,
+    /// Optional wall stamp for done rows, e.g. `08-24 15:21`.
+    pub at_stamp: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostLine {
     Scan(Found),
     Hook(HookNotice),
-    Meta { hooks_installed: bool },
+    Meta {
+        hooks_installed: bool,
+        /// Host unix epoch from the scan script.
+        epoch: Option<u64>,
+    },
 }
 
 /// One `SCAN session pane tool [argv…]` line from the host script.
@@ -56,14 +62,22 @@ pub fn parse_host_line(line: &str) -> Option<HostLine> {
             let session = parts.next()?.to_string();
             let pane_id = parts.next()?.parse().ok()?;
             let event = parts.next()?.to_string();
-            let mut at = None;
+            let mut at_epoch = None;
+            let mut at_stamp = None;
             let mut detail_parts = Vec::new();
             for part in parts {
-                if at.is_none() {
-                    if let Some(stamp) = part.strip_prefix('@') {
-                        at = Some(stamp.replace('T', " "));
-                        continue;
+                if let Some(rest) = part.strip_prefix('@') {
+                    if let Ok(epoch) = rest.parse::<u64>() {
+                        at_epoch = Some(epoch);
+                    } else if at_stamp.is_none() {
+                        // Legacy `@08-24T15:21` wall stamp.
+                        at_stamp = Some(rest.replace('T', " "));
                     }
+                    continue;
+                }
+                if let Some(rest) = part.strip_prefix('+') {
+                    at_stamp = Some(rest.replace('T', " "));
+                    continue;
                 }
                 detail_parts.push(part.to_string());
             }
@@ -71,18 +85,24 @@ pub fn parse_host_line(line: &str) -> Option<HostLine> {
                 id: AgentId { session, pane_id },
                 event,
                 detail: detail_parts.join(" "),
-                at,
+                at_epoch,
+                at_stamp,
             }))
         }
         "META" => {
             let mut hooks_installed = None;
+            let mut epoch = None;
             for token in parts {
                 if let Some(value) = token.strip_prefix("hooks=") {
                     hooks_installed = Some(value == "1" || value == "true");
                 }
+                if let Some(value) = token.strip_prefix("epoch=") {
+                    epoch = value.parse().ok();
+                }
             }
             Some(HostLine::Meta {
                 hooks_installed: hooks_installed?,
+                epoch,
             })
         }
         _ => None,
@@ -130,7 +150,8 @@ mod tests {
                 },
                 event: "beforeSubmitPrompt".into(),
                 detail: String::new(),
-                at: None,
+                at_epoch: None,
+                at_stamp: None,
             }))
         );
         assert_eq!(
@@ -142,7 +163,21 @@ mod tests {
                 },
                 event: "preToolUse".into(),
                 detail: "Shell cargo test --lib".into(),
-                at: None,
+                at_epoch: None,
+                at_stamp: None,
+            }))
+        );
+        assert_eq!(
+            parse_host_line("HOOK ww 3 stop @1700000000 +08-24T15:21"),
+            Some(HostLine::Hook(super::HookNotice {
+                id: AgentId {
+                    session: "ww".into(),
+                    pane_id: 3,
+                },
+                event: "stop".into(),
+                detail: String::new(),
+                at_epoch: Some(1_700_000_000),
+                at_stamp: Some("08-24 15:21".into()),
             }))
         );
         assert_eq!(
@@ -154,13 +189,22 @@ mod tests {
                 },
                 event: "stop".into(),
                 detail: String::new(),
-                at: Some("08-24 15:21".into()),
+                at_epoch: None,
+                at_stamp: Some("08-24 15:21".into()),
             }))
         );
         assert_eq!(
             parse_host_line("META hooks=0"),
             Some(HostLine::Meta {
-                hooks_installed: false
+                hooks_installed: false,
+                epoch: None
+            })
+        );
+        assert_eq!(
+            parse_host_line("META hooks=1 epoch=1700000120"),
+            Some(HostLine::Meta {
+                hooks_installed: true,
+                epoch: Some(1_700_000_120)
             })
         );
     }

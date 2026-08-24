@@ -23,6 +23,9 @@ pub enum Key {
     Confirm,
     Dismiss,
     ToggleHelp,
+    StartHint,
+    Backspace,
+    Input(char),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,13 +35,23 @@ pub enum Action {
     Jump { session: String, pane_id: u32 },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HintState {
+    labels: Vec<Option<String>>,
+    query: String,
+    jump_prefix: String,
+}
+
 #[derive(Debug, Default)]
 pub struct Board {
     pub agents: Vec<Agent>,
     pub selected: usize,
     pub hooks_installed: bool,
     pub now: u64,
+    /// Host unix epoch; advanced by Timer between scans.
+    pub wall_now: u64,
     pub help_visible: bool,
+    hint: Option<HintState>,
 }
 
 impl Board {
@@ -61,8 +74,14 @@ impl Board {
             match parse_host_line(line) {
                 Some(HostLine::Scan(row)) => found.push(row),
                 Some(HostLine::Hook(notice)) => hooks.push(notice),
-                Some(HostLine::Meta { hooks_installed }) => {
+                Some(HostLine::Meta {
+                    hooks_installed,
+                    epoch,
+                }) => {
                     self.hooks_installed = hooks_installed;
+                    if let Some(epoch) = epoch {
+                        self.wall_now = epoch;
+                    }
                 }
                 None => {}
             }
@@ -72,25 +91,58 @@ impl Board {
 
     fn apply_notices(&mut self, hooks: Vec<HookNotice>) {
         for notice in hooks {
-            self.apply_hook_event(&notice.id, &notice.event, &notice.detail, notice.at.as_deref());
+            self.apply_hook_event(
+                &notice.id,
+                &notice.event,
+                &notice.detail,
+                notice.at_epoch,
+                notice.at_stamp.as_deref(),
+            );
         }
     }
 
-    pub fn apply_hook_event(&mut self, id: &AgentId, event: &str, detail: &str, at: Option<&str>) {
+    pub fn apply_hook_event(
+        &mut self,
+        id: &AgentId,
+        event: &str,
+        detail: &str,
+        at_epoch: Option<u64>,
+        at_stamp: Option<&str>,
+    ) {
         if let Some(status) = Status::from_cursor_hook(event) {
-            self.apply_hook(id, status, detail, at);
+            self.apply_hook(id, status, detail, at_epoch, at_stamp);
         }
     }
 
-    pub fn apply_hook(&mut self, id: &AgentId, status: Status, detail: &str, at: Option<&str>) {
+    pub fn apply_hook(
+        &mut self,
+        id: &AgentId,
+        status: Status,
+        detail: &str,
+        at_epoch: Option<u64>,
+        at_stamp: Option<&str>,
+    ) {
         if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == *id) {
-            if agent.status != status {
+            let changing = agent.status != status;
+            if changing {
                 agent.status_since = self.now;
             }
             agent.status = status;
             match status {
+                Status::Working | Status::Compact => {
+                    agent.finished_at = None;
+                    if changing || agent.started_at.is_none() {
+                        agent.started_at = at_epoch.or_else(|| {
+                            (self.wall_now > 0).then_some(self.wall_now)
+                        });
+                    }
+                    if !detail.is_empty() {
+                        agent.detail = detail.to_string();
+                    }
+                }
                 Status::Done => {
-                    if let Some(stamp) = at.filter(|s| !s.is_empty()) {
+                    agent.started_at = None;
+                    if let Some(stamp) = at_stamp.filter(|s| !s.is_empty()) {
                         agent.finished_at = Some(stamp.to_string());
                     }
                     if !detail.is_empty() {
@@ -100,9 +152,11 @@ impl Board {
                 Status::Idle | Status::Ended => {
                     agent.detail.clear();
                     agent.finished_at = None;
+                    agent.started_at = None;
                 }
                 _ => {
                     agent.finished_at = None;
+                    agent.started_at = None;
                     if !detail.is_empty() {
                         agent.detail = detail.to_string();
                     }
@@ -113,6 +167,9 @@ impl Board {
 
     pub fn tick(&mut self) {
         self.now = self.now.saturating_add(1);
+        if self.wall_now > 0 {
+            self.wall_now = self.wall_now.saturating_add(1);
+        }
     }
 
     pub fn paint(&self, ctx: render::PaintCtx<'_>) -> render::Frame {
@@ -136,31 +193,250 @@ impl Board {
     }
 
     pub fn decide(&mut self, key: Key) -> Action {
+        if self.help_visible {
+            return match key {
+                Key::ToggleHelp | Key::Dismiss => {
+                    self.help_visible = false;
+                    Action::None
+                }
+                _ => Action::None,
+            };
+        }
+        if self.is_hinting() {
+            return match key {
+                Key::Dismiss => {
+                    self.hint = None;
+                    Action::None
+                }
+                Key::StartHint => Action::None,
+                Key::Backspace => {
+                    if let Some(hint) = self.hint.as_mut() {
+                        if hint.jump_prefix.is_empty() {
+                            hint.query.pop();
+                        } else {
+                            hint.jump_prefix.pop();
+                        }
+                    }
+                    self.recompute_hint_labels();
+                    self.reveal_first_hint_match();
+                    Action::None
+                }
+                Key::Input(ch) => self.apply_hint_input(ch),
+                Key::Confirm => self.jump_at(self.selected),
+                Key::Up | Key::Down | Key::ToggleHelp => Action::None,
+            };
+        }
         match key {
             Key::ToggleHelp => {
-                self.help_visible = !self.help_visible;
-                Action::None
-            }
-            Key::Dismiss if self.help_visible => {
-                self.help_visible = false;
+                self.help_visible = true;
                 Action::None
             }
             Key::Dismiss => Action::Dismiss,
             Key::Up => {
-                if !self.help_visible && self.selected > 0 {
+                if self.selected > 0 {
                     self.selected -= 1;
                 }
                 Action::None
             }
             Key::Down => {
-                if !self.help_visible && !self.agents.is_empty() {
+                if !self.agents.is_empty() {
                     self.selected = (self.selected + 1).min(self.agents.len() - 1);
                 }
                 Action::None
             }
-            Key::Confirm if self.help_visible => Action::None,
             Key::Confirm => self.jump_at(self.selected),
+            Key::StartHint => {
+                self.hint = Some(HintState {
+                    labels: vec![None; self.agents.len()],
+                    query: String::new(),
+                    jump_prefix: String::new(),
+                });
+                Action::None
+            }
+            Key::Backspace | Key::Input(_) => Action::None,
         }
+    }
+
+    pub fn is_hinting(&self) -> bool {
+        self.hint.is_some()
+    }
+
+    pub fn hint_query(&self) -> &str {
+        self.hint
+            .as_ref()
+            .map(|hint| hint.query.as_str())
+            .unwrap_or("")
+    }
+
+    pub fn hint_jump_prefix(&self) -> &str {
+        self.hint
+            .as_ref()
+            .map(|hint| hint.jump_prefix.as_str())
+            .unwrap_or("")
+    }
+
+    pub fn hint_label(&self, index: usize) -> Option<&str> {
+        self.hint
+            .as_ref()
+            .and_then(|hint| hint.labels.get(index))
+            .and_then(Option::as_deref)
+    }
+
+    pub fn agent_matches(&self, index: usize) -> bool {
+        let query = self.hint_query();
+        if query.is_empty() {
+            return true;
+        }
+        self.agents
+            .get(index)
+            .is_some_and(|agent| agent_matches(agent, query))
+    }
+
+    /// Which searchable field hit, for paint highlight.
+    /// Prefer session → project → tab.
+    pub fn hint_match_field(&self, index: usize) -> Option<HintField> {
+        let query = self.hint_query();
+        if query.is_empty() {
+            return None;
+        }
+        let agent = self.agents.get(index)?;
+        match_targets(agent)
+            .into_iter()
+            .find_map(|(field, text)| text_match_range(text, query).map(|_| field))
+    }
+
+    pub fn hint_match_range(&self, index: usize) -> Option<(usize, usize)> {
+        let query = self.hint_query();
+        if query.is_empty() {
+            return None;
+        }
+        let agent = self.agents.get(index)?;
+        match_targets(agent)
+            .into_iter()
+            .find_map(|(_, text)| text_match_range(text, query))
+    }
+
+    fn apply_hint_input(&mut self, ch: char) -> Action {
+        let ch = ch.to_ascii_lowercase();
+        let Some(hint) = self.hint.as_ref() else {
+            return Action::None;
+        };
+        if !hint.query.is_empty() {
+            let mut jump_prefix = hint.jump_prefix.clone();
+            jump_prefix.push(ch);
+            let label_matches: Vec<usize> = hint
+                .labels
+                .iter()
+                .enumerate()
+                .filter_map(|(index, label)| {
+                    label
+                        .as_ref()
+                        .is_some_and(|label| label.starts_with(&jump_prefix))
+                        .then_some(index)
+                })
+                .collect();
+            if label_matches.len() == 1
+                && hint.labels[label_matches[0]].as_deref() == Some(jump_prefix.as_str())
+            {
+                return self.jump_at(label_matches[0]);
+            }
+            if !label_matches.is_empty() {
+                if let Some(hint) = self.hint.as_mut() {
+                    hint.jump_prefix = jump_prefix;
+                }
+                return Action::None;
+            }
+        }
+
+        let mut query = hint.query.clone();
+        query.push(ch);
+        let has_matches = self
+            .agents
+            .iter()
+            .any(|agent| agent_matches(agent, &query));
+        if !has_matches {
+            return Action::None;
+        }
+        if let Some(hint) = self.hint.as_mut() {
+            hint.query = query;
+            hint.jump_prefix.clear();
+        }
+        self.recompute_hint_labels();
+        let sole_match = self.hint.as_ref().and_then(|hint| {
+            let matched: Vec<usize> = hint
+                .labels
+                .iter()
+                .enumerate()
+                .filter_map(|(index, label)| label.as_ref().map(|_| index))
+                .collect();
+            (matched.len() == 1).then_some(matched[0])
+        });
+        if let Some(index) = sole_match {
+            return self.jump_at(index);
+        }
+        self.reveal_first_hint_match();
+        Action::None
+    }
+
+    fn recompute_hint_labels(&mut self) {
+        let Some(hint) = self.hint.as_ref() else {
+            return;
+        };
+        let query = hint.query.clone();
+        let matches: Vec<usize> = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter_map(|(index, agent)| {
+                (!query.is_empty() && agent_matches(agent, &query)).then_some(index)
+            })
+            .collect();
+        let mut available: Vec<u8> = HINT_ALPHABET
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                let mut extended = query.clone();
+                extended.push(char::from(*candidate));
+                !self
+                    .agents
+                    .iter()
+                    .any(|agent| agent_matches(agent, &extended))
+            })
+            .collect();
+        if available.is_empty() {
+            available.extend_from_slice(HINT_ALPHABET);
+        }
+        let generated = labels_for(matches.len(), &available);
+        let item_count = self.agents.len();
+        if let Some(hint) = self.hint.as_mut() {
+            hint.labels = vec![None; item_count];
+            for (index, label) in matches.into_iter().zip(generated) {
+                hint.labels[index] = Some(label);
+            }
+        }
+    }
+
+    fn reveal_first_hint_match(&mut self) {
+        if let Some(index) = self
+            .hint
+            .as_ref()
+            .and_then(|hint| hint.labels.iter().position(Option::is_some))
+        {
+            self.selected = index;
+        }
+    }
+
+    fn jump_at(&mut self, index: usize) -> Action {
+        if self.is_hinting() {
+            self.hint = None;
+        }
+        self.agents
+            .get(index)
+            .map(|agent| Action::Jump {
+                session: agent.id.session.clone(),
+                pane_id: agent.id.pane_id,
+            })
+            .unwrap_or(Action::None)
     }
 
     pub fn lines(&self) -> Vec<String> {
@@ -204,6 +480,7 @@ impl Board {
                     .unwrap_or_default(),
                 detail: prior.map(|agent| agent.detail.clone()).unwrap_or_default(),
                 status_since: prior.map(|agent| agent.status_since).unwrap_or(self.now),
+                started_at: prior.and_then(|agent| agent.started_at),
                 finished_at: prior.and_then(|agent| agent.finished_at.clone()),
             });
         }
@@ -230,17 +507,71 @@ impl Board {
             .and_then(|id| self.agents.iter().position(|agent| agent.id == id))
             .unwrap_or(0)
             .min(self.agents.len().saturating_sub(1));
+        if self.is_hinting() {
+            self.recompute_hint_labels();
+        }
     }
+}
 
-    fn jump_at(&self, index: usize) -> Action {
-        self.agents
-            .get(index)
-            .map(|agent| Action::Jump {
-                session: agent.id.session.clone(),
-                pane_id: agent.id.pane_id,
-            })
-            .unwrap_or(Action::None)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintField {
+    Session,
+    Project,
+    Tab,
+}
+
+const HINT_ALPHABET: &[u8] = b"asdfghjklqwertyuiopzxcvbnm";
+
+fn agent_matches(agent: &Agent, query: &str) -> bool {
+    match_targets(agent)
+        .into_iter()
+        .any(|(_, text)| text_match_range(text, query).is_some())
+}
+
+fn match_targets(agent: &Agent) -> Vec<(HintField, &str)> {
+    let mut out = vec![(HintField::Session, agent.id.session.as_str())];
+    let project = agent.project();
+    if project != "-" {
+        out.push((HintField::Project, project));
     }
+    if !agent.tab_name.is_empty() {
+        out.push((HintField::Tab, agent.tab_name.as_str()));
+    }
+    out
+}
+
+fn text_match_range(text: &str, query: &str) -> Option<(usize, usize)> {
+    if query.is_empty() || text.is_empty() {
+        return None;
+    }
+    let text: Vec<char> = text.chars().map(|ch| ch.to_ascii_lowercase()).collect();
+    let query: Vec<char> = query.chars().map(|ch| ch.to_ascii_lowercase()).collect();
+    text.windows(query.len())
+        .position(|window| window == query)
+        .map(|start| (start, query.len()))
+}
+
+fn labels_for(count: usize, alphabet: &[u8]) -> Vec<String> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let base = alphabet.len();
+    let mut width = 1;
+    let mut capacity = base;
+    while capacity < count {
+        width += 1;
+        capacity = capacity.saturating_mul(base);
+    }
+    (0..count)
+        .map(|mut index| {
+            let mut label = vec![alphabet[0]; width];
+            for slot in label.iter_mut().rev() {
+                *slot = alphabet[index % base];
+                index /= base;
+            }
+            String::from_utf8(label).expect("hint alphabet is ASCII")
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -284,12 +615,37 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert!(joined.contains("working"));
         assert!(joined.contains("Shell cargo test --lib"));
         assert!(joined.contains('└'));
-        board.ingest_notice("HOOK ww 3 stop @08-24T15:21\n");
+        board.ingest_notice("HOOK ww 3 stop @1700000000 +08-24T15:21\n");
         assert_eq!(board.agents[1].status, Status::Done);
         assert_eq!(board.agents[1].finished_at.as_deref(), Some("08-24 15:21"));
         let joined = board.lines().join("\n");
         assert!(joined.contains("08-24 15:21"));
         assert_eq!(board.agents.len(), 2);
+    }
+
+    #[test]
+    fn working_elapsed_uses_host_epoch_across_reopen() {
+        let mut board = Board::default();
+        board.ingest(
+            "META hooks=1 epoch=1700000134\n\
+             SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n\
+             HOOK ww 3 beforeSubmitPrompt @1700000000 +08-24T15:00\n",
+        );
+        assert_eq!(board.wall_now, 1_700_000_134);
+        assert_eq!(board.agents[0].started_at, Some(1_700_000_000));
+        let joined = board.lines().join("\n");
+        assert!(joined.contains("2m14s"), "{joined}");
+
+        // Simulate q then Alt+a: fresh board, same spool/hook epoch.
+        let mut reopened = Board::default();
+        reopened.ingest(
+            "META hooks=1 epoch=1700000200\n\
+             SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n\
+             HOOK ww 3 beforeSubmitPrompt @1700000000 +08-24T15:00\n",
+        );
+        assert_eq!(reopened.agents[0].started_at, Some(1_700_000_000));
+        let joined = reopened.lines().join("\n");
+        assert!(joined.contains("3m20s"), "{joined}");
     }
 
     #[test]
@@ -336,6 +692,7 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
             },
             Status::Working,
             "Shell cargo test",
+            Some(1_700_000_000),
             None,
         );
         board.decide(Key::Down);
@@ -366,14 +723,13 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
             },
         )]);
         let lines = board.lines();
-        assert!(lines[0].contains("agent-board"));
         assert!(lines[0].contains("found"));
         assert!(lines.iter().any(|line| line.contains("hooks 未装")));
         let joined = lines.join("\n");
         assert!(joined.contains("found"));
         assert!(joined.contains("no report yet"));
-        assert!(joined.contains("tab:notes"));
-        assert!(joined.contains("pane:3"));
+        assert!(!joined.contains("tab:"));
+        assert!(!joined.contains("pane:"));
     }
 
     #[test]
@@ -444,18 +800,14 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         board.ingest(&scan);
         board.selected = 7;
         let lines = board.lines_for(4);
-        assert!(lines
-            .first()
-            .is_some_and(|line| line.contains("agent-board")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains('›') && line.contains('8')));
+        assert!(lines.first().is_some_and(|line| line.contains("found")));
+        assert!(lines.iter().any(|line| line.contains('›') && line.contains('8')));
         assert!(lines
             .last()
             .is_some_and(|line| line.contains("e go") && line.contains("? help")));
         assert!(!lines
             .iter()
-            .any(|line| line.contains('1') && line.contains('›')));
+            .any(|line| line.contains('›') && line.contains("/1")));
     }
 
     #[test]
@@ -467,6 +819,99 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(board.decide(Key::Confirm), Action::None);
         assert_eq!(board.decide(Key::Dismiss), Action::None);
         assert!(!board.help_visible);
+        assert_eq!(board.decide(Key::Dismiss), Action::Dismiss);
+    }
+
+    #[test]
+    fn flash_sole_tab_match_jumps_immediately() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.agents[0].tab_name = "Geo-DB".into();
+        board.agents[1].tab_name = "notes".into();
+        board.decide(Key::StartHint);
+        assert_eq!(
+            board.decide(Key::Input('g')),
+            Action::Jump {
+                session: "lp".into(),
+                pane_id: 8,
+            }
+        );
+        assert!(!board.is_hinting());
+    }
+
+    #[test]
+    fn flash_ambiguous_query_then_tip_jumps() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.agents[0].tab_name = "notes".into();
+        board.agents[1].tab_name = "logs".into();
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Input('o')), Action::None);
+        assert_eq!(board.hint_query(), "o");
+        assert!(board.hint_label(0).is_some());
+        assert!(board.hint_label(1).is_some());
+        let label = board.hint_label(0).unwrap().to_owned();
+        assert_eq!(
+            board.decide(Key::Input(label.chars().next().unwrap())),
+            Action::Jump {
+                session: "lp".into(),
+                pane_id: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn flash_matches_session_project_tab_not_pane_title_or_detail() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.agents[1].status = Status::Working;
+        board.agents[1].detail = "Shell cargo test".into();
+        board.agents[1].pane_title = "retry".into();
+        board.decide(Key::StartHint);
+        // session/project "ww" is in scope → sole match jumps
+        assert_eq!(
+            board.decide(Key::Input('w')),
+            Action::Jump {
+                session: "ww".into(),
+                pane_id: 3,
+            }
+        );
+        board.decide(Key::StartHint);
+        // pane title / detail / status are out of scope
+        assert_eq!(board.decide(Key::Input('r')), Action::None);
+        assert_eq!(board.hint_query(), "");
+        assert_eq!(board.decide(Key::Input('s')), Action::None);
+        assert_eq!(board.hint_query(), "");
+    }
+
+    #[test]
+    fn flash_matches_tab_name() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.agents[0].workspace = None;
+        board.agents[1].workspace = None;
+        board.agents[0].tab_name = "openapi".into();
+        board.agents[1].tab_name = "main".into();
+        board.agents[0].pane_title = "should-not-match-this".into();
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Input('s')), Action::None);
+        assert_eq!(board.hint_query(), "");
+        assert_eq!(
+            board.decide(Key::Input('o')),
+            Action::Jump {
+                session: "lp".into(),
+                pane_id: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn escape_cancels_flash_before_dismissing() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Dismiss), Action::None);
+        assert!(!board.is_hinting());
         assert_eq!(board.decide(Key::Dismiss), Action::Dismiss);
     }
 }
