@@ -1,13 +1,19 @@
 //! Agent board core. No Zellij types — the WASM adapter maps host events in.
 
 mod agent;
+mod ansi;
 mod discover;
+mod float_size;
 mod floating_state;
+mod render;
 mod status;
+mod theme;
 
 pub use agent::{keep_cursor_agent, workspace_from_argv, Agent, AgentId, PanePlace};
 pub use discover::{parse_host_line, parse_scan_line, Found, HookNotice, HostLine};
+pub use float_size::{float_size_from_config, FloatSize};
 pub use floating_state::FloatingLayerState;
+pub use render::{paint, Frame, PaintCtx};
 pub use status::Status;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +22,7 @@ pub enum Key {
     Down,
     Confirm,
     Dismiss,
+    ToggleHelp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +37,8 @@ pub struct Board {
     pub agents: Vec<Agent>,
     pub selected: usize,
     pub hooks_installed: bool,
+    pub now: u64,
+    pub help_visible: bool,
 }
 
 impl Board {
@@ -75,6 +84,9 @@ impl Board {
 
     pub fn apply_hook(&mut self, id: &AgentId, status: Status, detail: &str) {
         if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == *id) {
+            if agent.status != status {
+                agent.status_since = self.now;
+            }
             agent.status = status;
             match status {
                 Status::Idle | Status::Ended => agent.detail.clear(),
@@ -82,6 +94,14 @@ impl Board {
                 _ => {}
             }
         }
+    }
+
+    pub fn tick(&mut self) {
+        self.now = self.now.saturating_add(1);
+    }
+
+    pub fn paint(&self, ctx: render::PaintCtx<'_>) -> render::Frame {
+        render::paint(self, ctx)
     }
 
     pub fn apply_places<I>(&mut self, places: I)
@@ -102,19 +122,28 @@ impl Board {
 
     pub fn decide(&mut self, key: Key) -> Action {
         match key {
+            Key::ToggleHelp => {
+                self.help_visible = !self.help_visible;
+                Action::None
+            }
+            Key::Dismiss if self.help_visible => {
+                self.help_visible = false;
+                Action::None
+            }
             Key::Dismiss => Action::Dismiss,
             Key::Up => {
-                if self.selected > 0 {
+                if !self.help_visible && self.selected > 0 {
                     self.selected -= 1;
                 }
                 Action::None
             }
             Key::Down => {
-                if !self.agents.is_empty() {
+                if !self.help_visible && !self.agents.is_empty() {
                     self.selected = (self.selected + 1).min(self.agents.len() - 1);
                 }
                 Action::None
             }
+            Key::Confirm if self.help_visible => Action::None,
             Key::Confirm => self.jump_at(self.selected),
         }
     }
@@ -124,56 +153,12 @@ impl Board {
     }
 
     pub fn lines_for(&self, rows: usize) -> Vec<String> {
-        let mut header = vec!["agent-board · cursor".to_string()];
-        if !self.hooks_installed {
-            header.push("hooks 未装".to_string());
-        }
-        let body = if self.agents.is_empty() {
-            vec!["no cursor agents".to_string()]
-        } else {
-            self.agents
-                .iter()
-                .enumerate()
-                .map(|(index, agent)| {
-                    let mark = if index == self.selected { ">" } else { " " };
-                    if agent.detail.is_empty() {
-                        format!(
-                            "{mark}{n}  {path}  {status}",
-                            n = index + 1,
-                            path = agent.place_path(),
-                            status = agent.status.label(),
-                        )
-                    } else {
-                        format!(
-                            "{mark}{n}  {path}  {status}  {detail}",
-                            n = index + 1,
-                            path = agent.place_path(),
-                            status = agent.status.label(),
-                            detail = agent.detail,
-                        )
-                    }
-                })
-                .collect()
-        };
-        let footer = "j/k move   Enter jump   q close".to_string();
-        if rows == usize::MAX || header.len() + body.len() < rows {
-            header.extend(body);
-            header.push(footer);
-            return header;
-        }
-        let body_rows = rows.saturating_sub(header.len() + 1).max(1);
-        let selected = if self.agents.is_empty() {
-            0
-        } else {
-            self.selected.min(body.len().saturating_sub(1))
-        };
-        let mut start = selected.saturating_sub(body_rows / 2);
-        if start + body_rows > body.len() {
-            start = body.len().saturating_sub(body_rows);
-        }
-        header.extend(body.into_iter().skip(start).take(body_rows));
-        header.push(footer);
-        header
+        self.paint(render::PaintCtx {
+            rows,
+            cols: 120,
+            home: "",
+        })
+        .texts()
     }
 
     fn replace_from_scan(&mut self, found: Vec<Found>) {
@@ -203,6 +188,7 @@ impl Board {
                     .map(|agent| agent.pane_title.clone())
                     .unwrap_or_default(),
                 detail: prior.map(|agent| agent.detail.clone()).unwrap_or_default(),
+                status_since: prior.map(|agent| agent.status_since).unwrap_or(self.now),
             });
         }
         self.agents = next;
@@ -278,10 +264,10 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(board.agents[1].status, Status::Working);
         board.ingest_notice("HOOK ww 3 preToolUse Shell cargo test --lib\n");
         assert_eq!(board.agents[1].detail, "Shell cargo test --lib");
-        assert!(board
-            .lines()
-            .iter()
-            .any(|line| line.contains("working") && line.contains("Shell cargo test --lib")));
+        let joined = board.lines().join("\n");
+        assert!(joined.contains("working"));
+        assert!(joined.contains("Shell cargo test --lib"));
+        assert!(joined.contains('└'));
         assert_eq!(board.agents.len(), 2);
     }
 
@@ -358,11 +344,14 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
             },
         )]);
         let lines = board.lines();
-        assert!(lines[0].contains("cursor"));
-        assert_eq!(lines[1], "hooks 未装");
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("ww > notes > agent") && line.contains("found")));
+        assert!(lines[0].contains("agent-board"));
+        assert!(lines[0].contains("found"));
+        assert!(lines.iter().any(|line| line.contains("hooks 未装")));
+        let joined = lines.join("\n");
+        assert!(joined.contains("found"));
+        assert!(joined.contains("no report yet"));
+        assert!(joined.contains("tab:notes"));
+        assert!(joined.contains("pane:3"));
     }
 
     #[test]
@@ -433,15 +422,29 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         board.ingest(&scan);
         board.selected = 7;
         let lines = board.lines_for(4);
-        assert_eq!(
-            lines.first().map(String::as_str),
-            Some("agent-board · cursor")
-        );
-        assert!(lines.iter().any(|line| line.starts_with(">8")));
-        assert_eq!(
-            lines.last().map(String::as_str),
-            Some("j/k move   Enter jump   q close")
-        );
-        assert!(!lines.iter().any(|line| line.contains("#1")));
+        assert!(lines
+            .first()
+            .is_some_and(|line| line.contains("agent-board")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains('›') && line.contains('8')));
+        assert!(lines
+            .last()
+            .is_some_and(|line| line.contains("e go") && line.contains("? help")));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains('1') && line.contains('›')));
+    }
+
+    #[test]
+    fn question_mark_toggles_help_and_esc_closes_it_first() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        assert_eq!(board.decide(Key::ToggleHelp), Action::None);
+        assert!(board.help_visible);
+        assert_eq!(board.decide(Key::Confirm), Action::None);
+        assert_eq!(board.decide(Key::Dismiss), Action::None);
+        assert!(!board.help_visible);
+        assert_eq!(board.decide(Key::Dismiss), Action::Dismiss);
     }
 }

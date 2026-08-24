@@ -18,9 +18,37 @@ pub struct Agent {
     pub tab_position: Option<usize>,
     pub pane_title: String,
     pub detail: String,
+    pub status_since: u64,
 }
 
 impl Agent {
+    pub fn project(&self) -> &str {
+        self.workspace
+            .as_deref()
+            .map(|path| {
+                path.trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(path)
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or("-")
+    }
+
+    pub fn display_task(&self) -> &str {
+        self.pane_title.as_str()
+    }
+
+    pub fn tab_label(&self) -> String {
+        if !self.tab_name.is_empty() {
+            self.tab_name.clone()
+        } else if let Some(position) = self.tab_position {
+            (position + 1).to_string()
+        } else {
+            "-".to_string()
+        }
+    }
+
     pub fn place_path(&self) -> String {
         let tab = if self.tab_name.is_empty() {
             "-"
@@ -106,6 +134,27 @@ mod tests {
             "--workspace",
             "/tmp/w"
         ])));
+    }
+
+    #[test]
+    fn project_is_the_workspace_basename() {
+        use crate::{Agent, AgentId, Status};
+
+        let agent = Agent {
+            id: AgentId {
+                session: "ww".into(),
+                pane_id: 3,
+            },
+            tool: "agent".into(),
+            status: Status::Found,
+            workspace: Some("/tmp/api/".into()),
+            tab_name: String::new(),
+            tab_position: None,
+            pane_title: String::new(),
+            detail: String::new(),
+            status_since: 0,
+        };
+        assert_eq!(agent.project(), "api");
     }
 
     #[test]

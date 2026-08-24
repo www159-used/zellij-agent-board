@@ -6,6 +6,7 @@ description = "Floating dashboard of running coding agents for Zellij"
 license = "AGPL-3.0-only"
 
 [dependencies]
+ratatui = { version = "0.30.2", default-features = false }
 zellij-tile = "0.44"
 
 [lib]

@@ -31,6 +31,33 @@ impl Status {
         }
     }
 
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Failed => "✗",
+            Self::Waiting | Self::Working => "●",
+            Self::IdleWait => "◑",
+            Self::Done => "✓",
+            Self::Compact => "◐",
+            Self::Idle => "○",
+            Self::Found => "◌",
+            Self::Unknown | Self::Ended => "?",
+        }
+    }
+
+    /// Zellij theme slots 0–3, same mapping as zj-agent-mob.
+    pub fn color_level(self) -> usize {
+        match self {
+            Self::Waiting | Self::IdleWait => 2,
+            Self::Working | Self::Compact => 0,
+            Self::Done => 1,
+            Self::Idle | Self::Failed | Self::Found | Self::Unknown | Self::Ended => 3,
+        }
+    }
+
+    pub fn is_error(self) -> bool {
+        matches!(self, Self::Failed)
+    }
+
     /// Cursor `hook_event_name` → status. Unknown names are ignored so a new
     /// hook cannot invent a row or flip state by accident.
     pub fn from_cursor_hook(event: &str) -> Option<Self> {
@@ -70,6 +97,9 @@ mod tests {
         );
         assert_eq!(Status::from_cursor_hook("stop"), Some(Status::Done));
         assert_eq!(Status::from_cursor_hook("sessionEnd"), Some(Status::Ended));
+        assert_eq!(Status::Working.icon(), "●");
+        assert_eq!(Status::Working.color_level(), 0);
+        assert!(!Status::Working.is_error());
     }
 
     #[test]

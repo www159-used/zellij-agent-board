@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use agent_board::{Action, AgentId, Board, FloatingLayerState, Key, PanePlace};
+use agent_board::{
+    float_size_from_config, Action, AgentId, Board, FloatSize, FloatingLayerState, Key, PaintCtx,
+    PanePlace,
+};
 use zellij_tile::prelude::*;
 
 const PLUGIN_NAME: &str = "agent-board";
@@ -24,21 +27,27 @@ struct State {
     tab_names: BTreeMap<(String, usize), String>,
     places: BTreeMap<AgentId, PanePlace>,
     scan_inflight: bool,
+    pane_manifest: Option<PaneManifest>,
+    float_size: FloatSize,
+    enlarge_pending: bool,
+    enlarged_once: bool,
 }
 
 register_plugin!(State);
 
 impl ZellijPlugin for State {
-    fn load(&mut self, _configuration: BTreeMap<String, String>) {
+    fn load(&mut self, configuration: BTreeMap<String, String>) {
         let ids = get_plugin_ids();
         self.own_plugin_id = Some(ids.plugin_id);
         self.client_id = Some(ids.client_id);
+        self.float_size = float_size_from_config(&configuration);
         subscribe(&[
             EventType::Key,
             EventType::SessionUpdate,
             EventType::PaneUpdate,
             EventType::PermissionRequestResult,
             EventType::RunCommandResult,
+            EventType::Timer,
         ]);
         request_permission(&[
             PermissionType::ReadApplicationState,
@@ -58,7 +67,14 @@ impl ZellijPlugin for State {
                     }
                     self.remember_sessions(&fetch_live_sessions());
                     self.request_scan();
+                    self.enlarge_if_floating();
+                    set_timeout(1.0);
                 }
+                true
+            }
+            Event::Timer(_) => {
+                self.board.tick();
+                set_timeout(1.0);
                 true
             }
             Event::SessionUpdate(sessions, _) => {
@@ -72,13 +88,17 @@ impl ZellijPlugin for State {
                 true
             }
             Event::PaneUpdate(manifest) => {
+                self.pane_manifest = Some(manifest);
                 if let Some(session) = self.current_session.clone() {
-                    self.remember_places(places_from_manifest(
-                        &session,
-                        &manifest,
-                        &self.tab_names,
-                    ));
+                    if let Some(manifest) = self.pane_manifest.as_ref() {
+                        self.remember_places(places_from_manifest(
+                            &session,
+                            manifest,
+                            &self.tab_names,
+                        ));
+                    }
                 }
+                self.enlarge_if_floating();
                 true
             }
             Event::RunCommandResult(_code, stdout, _stderr, context) => {
@@ -112,27 +132,75 @@ impl ZellijPlugin for State {
         self.board.agents != before || self.board.hooks_installed != before_hooks
     }
 
-    fn render(&mut self, rows: usize, _cols: usize) {
-        if !self.permissions_granted {
-            print_text_with_coordinates(
-                Text::new("agent-board needs permissions"),
-                0,
-                0,
-                None,
-                None,
-            );
+    fn render(&mut self, rows: usize, cols: usize) {
+        if self.enlarge_pending {
+            self.enlarge_pending = false;
+            self.enlarged_once = true;
             return;
         }
-        let shown = if rows == 0 {
-            Vec::new()
-        } else {
-            self.board.lines_for(rows)
-        };
-        write_plugin_lines(&shown);
+        if !self.can_paint() {
+            return;
+        }
+        let frame = self.board.paint(PaintCtx {
+            rows,
+            cols,
+            home: self.current_session.as_deref().unwrap_or(""),
+        });
+        write_plugin_lines(&frame.lines);
     }
 }
 
 impl State {
+    fn can_paint(&self) -> bool {
+        if !self.permissions_granted {
+            return false;
+        }
+        let Some(own_id) = self.own_plugin_id else {
+            return false;
+        };
+        let Some(manifest) = self.pane_manifest.as_ref() else {
+            return false;
+        };
+        let floating = manifest
+            .panes
+            .values()
+            .flatten()
+            .any(|pane| pane.is_plugin && pane.id == own_id && pane.is_floating);
+        !floating || self.enlarged_once
+    }
+
+    fn enlarge_if_floating(&mut self) {
+        if self.enlarged_once || self.enlarge_pending || !self.permissions_granted {
+            return;
+        }
+        let Some(own_id) = self.own_plugin_id else {
+            return;
+        };
+        let Some(manifest) = self.pane_manifest.as_ref() else {
+            return;
+        };
+        let floating = manifest
+            .panes
+            .values()
+            .flatten()
+            .any(|pane| pane.is_plugin && pane.id == own_id && pane.is_floating);
+        if !floating {
+            return;
+        }
+        let Some(coords) = FloatingPaneCoordinates::new(
+            Some(self.float_size.x.clone()),
+            Some(self.float_size.y.clone()),
+            Some(self.float_size.width.clone()),
+            Some(self.float_size.height.clone()),
+            None,
+            None,
+        ) else {
+            return;
+        };
+        self.enlarge_pending = true;
+        change_floating_panes_coordinates(vec![(PaneId::Plugin(own_id), coords)]);
+    }
+
     fn request_scan(&mut self) {
         if !self.permissions_granted || self.scan_inflight {
             return;
@@ -328,9 +396,10 @@ fn map_key(key: KeyWithModifier) -> Option<Key> {
     }
     match key.bare_key {
         BareKey::Esc | BareKey::Char('q') => Some(Key::Dismiss),
+        BareKey::Char('?') => Some(Key::ToggleHelp),
         BareKey::Up | BareKey::Char('k') | BareKey::Left | BareKey::Char('h') => Some(Key::Up),
         BareKey::Down | BareKey::Char('j') | BareKey::Right | BareKey::Char('l') => Some(Key::Down),
-        BareKey::Enter => Some(Key::Confirm),
+        BareKey::Enter | BareKey::Char('e') => Some(Key::Confirm),
         _ => None,
     }
 }
