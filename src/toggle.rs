@@ -62,6 +62,64 @@ pub fn closes_the_board(close_ids: &[u32], plugin_ids: &[u32]) -> bool {
     !plugin_ids.is_empty() && plugin_ids.iter().all(|id| close_ids.contains(id))
 }
 
+/// What the WASM bridge should close when it sees other same-URL instances.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BridgeClosePlan {
+    None,
+    /// Close these plugin panes; this instance stays (open path / key-repeat).
+    Drop {
+        ids: Vec<u32>,
+    },
+    /// Close the board: TUI plus every plugin id, including this one.
+    Shutdown {
+        ids: Vec<u32>,
+    },
+}
+
+/// `hide_self` while the TUI is up is not a leftover to keep. A later Alt+q
+/// must tear the board down (`close_self`), not spawn another suppressed orphan.
+/// With no TUI, the newest instance owns the open and older (often suppressed)
+/// bridges are dropped.
+pub fn bridge_close_plan(
+    own_id: u32,
+    board_ids: &[u32],
+    opened_at_ms: u64,
+    now_ms: u64,
+    tui_up: bool,
+) -> BridgeClosePlan {
+    if board_ids.len() <= 1 || !board_ids.contains(&own_id) {
+        return BridgeClosePlan::None;
+    }
+    let newest = board_ids.iter().copied().max().unwrap_or(own_id);
+    let others: Vec<u32> = board_ids
+        .iter()
+        .copied()
+        .filter(|id| *id != own_id)
+        .collect();
+    let have_clock = opened_at_ms > 0 && now_ms > 0;
+    let young = have_clock && now_ms.saturating_sub(opened_at_ms) < TOGGLE_DEBOUNCE_MS;
+
+    if tui_up {
+        if young {
+            return BridgeClosePlan::Drop { ids: others };
+        }
+        return BridgeClosePlan::Shutdown {
+            ids: board_ids.to_vec(),
+        };
+    }
+    if own_id == newest {
+        return if others.is_empty() {
+            BridgeClosePlan::None
+        } else {
+            BridgeClosePlan::Drop { ids: others }
+        };
+    }
+    if young {
+        return BridgeClosePlan::None;
+    }
+    BridgeClosePlan::Drop { ids: vec![own_id] }
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -133,5 +191,53 @@ mod tests {
     fn only_a_full_close_hides_the_float() {
         assert!(!closes_the_board(&[9], &[3, 9]));
         assert!(closes_the_board(&[3, 9], &[3, 9]));
+    }
+
+    #[test]
+    fn later_press_with_tui_up_shuts_the_board_down() {
+        use super::{bridge_close_plan, BridgeClosePlan};
+        let opened = 1_000;
+        let now = opened + TOGGLE_DEBOUNCE_MS;
+        assert_eq!(
+            bridge_close_plan(3, &[3, 9], opened, now, true),
+            BridgeClosePlan::Shutdown { ids: vec![3, 9] }
+        );
+    }
+
+    #[test]
+    fn key_repeat_with_tui_up_only_drops_newcomers() {
+        use super::{bridge_close_plan, BridgeClosePlan};
+        let opened = 1_000;
+        assert_eq!(
+            bridge_close_plan(3, &[3, 9], opened, opened + 80, true),
+            BridgeClosePlan::Drop { ids: vec![9] }
+        );
+    }
+
+    #[test]
+    fn open_path_newest_drops_suppressed_older_bridges() {
+        use super::{bridge_close_plan, BridgeClosePlan};
+        assert_eq!(
+            bridge_close_plan(9, &[3, 5, 9], 1_000, 2_000, false),
+            BridgeClosePlan::Drop { ids: vec![3, 5] }
+        );
+        assert_eq!(
+            bridge_close_plan(3, &[3, 5, 9], 1_000, 2_000, false),
+            BridgeClosePlan::Drop { ids: vec![3] }
+        );
+    }
+
+    #[test]
+    fn mixing_foreign_session_ids_shuts_a_new_board_down() {
+        // Plugin ids are per-session. Harvest must only pass the current
+        // session. If a leftover in ww (id 40) is mixed with a new board in
+        // lp (id 2), Alt+q there looks like a second instance and dies.
+        use super::{bridge_close_plan, BridgeClosePlan};
+        let opened = 1_000;
+        let now = opened + TOGGLE_DEBOUNCE_MS;
+        assert_eq!(
+            bridge_close_plan(2, &[2, 40], opened, now, true),
+            BridgeClosePlan::Shutdown { ids: vec![2, 40] }
+        );
     }
 }

@@ -24,9 +24,15 @@ pub struct Agent {
     pub started_at: Option<u64>,
     /// Host unix epoch when the agent finished (done rows).
     pub finished_at: Option<u64>,
+    /// This done cycle was opened (board jump or the pane was just focused).
+    pub visited: bool,
 }
 
 impl Agent {
+    pub fn unread_done(&self) -> bool {
+        self.status == Status::Done && !self.visited
+    }
+
     pub fn project(&self) -> &str {
         self.workspace
             .as_deref()
@@ -74,6 +80,27 @@ pub struct PanePlace {
     pub tab_position: usize,
     pub tab_name: String,
     pub pane_title: String,
+}
+
+impl PanePlace {
+    /// Keep a previously known tab/pane name when a later update is blank.
+    /// Opening the board in another session often sends empty titles for
+    /// everyone else; done/time still arrive from hooks.
+    pub fn keep_names(self, tab_name: &str, pane_title: &str) -> Self {
+        Self {
+            tab_position: self.tab_position,
+            tab_name: if self.tab_name.is_empty() {
+                tab_name.to_string()
+            } else {
+                self.tab_name
+            },
+            pane_title: if self.pane_title.is_empty() {
+                pane_title.to_string()
+            } else {
+                self.pane_title
+            },
+        }
+    }
 }
 
 /// Cursor CLI wrapper argv: keep interactive `agent`, drop one-shot subcommands.
@@ -169,6 +196,7 @@ mod tests {
             status_since: 0,
             started_at: None,
             finished_at: None,
+            visited: false,
         };
         assert_eq!(agent.project(), "api");
     }

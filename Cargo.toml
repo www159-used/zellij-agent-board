@@ -7,7 +7,15 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 ratatui = { version = "0.30.2", default-features = false }
-zellij-tile = "0.44"
+zellij-tile = { version = "0.44", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+crossterm = "0.28"
+serde_json = "1"
+
+[features]
+default = []
+plugin = ["dep:zellij-tile"]
 
 [lib]
 name = "zellij_agent_board"
@@ -16,8 +24,13 @@ path = "src/lib.rs"
 [[bin]]
 name = "zellij-agent-board"
 path = "src/main.rs"
+required-features = ["plugin"]
 test = false
 doctest = false
+
+[[bin]]
+name = "board-tui"
+path = "src/bin/board_tui.rs"
 
 [lints.rust]
 unsafe_code = "deny"

@@ -1,11 +1,14 @@
-//! Agent board core. No Zellij types — the WASM adapter maps host events in.
+//! Agent board core. No Zellij types — WASM and host TUI map events in.
 
 mod agent;
 mod ansi;
 mod discover;
 mod float_size;
 mod floating_state;
+mod protocol;
 mod render;
+#[cfg(not(target_arch = "wasm32"))]
+mod scan;
 mod status;
 mod theme;
 mod toggle;
@@ -14,11 +17,22 @@ pub use agent::{keep_cursor_agent, workspace_from_argv, Agent, AgentId, PanePlac
 pub use discover::{parse_host_line, parse_scan_line, Found, HookNotice, HostLine};
 pub use float_size::{float_size_from_config, FloatSize};
 pub use floating_state::FloatingLayerState;
-pub use render::{paint, Frame, PaintCtx};
+#[cfg(not(target_arch = "wasm32"))]
+pub use protocol::persist_seen;
+pub use protocol::{
+    focus_path, format_focus, format_jump, format_places, format_seen, parse_focus, parse_jump,
+    parse_places, places_path, seen_dir, spool_dir, PIPE_NAME,
+};
+pub use render::{frame_patch, paint, paint_to_size, render_board, Frame, FramePatch, PaintCtx};
+#[cfg(not(target_arch = "wasm32"))]
+pub use scan::{
+    places_from_list_panes_json, scan_host_text, scan_places, scan_places_for,
+    zellij_ids_from_env_blob,
+};
 pub use status::Status;
 pub use toggle::{
-    closes_the_board, duplicate_close_ids, duplicate_close_ids_with_focus, now_ms,
-    TOGGLE_DEBOUNCE_MS,
+    bridge_close_plan, closes_the_board, duplicate_close_ids, duplicate_close_ids_with_focus,
+    now_ms, BridgeClosePlan, TOGGLE_DEBOUNCE_MS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,25 +76,35 @@ pub struct Board {
 }
 
 impl Board {
-    pub fn ingest(&mut self, text: &str) {
-        let (found, hooks) = self.collect_host_lines(text);
+    pub fn ingest(&mut self, text: &str) -> bool {
+        let before = self.agents.clone();
+        let before_hooks = self.hooks_installed;
+        let (found, hooks, seen) = self.collect_host_lines(text);
         self.replace_from_scan(found);
         self.apply_notices(hooks);
+        self.apply_seen(seen);
+        self.hooks_installed != before_hooks || self.agents != before
     }
 
     /// Pipe / spool notice. Updates status on existing rows only; never creates or drops rows.
     pub fn ingest_notice(&mut self, text: &str) {
-        let (_, hooks) = self.collect_host_lines(text);
+        let (_, hooks, seen) = self.collect_host_lines(text);
         self.apply_notices(hooks);
+        self.apply_seen(seen);
     }
 
-    fn collect_host_lines(&mut self, text: &str) -> (Vec<Found>, Vec<HookNotice>) {
+    fn collect_host_lines(
+        &mut self,
+        text: &str,
+    ) -> (Vec<Found>, Vec<HookNotice>, Vec<(AgentId, u64)>) {
         let mut found = Vec::new();
         let mut hooks = Vec::new();
+        let mut seen = Vec::new();
         for line in text.lines() {
             match parse_host_line(line) {
                 Some(HostLine::Scan(row)) => found.push(row),
                 Some(HostLine::Hook(notice)) => hooks.push(notice),
+                Some(HostLine::Seen { id, finished_at }) => seen.push((id, finished_at)),
                 Some(HostLine::Meta {
                     hooks_installed,
                     epoch,
@@ -100,7 +124,7 @@ impl Board {
                 None => {}
             }
         }
-        (found, hooks)
+        (found, hooks, seen)
     }
 
     fn apply_notices(&mut self, hooks: Vec<HookNotice>) {
@@ -145,6 +169,9 @@ impl Board {
             match status {
                 Status::Working | Status::Compact => {
                     agent.finished_at = None;
+                    if changing {
+                        agent.visited = false;
+                    }
                     if changing || agent.started_at.is_none() {
                         agent.started_at =
                             at_epoch.or_else(|| (self.wall_now > 0).then_some(self.wall_now));
@@ -155,6 +182,9 @@ impl Board {
                 }
                 Status::Done => {
                     agent.started_at = None;
+                    if changing {
+                        agent.visited = false;
+                    }
                     agent.finished_at =
                         at_epoch.or_else(|| (self.wall_now > 0).then_some(self.wall_now));
                     if !detail.is_empty() {
@@ -184,24 +214,53 @@ impl Board {
         }
     }
 
+    pub fn needs_clock(&self) -> bool {
+        self.agents
+            .iter()
+            .any(|agent| matches!(agent.status, Status::Working | Status::Compact))
+    }
+
     pub fn paint(&self, ctx: render::PaintCtx<'_>) -> render::Frame {
         render::paint(self, ctx)
     }
 
-    pub fn apply_places<I>(&mut self, places: I)
+    pub fn apply_places<I>(&mut self, places: I) -> bool
     where
         I: IntoIterator<Item = (AgentId, PanePlace)>,
     {
-        let selected_id = self.agents.get(self.selected).map(|agent| agent.id.clone());
+        let mut changed = false;
+        let mut order_changed = false;
+        let mut hint_fields_changed = false;
         for (id, place) in places {
             if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) {
-                agent.tab_name = place.tab_name;
-                agent.tab_position = Some(place.tab_position);
-                agent.pane_title = place.pane_title;
+                let place = place.keep_names(&agent.tab_name, &agent.pane_title);
+                if agent.tab_name != place.tab_name {
+                    agent.tab_name = place.tab_name;
+                    changed = true;
+                    hint_fields_changed = true;
+                }
+                if agent.tab_position != Some(place.tab_position) {
+                    agent.tab_position = Some(place.tab_position);
+                    changed = true;
+                    order_changed = true;
+                }
+                if agent.pane_title != place.pane_title {
+                    agent.pane_title = place.pane_title;
+                    changed = true;
+                }
             }
         }
-        self.sort_agents();
-        self.restore_selection(selected_id);
+        if !changed {
+            return false;
+        }
+        if order_changed {
+            let selected_id = self.agents.get(self.selected).map(|agent| agent.id.clone());
+            self.sort_agents();
+            self.restore_selection(selected_id);
+        } else if hint_fields_changed && self.is_hinting() {
+            self.recompute_hint_labels();
+        }
+        true
     }
 
     pub fn decide(&mut self, key: Key) -> Action {
@@ -435,17 +494,41 @@ impl Board {
         }
     }
 
+    pub fn mark_visited(&mut self, id: &AgentId) -> bool {
+        let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == *id) else {
+            return false;
+        };
+        if !agent.unread_done() {
+            return false;
+        }
+        agent.visited = true;
+        true
+    }
+
+    fn apply_seen(&mut self, seen: Vec<(AgentId, u64)>) {
+        for (id, finished_at) in seen {
+            if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) {
+                if agent.status == Status::Done && agent.finished_at == Some(finished_at) {
+                    agent.visited = true;
+                }
+            }
+        }
+    }
+
     fn jump_at(&mut self, index: usize) -> Action {
         if self.is_hinting() {
             self.hint = None;
         }
-        self.agents
-            .get(index)
-            .map(|agent| Action::Jump {
-                session: agent.id.session.clone(),
-                pane_id: agent.id.pane_id,
-            })
-            .unwrap_or(Action::None)
+        let Some(agent) = self.agents.get_mut(index) else {
+            return Action::None;
+        };
+        if agent.status == Status::Done {
+            agent.visited = true;
+        }
+        Action::Jump {
+            session: agent.id.session.clone(),
+            pane_id: agent.id.pane_id,
+        }
     }
 
     pub fn lines(&self) -> Vec<String> {
@@ -461,7 +544,7 @@ impl Board {
         .texts()
     }
 
-    fn replace_from_scan(&mut self, found: Vec<Found>) {
+    fn replace_from_scan(&mut self, found: Vec<Found>) -> bool {
         let selected_id = self.agents.get(self.selected).map(|agent| agent.id.clone());
         let previous: Vec<Agent> = std::mem::take(&mut self.agents);
         let mut next = Vec::new();
@@ -491,24 +574,21 @@ impl Board {
                 status_since: prior.map(|agent| agent.status_since).unwrap_or(self.now),
                 started_at: prior.and_then(|agent| agent.started_at),
                 finished_at: prior.and_then(|agent| agent.finished_at),
+                visited: prior.is_some_and(|agent| agent.visited),
             });
         }
+        sort_agent_rows(&mut next);
+        if next == previous {
+            self.agents = previous;
+            return false;
+        }
         self.agents = next;
-        self.sort_agents();
         self.restore_selection(selected_id);
+        true
     }
 
     fn sort_agents(&mut self) {
-        self.agents.sort_by(|a, b| {
-            a.id.session
-                .cmp(&b.id.session)
-                .then(
-                    a.tab_position
-                        .unwrap_or(usize::MAX)
-                        .cmp(&b.tab_position.unwrap_or(usize::MAX)),
-                )
-                .then(a.id.pane_id.cmp(&b.id.pane_id))
-        });
+        sort_agent_rows(&mut self.agents);
     }
 
     fn restore_selection(&mut self, selected_id: Option<AgentId>) {
@@ -520,6 +600,19 @@ impl Board {
             self.recompute_hint_labels();
         }
     }
+}
+
+fn sort_agent_rows(agents: &mut [Agent]) {
+    agents.sort_by(|a, b| {
+        a.id.session
+            .cmp(&b.id.session)
+            .then(
+                a.tab_position
+                    .unwrap_or(usize::MAX)
+                    .cmp(&b.tab_position.unwrap_or(usize::MAX)),
+            )
+            .then(a.id.pane_id.cmp(&b.id.pane_id))
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -585,7 +678,7 @@ fn labels_for(count: usize, alphabet: &[u8]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Agent, AgentId, Board, Key, PanePlace, Status};
+    use super::{persist_seen, seen_dir, Action, Agent, AgentId, Board, Key, PanePlace, Status};
 
     fn ingest_two(board: &mut Board) {
         board.ingest(
@@ -630,6 +723,80 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         let joined = board.lines().join("\n");
         assert!(joined.contains("ago"), "{joined}");
         assert_eq!(board.agents.len(), 2);
+        assert!(board.agents[1].unread_done());
+    }
+
+    #[test]
+    fn done_without_a_visit_is_unread_until_jump() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.ingest_notice("HOOK ww 3 stop @1700000000\n");
+        assert!(board.agents[1].unread_done());
+        assert!(board.lines().join("\n").contains('!'));
+
+        board.selected = 1;
+        assert_eq!(
+            board.decide(Key::Confirm),
+            Action::Jump {
+                session: "ww".into(),
+                pane_id: 3,
+            }
+        );
+        assert!(!board.agents[1].unread_done());
+        assert!(!board.lines().join("\n").contains('!'));
+    }
+
+    #[test]
+    fn seen_line_marks_the_matching_done_cycle() {
+        let mut board = Board::default();
+        board.ingest(
+            "META hooks=1\n\
+             SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n\
+             HOOK ww 3 stop @1700000000\n\
+             SEEN ww 3 1700000000\n",
+        );
+        assert!(!board.agents[0].unread_done());
+    }
+
+    #[test]
+    fn stale_seen_does_not_mark_a_new_done_cycle() {
+        let mut board = Board::default();
+        board.ingest(
+            "META hooks=1\n\
+             SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n\
+             HOOK ww 3 stop @1700000000\n\
+             SEEN ww 3 1690000000\n",
+        );
+        assert!(board.agents[0].unread_done());
+    }
+
+    #[test]
+    fn a_new_done_cycle_is_unread_again() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.ingest_notice("HOOK ww 3 stop @1700000000\n");
+        let id = board.agents[1].id.clone();
+        assert!(board.mark_visited(&id));
+        assert!(!board.agents[1].unread_done());
+        board.ingest_notice("HOOK ww 3 beforeSubmitPrompt @1700000100\n");
+        board.ingest_notice("HOOK ww 3 stop @1700000200\n");
+        assert!(board.agents[1].unread_done());
+    }
+
+    #[test]
+    fn persist_seen_survives_a_reopen_ingest() {
+        persist_seen("ww", 3, 1_700_000_000);
+        let path = seen_dir().join("ww-3");
+        let body = std::fs::read_to_string(&path).expect("seen file");
+        let mut board = Board::default();
+        board.ingest(&format!(
+            "META hooks=1\n\
+             SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n\
+             HOOK ww 3 stop @1700000000\n\
+             {body}"
+        ));
+        assert!(!board.agents[0].unread_done());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -743,6 +910,79 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(board.selected, 1);
         assert_eq!(board.agents[1].status, Status::Working);
         assert_eq!(board.agents[1].detail, "Shell cargo test");
+    }
+
+    #[test]
+    fn identical_rescan_is_a_no_op_even_while_hinting() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        let place = PanePlace {
+            tab_position: 0,
+            tab_name: "openapi".into(),
+            pane_title: String::new(),
+        };
+        assert!(board.apply_places([(
+            AgentId {
+                session: "lp".into(),
+                pane_id: 8,
+            },
+            place.clone(),
+        )]));
+        board.decide(Key::StartHint);
+        let labels = board.hint.as_ref().map(|hint| hint.labels.clone());
+        assert!(!board.ingest(
+            "\
+META hooks=1 epoch=1700000120
+SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww
+SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
+"
+        ));
+        assert_eq!(board.hint.as_ref().map(|hint| hint.labels.clone()), labels);
+        assert!(!board.apply_places([(
+            AgentId {
+                session: "lp".into(),
+                pane_id: 8,
+            },
+            place,
+        )]));
+    }
+
+    #[test]
+    fn blank_place_update_does_not_wipe_pane_title() {
+        let mut board = Board::default();
+        board.ingest(
+            "META hooks=1 epoch=1700000134\n\
+             SCAN mysql_syncer 2 agent /Users/ww/.local/bin/agent\n\
+             HOOK mysql_syncer 2 stop @1700000000 +08-25T14:11\n",
+        );
+        assert!(board.apply_places([(
+            AgentId {
+                session: "mysql_syncer".into(),
+                pane_id: 2,
+            },
+            PanePlace {
+                tab_position: 1,
+                tab_name: "refactor/use-yotta".into(),
+                pane_title: "refactor/use-yotta".into(),
+            },
+        )]));
+        assert!(board.agents[0].pane_title.contains("use-yotta"));
+        assert!(!board.apply_places([(
+            AgentId {
+                session: "mysql_syncer".into(),
+                pane_id: 2,
+            },
+            PanePlace {
+                tab_position: 1,
+                tab_name: String::new(),
+                pane_title: String::new(),
+            },
+        )]));
+        assert_eq!(board.agents[0].tab_name, "refactor/use-yotta");
+        assert_eq!(board.agents[0].pane_title, "refactor/use-yotta");
+        let text = board.lines().join("\n");
+        assert!(text.contains("done"), "{text}");
+        assert!(text.contains("use-yotta"), "{text}");
     }
 
     #[test]

@@ -1,30 +1,29 @@
-//! Zellij WASM adapter. Core list / jump / hook merge lives in `zellij_agent_board`.
+//! Zellij WASM bridge. Scan / paint / keys live in the host `board-tui`.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use zellij_agent_board::{
-    closes_the_board, duplicate_close_ids_with_focus, float_size_from_config, now_ms, Action,
-    AgentId, Board, FloatSize, FloatingLayerState, Key, PaintCtx, PanePlace, TOGGLE_DEBOUNCE_MS,
+    bridge_close_plan, float_size_from_config, format_focus, format_places, now_ms, parse_jump,
+    AgentId, BridgeClosePlan, FloatSize, FloatingLayerState, PanePlace,
 };
 use zellij_tile::prelude::*;
 
 const PLUGIN_NAME: &str = "zellij-agent-board";
-/// Default Zellij float is a title strip. Treat anything this large as enlarged.
-const ENLARGE_MIN_ROWS: usize = 12;
-const ENLARGE_MIN_COLS: usize = 40;
-/// One enlarge retry after open. After this, never resize again (leftovers
-/// must not keep calling change_floating_panes_coordinates).
-const OPEN_ENLARGE_RETRY_MS: u64 = 400;
-const SCAN_LAUNCHER: &str = r#"
-s="${ZELLIJ_AGENT_BOARD_SCAN:-$HOME/.config/zellij/plugins/zellij-agent-board-scan.sh}"
-if [ -x "$s" ]; then exec "$s"; fi
-if [ -x ./scripts/scan-agents.sh ]; then exec ./scripts/scan-agents.sh; fi
-printf 'META hooks=0\n'
+const PLACES_WRITER: &str = r#"
+dir="${TMPDIR:-/tmp}/zellij-agent-board"
+mkdir -p "$dir"
+printf '%s' "${ZAB_PLACES}" >"$dir/places"
+"#;
+
+const FOCUS_WRITER: &str = r#"
+dir="${TMPDIR:-/tmp}/zellij-agent-board"
+mkdir -p "$dir"
+printf '%s' "${ZAB_FOCUS}" >"$dir/focus"
 "#;
 
 #[derive(Default)]
 struct State {
-    board: Board,
     own_plugin_id: Option<u32>,
     client_id: Option<ClientId>,
     permissions_granted: bool,
@@ -32,15 +31,18 @@ struct State {
     current_session: Option<String>,
     tab_names: BTreeMap<(String, usize), String>,
     places: BTreeMap<AgentId, PanePlace>,
-    scan_inflight: bool,
+    known_board_ids: std::collections::BTreeSet<u32>,
+    last_places: String,
     pane_manifest: Option<PaneManifest>,
     float_size: FloatSize,
-    enlarge_pending: bool,
-    enlarge_issued: bool,
-    enlarged_once: bool,
     opened_at_ms: u64,
-    /// Sticky: hidden or unfocused. Next Alt+q must keep the newcomer.
-    suppressed: bool,
+    dying: bool,
+    tui_path: String,
+    tui_id: Option<u32>,
+    tui_visible: bool,
+    tui_attempts: u8,
+    launch_focus_written: bool,
+    bridge_hidden: bool,
 }
 
 register_plugin!(State);
@@ -52,14 +54,15 @@ impl ZellijPlugin for State {
         self.client_id = Some(ids.client_id);
         self.opened_at_ms = now_ms();
         self.float_size = float_size_from_config(&configuration);
+        self.tui_path = tui_path(&configuration);
         subscribe(&[
-            EventType::Key,
             EventType::SessionUpdate,
             EventType::PaneUpdate,
             EventType::PermissionRequestResult,
-            EventType::RunCommandResult,
+            EventType::CommandPaneOpened,
+            EventType::CommandPaneExited,
+            EventType::PaneClosed,
             EventType::Timer,
-            EventType::Visible,
         ]);
         request_permission(&[
             PermissionType::ReadApplicationState,
@@ -77,52 +80,45 @@ impl ZellijPlugin for State {
                     if let Some(id) = self.own_plugin_id {
                         rename_plugin_pane(id, PLUGIN_NAME);
                     }
-                    // Same order as overview: toggle, enlarge, then host work.
-                    self.close_if_duplicate();
-                    self.enlarge_if_floating();
-                    self.remember_sessions(&fetch_live_sessions());
-                    self.request_scan();
-                    // One short tick so the first enlarge can run after PaneUpdate.
-                    set_timeout(0.05);
+                    self.enlarge_self();
+                    if !self.close_if_duplicate() {
+                        set_timeout(0.1);
+                    }
                 }
-                true
+                false
             }
             Event::Timer(_) => {
-                self.board.tick();
-                if self.within_open_enlarge_window() && !self.enlarged_once {
-                    self.enlarge_pending = false;
-                    self.enlarge_issued = false;
-                    self.enlarge_if_floating();
-                }
-                if !self.suppressed {
-                    self.request_scan();
-                }
-                set_timeout(1.0);
-                true
-            }
-            Event::Visible(false) => {
-                if !self.is_young() {
-                    self.suppressed = true;
+                if !self.dying && self.permissions_granted && self.tui_id.is_none() {
+                    self.ensure_tui();
+                    if self.tui_id.is_none() && self.tui_attempts < 3 {
+                        set_timeout(0.4);
+                    }
                 }
                 false
             }
             Event::SessionUpdate(sessions, _) => {
                 if let Some(session) = sessions.iter().find(|session| session.is_current_session) {
-                    self.current_session = Some(session.name.clone());
+                    if self.current_session.as_deref() != Some(session.name.as_str()) {
+                        self.current_session = Some(session.name.clone());
+                    }
                     self.floating_layer
                         .capture(self.previous_pane_was_floating(session));
-                    self.mark_suppressed_if_layer_hidden(session);
+                    self.remember_launch_focus(session);
                 }
+                self.harvest_board_ids_from_sessions(&sessions);
                 self.remember_sessions(&sessions);
-                // Scan on open + timer. SessionUpdate storms on LaunchPlugin
-                // and each scan is pgrep/lsof across every agent.
-                true
+                false
             }
             Event::PaneUpdate(manifest) => {
+                self.harvest_board_ids_from_manifest(&manifest);
                 self.pane_manifest = Some(manifest);
-                self.mark_suppressed_if_unfocused();
-                self.close_if_duplicate();
-                self.enlarge_if_floating();
+                if self.close_if_duplicate() {
+                    return false;
+                }
+                self.adopt_existing_tui();
+                if self.tui_id.is_some() {
+                    self.hide_bridge_keep_tui();
+                }
                 if let Some(session) = self.current_session.clone() {
                     if let Some(manifest) = self.pane_manifest.as_ref() {
                         self.remember_places(places_from_manifest(
@@ -132,25 +128,24 @@ impl ZellijPlugin for State {
                         ));
                     }
                 }
-                // overview returns false here; we still need a paint after places.
-                true
+                false
             }
-            Event::RunCommandResult(_code, stdout, _stderr, context) => {
-                if context.get("zellij_agent_board").map(String::as_str) != Some("scan") {
-                    return false;
+            Event::CommandPaneOpened(pane_id, context) => {
+                if context.get("zellij_agent_board").map(String::as_str) == Some("tui") {
+                    self.tui_id = Some(pane_id);
+                    self.tui_visible = true;
+                    self.hide_bridge_keep_tui();
                 }
-                self.scan_inflight = false;
-                let text = String::from_utf8_lossy(&stdout);
-                self.board.ingest(&text);
-                self.push_places();
-                true
+                false
             }
-            Event::Key(key) => {
-                let Some(mapped) = map_key(key, self.board.is_hinting()) else {
-                    return false;
-                };
-                let action = self.board.decide(mapped);
-                self.apply(action)
+            Event::CommandPaneExited(pane_id, _, _)
+            | Event::PaneClosed(PaneId::Terminal(pane_id)) => {
+                if self.tui_id == Some(pane_id) {
+                    self.tui_id = None;
+                    self.tui_visible = false;
+                    self.shutdown_bridge();
+                }
+                false
             }
             _ => false,
         }
@@ -160,224 +155,311 @@ impl ZellijPlugin for State {
         let Some(payload) = pipe_message.payload.as_deref() else {
             return false;
         };
-        let before_hooks = self.board.hooks_installed;
-        let before = self.board.agents.clone();
-        self.board.ingest_notice(payload);
-        self.board.agents != before || self.board.hooks_installed != before_hooks
+        if let Some((session, pane_id)) = parse_jump(payload) {
+            if self.current_session.as_deref() == Some(session.as_str()) {
+                focus_terminal_pane(pane_id, false, false);
+            } else {
+                switch_session_with_focus(&session, None, Some((pane_id, false)));
+            }
+            let ids = self.all_board_plugin_ids();
+            self.shutdown_board(&ids);
+        }
+        false
     }
 
-    fn render(&mut self, rows: usize, cols: usize) {
-        if self.enlarge_pending {
-            self.enlarge_pending = false;
-            if viewport_is_large(rows, cols) {
-                self.enlarged_once = true;
-            }
-        } else if viewport_is_large(rows, cols) {
-            self.enlarged_once = true;
-        }
-        if !self.can_paint() {
-            return;
-        }
-        let frame = self.board.paint(PaintCtx {
-            rows,
-            cols,
-            home: self.current_session.as_deref().unwrap_or(""),
-        });
-        write_plugin_lines(&frame.lines);
-    }
+    fn render(&mut self, _rows: usize, _cols: usize) {}
 }
 
 impl State {
-    fn can_paint(&self) -> bool {
-        // Paint as soon as we have permission. overview waits for enlarge and
-        // can stay a title strip; we still grow once, but do not skip the frame.
-        self.permissions_granted && self.own_plugin_id.is_some()
-    }
-
-    fn within_open_enlarge_window(&self) -> bool {
-        !self.enlarged_once
-            && self.opened_at_ms > 0
-            && now_ms().saturating_sub(self.opened_at_ms) < OPEN_ENLARGE_RETRY_MS
-    }
-
-    /// Copied from overview: second LaunchPlugin opens a sibling; oldest closes all.
-    /// A leftover that was hidden only closes itself so the newcomer can stay.
-    fn close_if_duplicate(&mut self) {
-        if !self.permissions_granted || !self.own_pane_is_listed() {
-            return;
+    fn close_if_duplicate(&mut self) -> bool {
+        if self.dying || !self.permissions_granted {
+            return self.dying;
         }
-        let Some(manifest) = self.pane_manifest.as_ref() else {
-            return;
-        };
-        let Some(own_id) = self.own_plugin_id else {
-            return;
-        };
-        let panes = manifest.panes.values().flatten().collect::<Vec<_>>();
-        let Some(own_url) = panes
-            .iter()
-            .find(|pane| pane.is_plugin && pane.id == own_id)
-            .and_then(|pane| pane.plugin_url.as_deref())
-        else {
-            return;
-        };
-        let board_ids: Vec<u32> = panes
-            .iter()
-            .filter(|pane| pane.is_plugin && same_board_plugin(pane.plugin_url.as_deref(), own_url))
-            .map(|pane| pane.id)
-            .collect();
-        let close_ids = duplicate_close_ids_with_focus(
-            own_id,
-            &board_ids,
-            self.opened_at_ms,
-            now_ms(),
-            self.suppressed,
-        );
-        if close_ids.is_empty() {
-            return;
-        }
-        if closes_the_board(&close_ids, &board_ids) {
-            self.suppressed = true;
-            self.restore_floating_layer();
-        }
-        for id in close_ids {
-            close_pane_with_id(PaneId::Plugin(id));
-        }
-    }
-
-    fn is_young(&self) -> bool {
-        self.opened_at_ms > 0 && now_ms().saturating_sub(self.opened_at_ms) < TOGGLE_DEBOUNCE_MS
-    }
-
-    fn mark_suppressed_if_unfocused(&mut self) {
-        if self.is_young() {
-            return;
-        }
-        let Some(own_id) = self.own_plugin_id else {
-            return;
-        };
-        let Some(manifest) = self.pane_manifest.as_ref() else {
-            return;
-        };
-        if manifest
-            .panes
-            .values()
-            .flatten()
-            .any(|pane| pane.is_plugin && pane.id == own_id && !pane.is_focused)
-        {
-            self.suppressed = true;
-        }
-    }
-
-    /// Hide leaves the leftover focused; unfocused/Visible often never fire.
-    /// The tab that owns this pane is the only float-layer flag we can trust.
-    fn mark_suppressed_if_layer_hidden(&mut self, session: &SessionInfo) {
-        if self.is_young() {
-            return;
-        }
-        let Some(own_id) = self.own_plugin_id else {
-            return;
-        };
-        let Some(tab_pos) = session.panes.panes.iter().find_map(|(&tab, panes)| {
-            panes
-                .iter()
-                .any(|pane| pane.is_plugin && pane.id == own_id)
-                .then_some(tab)
-        }) else {
-            return;
-        };
-        if session
-            .tabs
-            .iter()
-            .any(|tab| tab.position == tab_pos && !tab.are_floating_panes_visible)
-        {
-            self.suppressed = true;
-        }
-    }
-
-    fn own_pane_is_listed(&self) -> bool {
         let Some(own_id) = self.own_plugin_id else {
             return false;
         };
-        self.pane_manifest.as_ref().is_some_and(|manifest| {
+        let board_ids = self.all_board_plugin_ids();
+        if board_ids.len() <= 1 {
+            return false;
+        }
+        let tui_up = self.tui_id.is_some() || self.find_tui_pane().is_some();
+        match bridge_close_plan(own_id, &board_ids, self.opened_at_ms, now_ms(), tui_up) {
+            BridgeClosePlan::None => false,
+            BridgeClosePlan::Drop { ids } => {
+                let dying = ids.contains(&own_id);
+                if dying {
+                    self.dying = true;
+                }
+                for id in ids {
+                    close_pane_with_id(PaneId::Plugin(id));
+                }
+                if dying {
+                    close_self();
+                }
+                dying
+            }
+            BridgeClosePlan::Shutdown { ids } => {
+                self.shutdown_board(&ids);
+                true
+            }
+        }
+    }
+
+    fn ensure_tui(&mut self) {
+        if self.dying || !self.permissions_granted {
+            return;
+        }
+        self.adopt_existing_tui();
+        if self.tui_id.is_some() {
+            self.hide_bridge_keep_tui();
+            return;
+        }
+        if self.tui_attempts >= 3 || self.find_tui_pane().is_some() {
+            return;
+        }
+        self.open_tui();
+    }
+
+    fn find_tui_pane(&self) -> Option<u32> {
+        self.pane_manifest.as_ref().and_then(|manifest| {
             manifest
                 .panes
                 .values()
                 .flatten()
-                .any(|pane| pane.is_plugin && pane.id == own_id)
+                .find(|pane| is_board_tui(pane))
+                .map(|pane| pane.id)
         })
     }
 
-    fn restore_floating_layer(&self) {
-        if self.floating_layer.should_hide_on_close() {
-            let _ = hide_floating_panes(None);
+    fn adopt_existing_tui(&mut self) {
+        if self.tui_id.is_some() {
+            return;
+        }
+        if let Some(id) = self.find_tui_pane() {
+            self.tui_id = Some(id);
+            self.tui_visible = true;
         }
     }
 
-    fn enlarge_if_floating(&mut self) {
-        if self.suppressed
-            || self.enlarged_once
-            || self.enlarge_pending
-            || self.enlarge_issued
-            || !self.permissions_granted
+    fn open_tui(&mut self) {
+        self.tui_attempts = self.tui_attempts.saturating_add(1);
+        // `zellij action new-pane --floating` is the path we already verified
+        // from the host. Opening a command pane from inside plugin `update`
+        // either returns None or lands in a hidden float layer.
+        let mut context = BTreeMap::new();
+        context.insert("zellij_agent_board".to_string(), "tui-launch".to_string());
+        let mut args = vec!["zellij".to_string()];
+        if let Some(session) = self
+            .current_session
+            .as_deref()
+            .filter(|name| !name.is_empty())
         {
-            return;
+            args.push("--session".into());
+            args.push(session.to_string());
         }
-        let Some(own_id) = self.own_plugin_id else {
+        args.extend([
+            "action".into(),
+            "new-pane".into(),
+            "--floating".into(),
+            "--near-current-pane".into(),
+            "--close-on-exit".into(),
+            "--name".into(),
+            "board-tui".into(),
+            "--width".into(),
+            self.float_size.width.clone(),
+            "--height".into(),
+            self.float_size.height.clone(),
+            "--x".into(),
+            self.float_size.x.clone(),
+            "--y".into(),
+            self.float_size.y.clone(),
+            "--".into(),
+            self.tui_path.clone(),
+        ]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_command(&args, context);
+    }
+
+    fn enlarge_self(&self) {
+        let Some(id) = self.own_plugin_id else {
             return;
         };
-        let Some(manifest) = self.pane_manifest.as_ref() else {
+        let Some(coords) = self.float_coords() else {
             return;
         };
-        let floating = manifest
-            .panes
-            .values()
-            .flatten()
-            .any(|pane| pane.is_plugin && pane.id == own_id && pane.is_floating);
-        if !floating {
-            return;
-        }
-        let Some(coords) = FloatingPaneCoordinates::new(
+        change_floating_panes_coordinates(vec![(PaneId::Plugin(id), coords)]);
+    }
+
+    fn float_coords(&self) -> Option<FloatingPaneCoordinates> {
+        FloatingPaneCoordinates::new(
             Some(self.float_size.x.clone()),
             Some(self.float_size.y.clone()),
             Some(self.float_size.width.clone()),
             Some(self.float_size.height.clone()),
             None,
             None,
-        ) else {
-            return;
-        };
-        self.enlarge_pending = true;
-        self.enlarge_issued = true;
-        change_floating_panes_coordinates(vec![(PaneId::Plugin(own_id), coords)]);
+        )
     }
 
-    fn request_scan(&mut self) {
-        if self.suppressed || !self.permissions_granted || self.scan_inflight {
+    fn hide_bridge_keep_tui(&mut self) {
+        if self.bridge_hidden {
             return;
         }
-        self.scan_inflight = true;
-        let mut context = BTreeMap::new();
-        context.insert("zellij_agent_board".to_string(), "scan".to_string());
-        run_command(&["/bin/bash", "-lc", SCAN_LAUNCHER], context);
+        let _ = show_floating_panes(None);
+        if let Some(id) = self.tui_id {
+            show_pane_with_id(PaneId::Terminal(id), true, true);
+        }
+        hide_self();
+        let _ = show_floating_panes(None);
+        if let Some(id) = self.tui_id {
+            show_pane_with_id(PaneId::Terminal(id), true, true);
+        }
+        self.bridge_hidden = true;
+    }
+
+    fn shutdown_bridge(&mut self) {
+        self.dying = true;
+        close_self();
+    }
+
+    fn shutdown_board(&mut self, plugin_ids: &[u32]) {
+        self.dying = true;
+        if let Some(id) = self.tui_id.or_else(|| self.find_tui_pane()) {
+            close_pane_with_id(PaneId::Terminal(id));
+        }
+        if let Some(manifest) = self.pane_manifest.as_ref() {
+            for pane in manifest.panes.values().flatten() {
+                if is_board_tui(pane) {
+                    close_pane_with_id(PaneId::Terminal(pane.id));
+                }
+            }
+        }
+        for id in plugin_ids {
+            close_pane_with_id(PaneId::Plugin(*id));
+        }
+        if self.floating_layer.should_hide_on_close() {
+            let _ = hide_floating_panes(None);
+        }
+        close_self();
+    }
+
+    fn harvest_board_ids_from_sessions(&mut self, sessions: &[SessionInfo]) {
+        let Some(session) = sessions.iter().find(|session| session.is_current_session) else {
+            return;
+        };
+        // Plugin pane ids are unique only inside one session. Mixing ww leftover
+        // ids (often high) with a new board in lp/learn (often low) made
+        // bridge_close_plan treat the new Alt+q as a second instance and shut
+        // the board down — empty "no cursor agents" or a flash then gone.
+        self.known_board_ids.clear();
+        for pane in session.panes.panes.values().flatten() {
+            if is_board_plugin(pane) {
+                self.known_board_ids.insert(pane.id);
+            }
+        }
+    }
+
+    fn harvest_board_ids_from_manifest(&mut self, manifest: &PaneManifest) {
+        for pane in manifest.panes.values().flatten() {
+            if is_board_plugin(pane) {
+                self.known_board_ids.insert(pane.id);
+            }
+        }
+    }
+
+    fn all_board_plugin_ids(&self) -> Vec<u32> {
+        let mut ids = self.known_board_ids.clone();
+        if let Some(own_id) = self.own_plugin_id {
+            ids.insert(own_id);
+        }
+        ids.into_iter().collect()
     }
 
     fn remember_sessions(&mut self, sessions: &[SessionInfo]) {
-        self.tab_names.extend(tab_names_from_sessions(sessions));
+        for (key, name) in tab_names_from_sessions(sessions) {
+            self.tab_names.insert(key, name);
+        }
         self.remember_places(places_from_sessions(sessions));
     }
 
     fn remember_places(&mut self, places: Vec<(AgentId, PanePlace)>) {
+        let mut stored = false;
         for (id, place) in places {
-            self.places.insert(id, place);
+            let place = match self.places.get(&id) {
+                Some(old) => place.keep_names(&old.tab_name, &old.pane_title),
+                None => place,
+            };
+            if self.places.get(&id) != Some(&place) {
+                self.places.insert(id, place);
+                stored = true;
+            }
         }
-        self.push_places();
+        if stored {
+            self.flush_places();
+        }
     }
 
-    fn push_places(&mut self) {
-        self.board.apply_places(
+    fn flush_places(&mut self) {
+        let text = format_places(
             self.places
                 .iter()
                 .map(|(id, place)| (id.clone(), place.clone())),
+        );
+        if text == self.last_places {
+            return;
+        }
+        self.last_places = text.clone();
+        let mut env = BTreeMap::new();
+        env.insert("ZAB_PLACES".to_string(), text);
+        let mut context = BTreeMap::new();
+        context.insert("zellij_agent_board".to_string(), "places".to_string());
+        run_command_with_env_variables_and_cwd(
+            &["/bin/bash", "-lc", PLACES_WRITER],
+            env,
+            PathBuf::from("."),
+            context,
+        );
+    }
+
+    fn remember_launch_focus(&mut self, session: &SessionInfo) {
+        if self.launch_focus_written || session.name.is_empty() {
+            return;
+        }
+        let Some(pane_id) = self.previous_terminal_pane(session) else {
+            return;
+        };
+        self.flush_focus(&session.name, pane_id);
+        self.launch_focus_written = true;
+    }
+
+    fn previous_terminal_pane(&self, session: &SessionInfo) -> Option<u32> {
+        let own = PaneId::Plugin(self.own_plugin_id?);
+        session
+            .pane_history
+            .get(&self.client_id?)?
+            .iter()
+            .rev()
+            .find_map(|id| {
+                if *id == own {
+                    return None;
+                }
+                match id {
+                    PaneId::Terminal(pane) => Some(*pane),
+                    PaneId::Plugin(_) => None,
+                }
+            })
+    }
+
+    fn flush_focus(&self, session: &str, pane_id: u32) {
+        let mut env = BTreeMap::new();
+        env.insert("ZAB_FOCUS".to_string(), format_focus(session, pane_id));
+        let mut context = BTreeMap::new();
+        context.insert("zellij_agent_board".to_string(), "focus".to_string());
+        run_command_with_env_variables_and_cwd(
+            &["/bin/bash", "-lc", FOCUS_WRITER],
+            env,
+            PathBuf::from("."),
+            context,
         );
     }
 
@@ -402,41 +484,33 @@ impl State {
             .find(|pane_id| **pane_id != own_pane)
             .copied()
     }
-
-    fn apply(&mut self, action: Action) -> bool {
-        match action {
-            Action::Dismiss => {
-                self.dismiss();
-                false
-            }
-            Action::Jump { session, pane_id } => {
-                // Same as overview: dismiss, then move. overview uses go_to_tab;
-                // we focus the agent pane instead.
-                self.dismiss();
-                if self.current_session.as_deref() == Some(session.as_str()) {
-                    focus_terminal_pane(pane_id, false, false);
-                } else {
-                    switch_session_with_focus(&session, None, Some((pane_id, false)));
-                }
-                false
-            }
-            Action::None => true,
-        }
-    }
-
-    fn dismiss(&mut self) {
-        // Close only. hide_floating_panes before close_self leaves a leftover
-        // that the next Alt+q treats as a toggle (looks like it did not open).
-        // If close is dropped, this instance stays leftover and must not toggle.
-        self.suppressed = true;
-        close_self();
-    }
 }
 
-fn fetch_live_sessions() -> Vec<SessionInfo> {
-    get_session_list()
-        .map(|snapshot| snapshot.live_sessions)
-        .unwrap_or_default()
+fn tui_path(configuration: &BTreeMap<String, String>) -> String {
+    if let Some(path) = configuration.get("tui") {
+        return path.clone();
+    }
+    if let Ok(path) = std::env::var("ZELLIJ_AGENT_BOARD_TUI") {
+        return path;
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    format!("{home}/.config/zellij/plugins/board-tui")
+}
+
+fn is_board_plugin(pane: &PaneInfo) -> bool {
+    pane.is_plugin
+        && wasm_basename(pane.plugin_url.as_deref().unwrap_or(""))
+            == Some("zellij-agent-board.wasm")
+}
+
+fn is_board_tui(pane: &PaneInfo) -> bool {
+    if pane.is_plugin {
+        return false;
+    }
+    pane.terminal_command
+        .as_deref()
+        .is_some_and(|command| command.contains("board-tui"))
+        || pane.title.contains("board-tui")
 }
 
 fn tab_names_from_sessions(sessions: &[SessionInfo]) -> BTreeMap<(String, usize), String> {
@@ -531,56 +605,6 @@ fn pane_id(pane: &PaneInfo) -> PaneId {
     } else {
         PaneId::Terminal(pane.id)
     }
-}
-
-fn viewport_is_large(rows: usize, cols: usize) -> bool {
-    rows >= ENLARGE_MIN_ROWS && cols >= ENLARGE_MIN_COLS
-}
-
-fn write_plugin_lines(lines: &[String]) {
-    let Some((last, rest)) = lines.split_last() else {
-        return;
-    };
-    for line in rest {
-        println!("{line}");
-    }
-    print!("{last}");
-}
-
-fn map_key(key: KeyWithModifier, hinting: bool) -> Option<Key> {
-    // Do not map Alt+q here. overview leaves Ctrl+y to LaunchPlugin + close_if_duplicate;
-    // handling the open key inside the plugin races with LaunchPlugin and reopens.
-    if !key.has_no_modifiers() {
-        return None;
-    }
-    match key.bare_key {
-        BareKey::Esc | BareKey::Char('q') => Some(Key::Dismiss),
-        BareKey::Char('?') if !hinting => Some(Key::ToggleHelp),
-        BareKey::Backspace if hinting => Some(Key::Backspace),
-        BareKey::Char('s') if !hinting => Some(Key::StartHint),
-        BareKey::Char(ch) if hinting => Some(Key::Input(ch)),
-        BareKey::Up | BareKey::Char('k') | BareKey::Left | BareKey::Char('h') if !hinting => {
-            Some(Key::Up)
-        }
-        BareKey::Down | BareKey::Char('j') | BareKey::Right | BareKey::Char('l') if !hinting => {
-            Some(Key::Down)
-        }
-        BareKey::Enter | BareKey::Char('e') => Some(Key::Confirm),
-        _ => None,
-    }
-}
-
-/// Same plugin identity as overview's exact URL match, plus wasm basename so
-/// `file:/…` vs `file://…` still toggle together.
-fn same_board_plugin(url: Option<&str>, own_url: &str) -> bool {
-    let Some(url) = url else {
-        return false;
-    };
-    if url == own_url {
-        return true;
-    }
-    wasm_basename(url) == Some("zellij-agent-board.wasm")
-        && wasm_basename(own_url) == Some("zellij-agent-board.wasm")
 }
 
 fn wasm_basename(url: &str) -> Option<&str> {
