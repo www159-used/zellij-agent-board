@@ -1,5 +1,5 @@
-//! Process scan seam. The WASM adapter will run `ps` / spool read; this crate
-//! only parses host text into rows. Existence comes from the scan, never the hook.
+//! Process scan seam. The host TUI runs `ps` / spool read; this crate only
+//! parses host text into rows. Existence comes from the scan, never the hook.
 
 use crate::agent::AgentId;
 
@@ -29,6 +29,11 @@ pub enum HostLine {
         hooks_installed: bool,
         /// Host unix epoch from the scan script.
         epoch: Option<u64>,
+    },
+    /// This done cycle was opened. `finished_at` must match the current done.
+    Seen {
+        id: AgentId,
+        finished_at: u64,
     },
 }
 
@@ -103,6 +108,15 @@ pub fn parse_host_line(line: &str) -> Option<HostLine> {
             Some(HostLine::Meta {
                 hooks_installed: hooks_installed?,
                 epoch,
+            })
+        }
+        "SEEN" => {
+            let session = parts.next()?.to_string();
+            let pane_id = parts.next()?.parse().ok()?;
+            let finished_at = parts.next()?.parse().ok()?;
+            Some(HostLine::Seen {
+                id: AgentId { session, pane_id },
+                finished_at,
             })
         }
         _ => None,
@@ -205,6 +219,16 @@ mod tests {
             Some(HostLine::Meta {
                 hooks_installed: true,
                 epoch: Some(1_700_000_120)
+            })
+        );
+        assert_eq!(
+            parse_host_line("SEEN ww 3 1700000000"),
+            Some(HostLine::Seen {
+                id: AgentId {
+                    session: "ww".into(),
+                    pane_id: 3,
+                },
+                finished_at: 1_700_000_000,
             })
         );
     }

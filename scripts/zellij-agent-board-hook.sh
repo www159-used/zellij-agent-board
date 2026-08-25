@@ -49,11 +49,8 @@ if [ -n "${detail:-}" ]; then
   line="${line} ${detail}"
 fi
 
-plugin="${ZELLIJ_AGENT_BOARD_PLUGIN_PATH:-${HOME}/.config/zellij/plugins/zellij-agent-board.wasm}"
-if command -v zellij >/dev/null 2>&1 && [ -f "$plugin" ]; then
-  zellij pipe --plugin "file:${plugin}" --name zellij-agent-board -- "$line" >/dev/null 2>&1 || true
-fi
-
+# Spool only. Never `zellij pipe --plugin` — that launches WASM on every
+# Cursor hook and is what pushed the host session to hundreds of percent CPU.
 spool_dir="${TMPDIR:-/tmp}/zellij-agent-board-spool"
 mkdir -p "$spool_dir"
 tmp="${spool_dir}/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}.tmp.$$"

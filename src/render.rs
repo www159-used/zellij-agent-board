@@ -22,6 +22,39 @@ pub struct Frame {
     pub lines: Vec<String>,
 }
 
+/// Cells the host TUI must write to turn `prev` into `next`.
+/// Identical frames stay empty so iTerm2 is not forced to repaint.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FramePatch<'a> {
+    pub lines: Vec<(u16, &'a str)>,
+    pub clear_from: Option<u16>,
+}
+
+impl FramePatch<'_> {
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty() && self.clear_from.is_none()
+    }
+}
+
+pub fn frame_patch<'a>(prev: Option<&Frame>, next: &'a Frame) -> FramePatch<'a> {
+    let prev_len = prev.map(|frame| frame.lines.len()).unwrap_or(0);
+    let lines = next
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let y = u16::try_from(index).ok()?;
+            match prev.and_then(|frame| frame.lines.get(index)) {
+                Some(old) if old == line => None,
+                _ => Some((y, line.as_str())),
+            }
+        })
+        .collect();
+    let clear_from =
+        (next.lines.len() < prev_len).then(|| u16::try_from(next.lines.len()).unwrap_or(u16::MAX));
+    FramePatch { lines, clear_from }
+}
+
 impl Frame {
     pub fn texts(&self) -> Vec<String> {
         self.lines.iter().map(|line| strip_ansi(line)).collect()
@@ -37,7 +70,38 @@ pub fn paint(board: &Board, ctx: PaintCtx<'_>) -> Frame {
     let cols = clamp_dim(ctx.cols, 120);
     let area = Rect::new(0, 0, cols, rows);
     let mut buffer = Buffer::empty(area);
-    let (content, footer) = if rows >= 3 {
+    render_board(board, ctx.home, area, &mut buffer);
+
+    Frame {
+        lines: crate::ansi::encode_lines(&buffer),
+    }
+}
+
+/// Full-pane paint for the host TUI. Unlike [`paint`], this does not clamp to 128×32.
+pub fn paint_to_size(board: &Board, home: &str, rows: u16, cols: u16) -> Frame {
+    if rows == 0 || cols == 0 {
+        return Frame::default();
+    }
+    Frame {
+        lines: crate::ansi::encode_lines(&paint_buffer(board, home, rows, cols)),
+    }
+}
+
+fn paint_buffer(board: &Board, home: &str, rows: u16, cols: u16) -> Buffer {
+    let area = Rect::new(0, 0, cols, rows);
+    let mut buffer = Buffer::empty(area);
+    if rows > 0 && cols > 0 {
+        render_board(board, home, area, &mut buffer);
+    }
+    buffer
+}
+
+/// Draw into an existing buffer. The host TUI uses the full pane; tests go through [`paint`].
+pub fn render_board(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (content, footer) = if area.height >= 3 {
         let [content, footer] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
         (content, Some(footer))
@@ -46,16 +110,12 @@ pub fn paint(board: &Board, ctx: PaintCtx<'_>) -> Frame {
     };
 
     if board.help_visible {
-        render_help(content, &mut buffer);
+        render_help(content, buffer);
     } else {
-        render_list(board, ctx.home, content, &mut buffer);
+        render_list(board, home, content, buffer);
     }
     if let Some(footer) = footer {
-        render_footer(board, ctx.home, footer, &mut buffer);
-    }
-
-    Frame {
-        lines: crate::ansi::encode_lines(&buffer),
+        render_footer(board, home, footer, buffer);
     }
 }
 
@@ -83,6 +143,7 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
         Line::from("s                 flash search"),
         Line::from("Alt+q             toggle board (global)"),
         Line::from("q / Esc           close"),
+        Line::from("!                 done, not opened yet"),
         Line::from("?                 close help"),
     ];
     Paragraph::new(lines).render(inner, buffer);
@@ -105,8 +166,9 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         .agents
         .windows(2)
         .any(|pair| pair[0].id.session != pair[1].id.session);
-    let flash = board.is_hinting() && !board.hint_query().is_empty();
-    if flash {
+    let hinting = board.is_hinting();
+    let flash = hinting && !board.hint_query().is_empty();
+    if hinting {
         buffer.set_style(area, Style::default().bg(theme().mask));
     }
 
@@ -319,7 +381,7 @@ fn agent_row(
     let status_style = if masked {
         Style::default().fg(theme().mask_fg)
     } else {
-        Style::default().fg(status_color(agent.status))
+        Style::default().fg(row_status_color(agent))
     };
     let mut spans = Vec::new();
     if selected && !masked {
@@ -336,10 +398,7 @@ fn agent_row(
         spans.extend(hint_badge(label, board.hint_jump_prefix().len()));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::styled(
-        format!("{} ", agent.status.icon()),
-        status_style,
-    ));
+    spans.push(Span::styled(format!("{} ", row_icon(agent)), status_style));
     spans.push(Span::styled(
         pad_right(agent.status.label(), 8),
         status_style,
@@ -543,6 +602,22 @@ fn pad_right(text: &str, width: usize) -> String {
     }
 }
 
+fn row_icon(agent: &crate::Agent) -> &'static str {
+    if agent.unread_done() {
+        "!"
+    } else {
+        agent.status.icon()
+    }
+}
+
+fn row_status_color(agent: &crate::Agent) -> ratatui::style::Color {
+    if agent.unread_done() {
+        theme().pin_mark
+    } else {
+        status_color(agent.status)
+    }
+}
+
 fn status_color(status: Status) -> ratatui::style::Color {
     match status {
         Status::Working | Status::Compact => theme().focus,
@@ -646,7 +721,7 @@ fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_ago, fmt_elapsed, paint, strip_ansi, PaintCtx};
+    use super::{fmt_ago, fmt_elapsed, frame_patch, paint, paint_to_size, strip_ansi, PaintCtx};
     use crate::{Action, Agent, AgentId, Board, Key, Status};
 
     fn agent() -> Agent {
@@ -665,6 +740,7 @@ mod tests {
             status_since: 0,
             started_at: Some(1_700_000_000),
             finished_at: None,
+            visited: false,
         }
     }
 
@@ -821,6 +897,67 @@ mod tests {
     }
 
     #[test]
+    fn entering_flash_tints_the_list_and_keeps_the_status_header() {
+        let mut board = Board {
+            hooks_installed: true,
+            now: 134,
+            wall_now: 1_700_000_134,
+            ..Board::default()
+        };
+        board.agents.push(agent());
+        let browse_ansi = paint(
+            &board,
+            PaintCtx {
+                rows: 16,
+                cols: 80,
+                home: "ww",
+            },
+        )
+        .lines
+        .join("\n");
+        let browse = painted(&board, 16, 80, "ww");
+        let browse_head = browse.lines().next().expect("browse header");
+        assert!(
+            browse_head.contains("working"),
+            "browse should lead with status:\n{browse}"
+        );
+        assert!(
+            !browse_ansi.contains("\u{1b}[48;2;22;26;34m"),
+            "browse must not already be the flash tint:\n{browse_ansi}"
+        );
+
+        board.decide(Key::StartHint);
+        let flash_ansi = paint(
+            &board,
+            PaintCtx {
+                rows: 16,
+                cols: 80,
+                home: "ww",
+            },
+        )
+        .lines
+        .join("\n");
+        let flash = painted(&board, 16, 80, "ww");
+        let flash_head = flash.lines().next().expect("flash header");
+        assert!(
+            flash_head.contains("working"),
+            "status header stays put:\n{flash}"
+        );
+        assert!(
+            !flash_head.contains("FLASH"),
+            "FLASH belongs in the footer, not the header:\n{flash}"
+        );
+        assert!(
+            flash.contains("FLASH"),
+            "footer still names the mode:\n{flash}"
+        );
+        assert!(
+            flash_ansi.contains("\u{1b}[48;2;22;26;34m"),
+            "empty flash must still tint the pane:\n{flash_ansi}"
+        );
+    }
+
+    #[test]
     fn flash_shows_place_for_tab_and_project_hits() {
         let mut board = Board {
             hooks_installed: true,
@@ -891,5 +1028,48 @@ mod tests {
     #[test]
     fn strip_ansi_keeps_visible_text() {
         assert_eq!(strip_ansi("\u{1b}[0m\u{1b}[38;2;1;2;3mhi\u{1b}[0m"), "hi");
+    }
+
+    #[test]
+    fn identical_host_frames_write_nothing() {
+        let mut board = Board {
+            hooks_installed: true,
+            now: 134,
+            wall_now: 1_700_000_134,
+            ..Board::default()
+        };
+        board.agents.push(agent());
+        let first = paint_to_size(&board, "ww", 16, 80);
+        let second = paint_to_size(&board, "ww", 16, 80);
+        assert!(!first.lines.is_empty());
+        assert!(frame_patch(Some(&first), &second).is_empty());
+    }
+
+    #[test]
+    fn clock_tick_rewrites_only_changed_host_lines() {
+        let mut board = Board {
+            hooks_installed: true,
+            now: 134,
+            wall_now: 1_700_000_134,
+            ..Board::default()
+        };
+        board.agents.push(agent());
+        let before = paint_to_size(&board, "ww", 16, 80);
+        board.tick();
+        let after = paint_to_size(&board, "ww", 16, 80);
+        let patch = frame_patch(Some(&before), &after);
+        assert!(!patch.is_empty(), "elapsed text must move");
+        assert!(
+            patch.lines.len() < after.lines.len(),
+            "tick rewrote the whole pane: {} of {}",
+            patch.lines.len(),
+            after.lines.len()
+        );
+        let full: usize = after.lines.iter().map(String::len).sum();
+        let patch_bytes: usize = patch.lines.iter().map(|(_, line)| line.len()).sum();
+        assert!(
+            patch_bytes < full / 2,
+            "tick patch {patch_bytes} vs full clear {full}"
+        );
     }
 }

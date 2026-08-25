@@ -2785,7 +2785,9 @@ dependencies = [
 name = "zellij-agent-board"
 version = "0.2.0"
 dependencies = [
+ "crossterm",
  "ratatui",
+ "serde_json",
  "zellij-tile",
 ]
 
