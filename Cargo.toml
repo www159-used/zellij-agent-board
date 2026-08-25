@@ -1,6 +1,6 @@
 [package]
 name = "zellij-agent-board"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Floating dashboard of running coding agents for Zellij"
 license = "AGPL-3.0-only"
