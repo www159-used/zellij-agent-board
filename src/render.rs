@@ -81,7 +81,7 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
         Line::from("h/j/k/l, arrows  move"),
         Line::from("e / Enter         jump to pane"),
         Line::from("s                 flash search"),
-        Line::from("Alt+a             toggle board (global)"),
+        Line::from("Alt+q             toggle board (global)"),
         Line::from("q / Esc           close"),
         Line::from("?                 close help"),
     ];
@@ -350,7 +350,17 @@ fn agent_row(
             .started_at
             .map(|started| fmt_elapsed(board.wall_now.saturating_sub(started)))
             .unwrap_or_default(),
-        Status::Done => agent.finished_at.clone().unwrap_or_default(),
+        Status::Done => agent
+            .finished_at
+            .map(|finished| {
+                let base = if board.wall_at_open > 0 {
+                    board.wall_at_open
+                } else {
+                    board.wall_now
+                };
+                fmt_ago(base.saturating_sub(finished))
+            })
+            .unwrap_or_default(),
         _ => String::new(),
     };
     let when_style = Style::default().fg(if masked {
@@ -612,6 +622,10 @@ fn fmt_elapsed(secs: u64) -> String {
     }
 }
 
+fn fmt_ago(secs: u64) -> String {
+    format!("{} ago", fmt_elapsed(secs))
+}
+
 fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -632,7 +646,7 @@ fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_elapsed, paint, strip_ansi, PaintCtx};
+    use super::{fmt_ago, fmt_elapsed, paint, strip_ansi, PaintCtx};
     use crate::{Action, Agent, AgentId, Board, Key, Status};
 
     fn agent() -> Agent {
@@ -688,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn working_counts_up_and_done_shows_a_date() {
+    fn working_counts_up_and_done_shows_how_long_ago() {
         let mut board = Board {
             hooks_installed: true,
             now: 134,
@@ -700,13 +714,13 @@ mod tests {
         done.id.pane_id = 9;
         done.status = Status::Done;
         done.started_at = None;
-        done.finished_at = Some("08-24 15:21".into());
+        done.finished_at = Some(1_700_000_000);
         board.agents.push(done);
         let text = painted(&board, 20, 110, "");
         assert!(text.contains("working"));
         assert!(text.contains("2m14s"));
         assert!(text.contains("done"));
-        assert!(text.contains("08-24 15:21"));
+        assert!(text.contains("2m14s ago"), "{text}");
     }
 
     #[test]
@@ -784,25 +798,26 @@ mod tests {
         done.id.pane_id = 9;
         done.status = Status::Done;
         done.started_at = None;
-        done.finished_at = Some("08-24 15:21".into());
+        done.finished_at = Some(1_700_000_000);
         done.pane_title = "Ship it".into();
         board.agents.push(done);
         let text = painted(&board, 20, 110, "ww");
         let working = text
             .lines()
-            .find(|line| line.contains("2m14s"))
+            .find(|line| line.contains("working") && line.contains("2m14s"))
             .expect("working row");
         let finished = text
             .lines()
-            .find(|line| line.contains("08-24 15:21"))
+            .find(|line| line.contains("2m14s ago"))
             .expect("done row");
-        let w = char_index(working, "api").expect("working place");
-        let d = char_index(finished, "api").expect("done place");
+        let w = display_index(working, "api").expect("working place");
+        let d = display_index(finished, "api").expect("done place");
         assert_eq!(w, d, "place column drifted:\n{working}\n{finished}");
     }
 
-    fn char_index(text: &str, needle: &str) -> Option<usize> {
-        text.find(needle).map(|bytes| text[..bytes].chars().count())
+    fn display_index(text: &str, needle: &str) -> Option<usize> {
+        let bytes = text.find(needle)?;
+        Some(ratatui::text::Span::raw(&text[..bytes]).width())
     }
 
     #[test]
@@ -870,6 +885,7 @@ mod tests {
         assert_eq!(fmt_elapsed(12), "12s");
         assert_eq!(fmt_elapsed(134), "2m14s");
         assert_eq!(fmt_elapsed(3661), "1h1m");
+        assert_eq!(fmt_ago(134), "2m14s ago");
     }
 
     #[test]

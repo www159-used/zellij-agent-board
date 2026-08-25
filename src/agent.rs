@@ -22,8 +22,8 @@ pub struct Agent {
     pub status_since: u64,
     /// Host unix epoch when this working turn began.
     pub started_at: Option<u64>,
-    /// Wall-clock stamp when the agent finished, e.g. `08-24 15:21`.
-    pub finished_at: Option<String>,
+    /// Host unix epoch when the agent finished (done rows).
+    pub finished_at: Option<u64>,
 }
 
 impl Agent {
@@ -89,9 +89,7 @@ pub fn keep_cursor_agent(argv: &[String]) -> bool {
     if bin != "agent" && bin != "cursor-agent" {
         return false;
     }
-    let skip = [
-        "status", "whoami", "login", "logout", "update", "about",
-    ];
+    let skip = ["status", "whoami", "login", "logout", "update", "about"];
     !argv.iter().skip(1).any(|arg| skip.contains(&arg.as_str()))
 }
 

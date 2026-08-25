@@ -50,8 +50,10 @@ pub struct Board {
     pub selected: usize,
     pub hooks_installed: bool,
     pub now: u64,
-    /// Host unix epoch; advanced by Timer between scans.
+    /// Host unix epoch; advanced by Timer so working elapsed keeps moving.
     pub wall_now: u64,
+    /// Frozen host epoch from open; done "ago" uses this and does not tick.
+    pub wall_at_open: u64,
     pub help_visible: bool,
     hint: Option<HintState>,
 }
@@ -82,7 +84,14 @@ impl Board {
                 }) => {
                     self.hooks_installed = hooks_installed;
                     if let Some(epoch) = epoch {
-                        self.wall_now = epoch;
+                        // First META anchors both clocks; later rescans leave them alone
+                        // so working only moves via tick, and ago stays frozen at open.
+                        if self.wall_now == 0 {
+                            self.wall_now = epoch;
+                        }
+                        if self.wall_at_open == 0 {
+                            self.wall_at_open = epoch;
+                        }
                     }
                 }
                 None => {}
@@ -122,7 +131,7 @@ impl Board {
         status: Status,
         detail: &str,
         at_epoch: Option<u64>,
-        at_stamp: Option<&str>,
+        _at_stamp: Option<&str>,
     ) {
         if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == *id) {
             let changing = agent.status != status;
@@ -143,9 +152,8 @@ impl Board {
                 }
                 Status::Done => {
                     agent.started_at = None;
-                    if let Some(stamp) = at_stamp.filter(|s| !s.is_empty()) {
-                        agent.finished_at = Some(stamp.to_string());
-                    }
+                    agent.finished_at =
+                        at_epoch.or_else(|| (self.wall_now > 0).then_some(self.wall_now));
                     if !detail.is_empty() {
                         agent.detail = detail.to_string();
                     }
@@ -479,7 +487,7 @@ impl Board {
                 detail: prior.map(|agent| agent.detail.clone()).unwrap_or_default(),
                 status_since: prior.map(|agent| agent.status_since).unwrap_or(self.now),
                 started_at: prior.and_then(|agent| agent.started_at),
-                finished_at: prior.and_then(|agent| agent.finished_at.clone()),
+                finished_at: prior.and_then(|agent| agent.finished_at),
             });
         }
         self.agents = next;
@@ -615,9 +623,9 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert!(joined.contains('└'));
         board.ingest_notice("HOOK ww 3 stop @1700000000 +08-24T15:21\n");
         assert_eq!(board.agents[1].status, Status::Done);
-        assert_eq!(board.agents[1].finished_at.as_deref(), Some("08-24 15:21"));
+        assert_eq!(board.agents[1].finished_at, Some(1_700_000_000));
         let joined = board.lines().join("\n");
-        assert!(joined.contains("08-24 15:21"));
+        assert!(joined.contains("ago"), "{joined}");
         assert_eq!(board.agents.len(), 2);
     }
 
@@ -634,7 +642,7 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         let joined = board.lines().join("\n");
         assert!(joined.contains("2m14s"), "{joined}");
 
-        // Simulate q then Alt+a: fresh board, same spool/hook epoch.
+        // Simulate q then Alt+q: fresh board, same spool/hook epoch.
         let mut reopened = Board::default();
         reopened.ingest(
             "META hooks=1 epoch=1700000200\n\
@@ -644,6 +652,37 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(reopened.agents[0].started_at, Some(1_700_000_000));
         let joined = reopened.lines().join("\n");
         assert!(joined.contains("3m20s"), "{joined}");
+    }
+
+    #[test]
+    fn working_ticks_while_ago_stays_frozen() {
+        let mut board = Board::default();
+        board.ingest(
+            "META hooks=1 epoch=1700000134\n\
+             SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n\
+             SCAN ww 9 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n\
+             HOOK ww 3 beforeSubmitPrompt @1700000000 +08-24T15:00\n\
+             HOOK ww 9 stop @1700000000 +08-24T15:00\n",
+        );
+        assert_eq!(board.wall_now, 1_700_000_134);
+        assert_eq!(board.wall_at_open, 1_700_000_134);
+        let before = board.lines().join("\n");
+        assert!(before.contains("2m14s"), "{before}");
+        assert!(before.contains("2m14s ago"), "{before}");
+
+        board.tick();
+        board.tick();
+        board.ingest(
+            "META hooks=1 epoch=1700000999\n\
+             SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n\
+             SCAN ww 9 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n",
+        );
+        assert_eq!(board.wall_now, 1_700_000_136);
+        assert_eq!(board.wall_at_open, 1_700_000_134);
+        let after = board.lines().join("\n");
+        assert!(after.contains("2m16s"), "{after}");
+        assert!(after.contains("2m14s ago"), "{after}");
+        assert!(!after.contains("16m"), "{after}");
     }
 
     #[test]
