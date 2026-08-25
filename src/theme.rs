@@ -12,6 +12,7 @@ pub struct Theme {
     pub focus: Color,
     pub focus_fill: Color,
     pub session: Color,
+    pub task: Color,
     pub pin_mark: Color,
     pub pin_border: Color,
     pub match_fg: Color,
@@ -41,6 +42,7 @@ impl Theme {
             focus: try_color(vars, "focus")?,
             focus_fill: try_color(vars, "focus-fill")?,
             session: try_color(vars, "session")?,
+            task: try_color(vars, "task")?,
             pin_mark: try_color(vars, "pin-mark")?,
             pin_border: try_color(vars, "pin-border")?,
             match_fg: try_color(vars, "match")?,
@@ -157,6 +159,7 @@ mod tests {
     fn packed_theme_matches_overview() {
         let theme = Theme::from_css(PACKED_THEME_CSS);
         assert_eq!(theme.session, Color::Rgb(105, 208, 196));
+        assert_eq!(theme.task, Color::Rgb(0xe4, 0xd4, 0xff));
         assert_eq!(theme.focus_fill, Color::Rgb(0x3a, 0x2f, 0x52));
         assert_eq!(theme.separator, theme.card_border);
         assert_eq!(theme.tip_typed, theme.focus);

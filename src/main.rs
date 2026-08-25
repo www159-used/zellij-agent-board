@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use zellij_agent_board::{
-    float_size_from_config, Action, AgentId, Board, FloatSize, FloatingLayerState, Key, PaintCtx,
-    PanePlace,
+    closes_the_board, duplicate_close_ids, float_size_from_config, now_ms, Action, AgentId, Board,
+    FloatSize, FloatingLayerState, Key, PaintCtx, PanePlace,
 };
 use zellij_tile::prelude::*;
 
@@ -31,6 +31,7 @@ struct State {
     float_size: FloatSize,
     enlarge_pending: bool,
     enlarged_once: bool,
+    opened_at_ms: u64,
 }
 
 register_plugin!(State);
@@ -40,6 +41,7 @@ impl ZellijPlugin for State {
         let ids = get_plugin_ids();
         self.own_plugin_id = Some(ids.plugin_id);
         self.client_id = Some(ids.client_id);
+        self.opened_at_ms = now_ms();
         self.float_size = float_size_from_config(&configuration);
         subscribe(&[
             EventType::Key,
@@ -61,14 +63,16 @@ impl ZellijPlugin for State {
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::PermissionRequestResult(result) => {
-                self.permissions_granted = result == PermissionStatus::Granted;
-                if self.permissions_granted {
+                if result == PermissionStatus::Granted {
+                    self.permissions_granted = true;
                     if let Some(id) = self.own_plugin_id {
                         rename_plugin_pane(id, PLUGIN_NAME);
                     }
+                    // Same order as overview: detect Alt+q toggle before other work.
+                    self.close_if_duplicate();
+                    self.enlarge_if_floating();
                     self.remember_sessions(&fetch_live_sessions());
                     self.request_scan();
-                    self.enlarge_if_floating();
                     set_timeout(1.0);
                 }
                 true
@@ -78,8 +82,7 @@ impl ZellijPlugin for State {
                 set_timeout(1.0);
                 true
             }
-            // LaunchOrFocusPlugin reuses the pane; Zellij often restores the
-            // default small float, so re-apply 94% whenever we become visible.
+            // Zellij often restores a small float on open; re-apply 94%.
             Event::Visible(true) => {
                 self.enlarged_once = false;
                 self.enlarge_pending = false;
@@ -99,6 +102,8 @@ impl ZellijPlugin for State {
             }
             Event::PaneUpdate(manifest) => {
                 self.pane_manifest = Some(manifest);
+                self.close_if_duplicate();
+                self.enlarge_if_floating();
                 if let Some(session) = self.current_session.clone() {
                     if let Some(manifest) = self.pane_manifest.as_ref() {
                         self.remember_places(places_from_manifest(
@@ -108,7 +113,7 @@ impl ZellijPlugin for State {
                         ));
                     }
                 }
-                self.enlarge_if_floating();
+                // overview returns false here; we still need a paint after places.
                 true
             }
             Event::RunCommandResult(_code, stdout, _stderr, context) => {
@@ -177,6 +182,61 @@ impl State {
             .flatten()
             .any(|pane| pane.is_plugin && pane.id == own_id && pane.is_floating);
         !floating || self.enlarged_once
+    }
+
+    /// Copied from overview: second LaunchPlugin opens a sibling; oldest closes all.
+    fn close_if_duplicate(&self) {
+        if !self.permissions_granted || !self.own_pane_is_listed() {
+            return;
+        }
+        let Some(manifest) = self.pane_manifest.as_ref() else {
+            return;
+        };
+        let Some(own_id) = self.own_plugin_id else {
+            return;
+        };
+        let panes = manifest.panes.values().flatten().collect::<Vec<_>>();
+        let Some(own_url) = panes
+            .iter()
+            .find(|pane| pane.is_plugin && pane.id == own_id)
+            .and_then(|pane| pane.plugin_url.as_deref())
+        else {
+            return;
+        };
+        let board_ids: Vec<u32> = panes
+            .iter()
+            .filter(|pane| pane.is_plugin && same_board_plugin(pane.plugin_url.as_deref(), own_url))
+            .map(|pane| pane.id)
+            .collect();
+        let close_ids = duplicate_close_ids(own_id, &board_ids, self.opened_at_ms, now_ms());
+        if close_ids.is_empty() {
+            return;
+        }
+        if closes_the_board(&close_ids, &board_ids) {
+            self.restore_floating_layer();
+        }
+        for id in close_ids {
+            close_pane_with_id(PaneId::Plugin(id));
+        }
+    }
+
+    fn own_pane_is_listed(&self) -> bool {
+        let Some(own_id) = self.own_plugin_id else {
+            return false;
+        };
+        self.pane_manifest.as_ref().is_some_and(|manifest| {
+            manifest
+                .panes
+                .values()
+                .flatten()
+                .any(|pane| pane.is_plugin && pane.id == own_id)
+        })
+    }
+
+    fn restore_floating_layer(&self) {
+        if self.floating_layer.should_hide_on_close() {
+            let _ = hide_floating_panes(None);
+        }
     }
 
     fn enlarge_if_floating(&mut self) {
@@ -284,10 +344,8 @@ impl State {
 
     fn dismiss(&self) {
         // Match overview: restore the floating layer, then close this plugin.
-        // hide_self() leaves the pane around and breaks LaunchOrFocusPlugin.
-        if self.floating_layer.should_hide_on_close() {
-            let _ = hide_floating_panes(None);
-        }
+        // hide_self() leaves the pane around and breaks LaunchPlugin toggle.
+        self.restore_floating_layer();
         close_self();
     }
 }
@@ -403,6 +461,8 @@ fn write_plugin_lines(lines: &[String]) {
 }
 
 fn map_key(key: KeyWithModifier, hinting: bool) -> Option<Key> {
+    // Do not map Alt+q here. overview leaves Ctrl+y to LaunchPlugin + close_if_duplicate;
+    // handling the open key inside the plugin races with LaunchPlugin and reopens.
     if !key.has_no_modifiers() {
         return None;
     }
@@ -421,4 +481,23 @@ fn map_key(key: KeyWithModifier, hinting: bool) -> Option<Key> {
         BareKey::Enter | BareKey::Char('e') => Some(Key::Confirm),
         _ => None,
     }
+}
+
+/// Same plugin identity as overview's exact URL match, plus wasm basename so
+/// `file:/…` vs `file://…` still toggle together.
+fn same_board_plugin(url: Option<&str>, own_url: &str) -> bool {
+    let Some(url) = url else {
+        return false;
+    };
+    if url == own_url {
+        return true;
+    }
+    wasm_basename(url) == Some("zellij-agent-board.wasm")
+        && wasm_basename(own_url) == Some("zellij-agent-board.wasm")
+}
+
+fn wasm_basename(url: &str) -> Option<&str> {
+    url.rsplit('/')
+        .next()
+        .filter(|name| name.ends_with(".wasm"))
 }

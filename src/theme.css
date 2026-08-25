@@ -9,6 +9,9 @@
   /* session：◆ 组头、底栏 session 药丸 */
   --session: #69d0c4;
 
+  /* 名单里的 agent 标题（pane title） */
+  --task: #e4d4ff;
+
   /* 钉 / 出错：沿用 overview 的粉 */
   --pin-mark: #f9a9b6;
   --pin-border: #f192a1;

@@ -8,6 +8,7 @@ mod floating_state;
 mod render;
 mod status;
 mod theme;
+mod toggle;
 
 pub use agent::{keep_cursor_agent, workspace_from_argv, Agent, AgentId, PanePlace};
 pub use discover::{parse_host_line, parse_scan_line, Found, HookNotice, HostLine};
@@ -15,6 +16,7 @@ pub use float_size::{float_size_from_config, FloatSize};
 pub use floating_state::FloatingLayerState;
 pub use render::{paint, Frame, PaintCtx};
 pub use status::Status;
+pub use toggle::{closes_the_board, duplicate_close_ids, now_ms};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -132,9 +134,8 @@ impl Board {
                 Status::Working | Status::Compact => {
                     agent.finished_at = None;
                     if changing || agent.started_at.is_none() {
-                        agent.started_at = at_epoch.or_else(|| {
-                            (self.wall_now > 0).then_some(self.wall_now)
-                        });
+                        agent.started_at =
+                            at_epoch.or_else(|| (self.wall_now > 0).then_some(self.wall_now));
                     }
                     if !detail.is_empty() {
                         agent.detail = detail.to_string();
@@ -350,10 +351,7 @@ impl Board {
 
         let mut query = hint.query.clone();
         query.push(ch);
-        let has_matches = self
-            .agents
-            .iter()
-            .any(|agent| agent_matches(agent, &query));
+        let has_matches = self.agents.iter().any(|agent| agent_matches(agent, &query));
         if !has_matches {
             return Action::None;
         }
@@ -801,7 +799,9 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         board.selected = 7;
         let lines = board.lines_for(4);
         assert!(lines.first().is_some_and(|line| line.contains("found")));
-        assert!(lines.iter().any(|line| line.contains('›') && line.contains('8')));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains('›') && line.contains('8')));
         assert!(lines
             .last()
             .is_some_and(|line| line.contains("e go") && line.contains("? help")));

@@ -25,17 +25,16 @@ Add to `keybinds` in `~/.config/zellij/config.kdl`. Use a `file:` URL.
 
 ```kdl
 shared {
-    bind "Alt a" {
-        LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zellij-agent-board.wasm" {
+    bind "Alt q" {
+        LaunchPlugin "file:~/.config/zellij/plugins/zellij-agent-board.wasm" {
             floating true
-            move_to_focused_tab true
             skip_plugin_cache true
         }
     }
 }
 ```
 
-`Alt+a` opens the board. Change it if it conflicts.
+`Alt+q` opens the board; press again to close. Change it if it conflicts.
 
 ## Develop
 

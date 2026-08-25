@@ -81,6 +81,7 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
         Line::from("h/j/k/l, arrows  move"),
         Line::from("e / Enter         jump to pane"),
         Line::from("s                 flash search"),
+        Line::from("Alt+a             toggle board (global)"),
         Line::from("q / Esc           close"),
         Line::from("?                 close help"),
     ];
@@ -173,12 +174,7 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
             agent_row(board, index, selected, cols, home, multi, masked),
         );
         if let Some(text) = activity {
-            y = draw_line(
-                body,
-                buffer,
-                y,
-                activity_line(&text, cols, masked),
-            );
+            y = draw_line(body, buffer, y, activity_line(&text, cols, masked));
         }
         if y >= body.bottom() {
             break;
@@ -344,7 +340,10 @@ fn agent_row(
         format!("{} ", agent.status.icon()),
         status_style,
     ));
-    spans.push(Span::styled(pad_right(agent.status.label(), 8), status_style));
+    spans.push(Span::styled(
+        pad_right(agent.status.label(), 8),
+        status_style,
+    ));
 
     let when = match agent.status {
         Status::Working | Status::Compact => agent
@@ -397,7 +396,12 @@ fn agent_row(
         if masked {
             spans.push(Span::styled(clipped, Style::default().fg(theme().mask_fg)));
         } else {
-            spans.push(Span::raw(clipped));
+            spans.push(Span::styled(
+                clipped,
+                Style::default()
+                    .fg(theme().task)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
     }
     Line::from(spans)
@@ -419,12 +423,7 @@ fn place_label(agent: &Agent, home: &str, multi: bool) -> String {
     }
 }
 
-fn place_for_match(
-    agent: &Agent,
-    field: Option<HintField>,
-    home: &str,
-    multi: bool,
-) -> String {
+fn place_for_match(agent: &Agent, field: Option<HintField>, home: &str, multi: bool) -> String {
     match field {
         Some(HintField::Session) => agent.id.session.clone(),
         Some(HintField::Project) => {
@@ -479,11 +478,7 @@ fn hint_badge(label: &str, prefix_len: usize) -> Vec<Span<'static>> {
     spans
 }
 
-fn highlight_text(
-    text: &str,
-    range: Option<(usize, usize)>,
-    base: Style,
-) -> Vec<Span<'static>> {
+fn highlight_text(text: &str, range: Option<(usize, usize)>, base: Style) -> Vec<Span<'static>> {
     let Some((start, len)) = range else {
         return vec![Span::styled(text.to_string(), base)];
     };
@@ -807,8 +802,7 @@ mod tests {
     }
 
     fn char_index(text: &str, needle: &str) -> Option<usize> {
-        text.find(needle)
-            .map(|bytes| text[..bytes].chars().count())
+        text.find(needle).map(|bytes| text[..bytes].chars().count())
     }
 
     #[test]
