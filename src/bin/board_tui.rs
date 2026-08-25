@@ -307,7 +307,7 @@ fn setup() -> io::Result<HostTerminal> {
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen, cursor::Hide)?;
-    Ok(Terminal::new(PtyBackend { out })?)
+    Terminal::new(PtyBackend { out })
 }
 
 fn restore(terminal: &mut HostTerminal) -> io::Result<()> {
