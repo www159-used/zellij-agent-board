@@ -10,7 +10,9 @@ struct CellStyle {
     modifier: Modifier,
 }
 
-/// Encodes a rendered Ratatui buffer as ANSI-styled terminal lines.
+/// Snapshot encoder for tests. The host TUI does not use this — it draws
+/// through `ratatui::Terminal`, which diffs cells and lets crossterm talk
+/// to the PTY. There is no path from a Zellij pane to iTerm2's GPU.
 pub(crate) fn encode_lines(buffer: &Buffer) -> Vec<String> {
     let mut lines = Vec::with_capacity(buffer.area.height as usize);
     for y in buffer.area.top()..buffer.area.bottom() {
@@ -30,6 +32,7 @@ pub(crate) fn encode_lines(buffer: &Buffer) -> Vec<String> {
                 modifier: cell.modifier,
             };
             if current_style != Some(style) {
+                line.push_str("\u{1b}[0m");
                 push_style(&mut line, style);
                 current_style = Some(style);
             }
@@ -43,9 +46,15 @@ pub(crate) fn encode_lines(buffer: &Buffer) -> Vec<String> {
 }
 
 fn push_style(output: &mut String, style: CellStyle) {
-    output.push_str("\u{1b}[0m");
-    push_color(output, style.fg, false);
-    push_color(output, style.bg, true);
+    if style.fg == Color::Reset && style.bg == Color::Reset && style.modifier == Modifier::empty() {
+        return;
+    }
+    if style.fg != Color::Reset {
+        push_color(output, style.fg, false);
+    }
+    if style.bg != Color::Reset {
+        push_color(output, style.bg, true);
+    }
     if style.modifier.contains(Modifier::BOLD) {
         output.push_str("\u{1b}[1m");
     }

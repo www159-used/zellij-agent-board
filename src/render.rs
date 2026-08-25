@@ -82,12 +82,18 @@ pub fn paint_to_size(board: &Board, home: &str, rows: u16, cols: u16) -> Frame {
     if rows == 0 || cols == 0 {
         return Frame::default();
     }
+    Frame {
+        lines: crate::ansi::encode_lines(&paint_buffer(board, home, rows, cols)),
+    }
+}
+
+fn paint_buffer(board: &Board, home: &str, rows: u16, cols: u16) -> Buffer {
     let area = Rect::new(0, 0, cols, rows);
     let mut buffer = Buffer::empty(area);
-    render_board(board, home, area, &mut buffer);
-    Frame {
-        lines: crate::ansi::encode_lines(&buffer),
+    if rows > 0 && cols > 0 {
+        render_board(board, home, area, &mut buffer);
     }
+    buffer
 }
 
 /// Draw into an existing buffer. The host TUI uses the full pane; tests go through [`paint`].
@@ -160,8 +166,9 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         .agents
         .windows(2)
         .any(|pair| pair[0].id.session != pair[1].id.session);
-    let flash = board.is_hinting() && !board.hint_query().is_empty();
-    if flash {
+    let hinting = board.is_hinting();
+    let flash = hinting && !board.hint_query().is_empty();
+    if hinting {
         buffer.set_style(area, Style::default().bg(theme().mask));
     }
 
@@ -887,6 +894,67 @@ mod tests {
     fn display_index(text: &str, needle: &str) -> Option<usize> {
         let bytes = text.find(needle)?;
         Some(ratatui::text::Span::raw(&text[..bytes]).width())
+    }
+
+    #[test]
+    fn entering_flash_tints_the_list_and_keeps_the_status_header() {
+        let mut board = Board {
+            hooks_installed: true,
+            now: 134,
+            wall_now: 1_700_000_134,
+            ..Board::default()
+        };
+        board.agents.push(agent());
+        let browse_ansi = paint(
+            &board,
+            PaintCtx {
+                rows: 16,
+                cols: 80,
+                home: "ww",
+            },
+        )
+        .lines
+        .join("\n");
+        let browse = painted(&board, 16, 80, "ww");
+        let browse_head = browse.lines().next().expect("browse header");
+        assert!(
+            browse_head.contains("working"),
+            "browse should lead with status:\n{browse}"
+        );
+        assert!(
+            !browse_ansi.contains("\u{1b}[48;2;22;26;34m"),
+            "browse must not already be the flash tint:\n{browse_ansi}"
+        );
+
+        board.decide(Key::StartHint);
+        let flash_ansi = paint(
+            &board,
+            PaintCtx {
+                rows: 16,
+                cols: 80,
+                home: "ww",
+            },
+        )
+        .lines
+        .join("\n");
+        let flash = painted(&board, 16, 80, "ww");
+        let flash_head = flash.lines().next().expect("flash header");
+        assert!(
+            flash_head.contains("working"),
+            "status header stays put:\n{flash}"
+        );
+        assert!(
+            !flash_head.contains("FLASH"),
+            "FLASH belongs in the footer, not the header:\n{flash}"
+        );
+        assert!(
+            flash.contains("FLASH"),
+            "footer still names the mode:\n{flash}"
+        );
+        assert!(
+            flash_ansi.contains("\u{1b}[48;2;22;26;34m"),
+            "empty flash must still tint the pane:\n{flash_ansi}"
+        );
     }
 
     #[test]

@@ -6,18 +6,27 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
+use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
+use crossterm::queue;
+use crossterm::style::{Attribute, Colors, Print, SetAttribute, SetColors};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen,
-    LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, size as term_size, Clear as TermClear, ClearType,
+    EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::{cursor, style::Print, QueueableCommand};
+use ratatui::backend::{Backend, ClearType as Region, WindowSize};
+use ratatui::buffer::Cell;
+use ratatui::layout::{Position, Size};
+use ratatui::style::{Color, Modifier};
+use ratatui::widgets::{Clear, Widget};
+use ratatui::Terminal;
 use zellij_agent_board::{
-    focus_path, format_jump, frame_patch, paint_to_size, parse_focus, parse_places, persist_seen,
-    places_path, scan_host_text, scan_places_for, spool_dir, Action, AgentId, Board, Frame, Key,
-    PIPE_NAME,
+    focus_path, format_jump, parse_focus, parse_places, persist_seen, places_path, render_board,
+    scan_host_text, scan_places_for, spool_dir, Action, AgentId, Board, Key, PIPE_NAME,
 };
+
+type HostTerminal = Terminal<PtyBackend>;
 
 const POLL: Duration = Duration::from_millis(200);
 const SCAN_EVERY: Duration = Duration::from_secs(2);
@@ -37,9 +46,9 @@ struct App {
 fn main() -> io::Result<()> {
     let mut app = App::new();
     app.bootstrap();
-    setup()?;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run()));
-    restore()?;
+    let mut terminal = setup()?;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run(&mut terminal)));
+    restore(&mut terminal)?;
     match result {
         Ok(ok) => ok,
         Err(panic) => std::panic::resume_unwind(panic),
@@ -67,13 +76,11 @@ impl App {
         self.mark_launch_focus();
     }
 
-    fn run(&mut self) -> io::Result<()> {
+    fn run(&mut self, terminal: &mut HostTerminal) -> io::Result<()> {
         let mut dirty = true;
-        let mut last_frame: Option<Frame> = None;
-        let mut term_size = size()?;
         loop {
             if dirty {
-                draw(&mut last_frame, &self.board, &self.home)?;
+                draw(terminal, &self.board, &self.home)?;
                 dirty = false;
             }
             if event::poll(POLL)? {
@@ -85,13 +92,7 @@ impl App {
                                 Loop::Quit => return Ok(()),
                             }
                         }
-                        Event::Resize(cols, rows) => {
-                            if (cols, rows) != term_size {
-                                term_size = (cols, rows);
-                                last_frame = None;
-                                dirty = true;
-                            }
-                        }
+                        Event::Resize(_, _) => dirty = true,
                         _ => {}
                     }
                     if !event::poll(Duration::ZERO)? {
@@ -263,25 +264,15 @@ fn zellij_bin() -> String {
         .to_string()
 }
 
-fn draw(last: &mut Option<Frame>, board: &Board, home: &str) -> io::Result<()> {
-    let (cols, rows) = size()?;
-    let frame = paint_to_size(board, home, rows, cols);
-    let patch = frame_patch(last.as_ref(), &frame);
-    if patch.is_empty() {
-        return Ok(());
-    }
-    let mut out = stdout();
-    for (y, line) in &patch.lines {
-        out.queue(cursor::MoveTo(0, *y))?;
-        out.queue(Print(*line))?;
-        out.queue(Clear(ClearType::UntilNewLine))?;
-    }
-    if let Some(y) = patch.clear_from {
-        out.queue(cursor::MoveTo(0, y))?;
-        out.queue(Clear(ClearType::FromCursorDown))?;
-    }
-    out.flush()?;
-    *last = Some(frame);
+/// Draw through ratatui's cell diff. The PTY is still the only pipe out of
+/// a Zellij pane — there is no direct Metal/iTerm2 handle — but we no longer
+/// stitch ANSI lines ourselves.
+fn draw(terminal: &mut HostTerminal, board: &Board, home: &str) -> io::Result<()> {
+    terminal.draw(|frame| {
+        let area = frame.area();
+        Clear.render(area, frame.buffer_mut());
+        render_board(board, home, area, frame.buffer_mut());
+    })?;
     Ok(())
 }
 
@@ -312,12 +303,155 @@ fn dir_changed(path: &Path, seen: &mut Option<SystemTime>) -> bool {
     }
 }
 
-fn setup() -> io::Result<()> {
+fn setup() -> io::Result<HostTerminal> {
     enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen, cursor::Hide)
+    let mut out = stdout();
+    execute!(out, EnterAlternateScreen, cursor::Hide)?;
+    Ok(Terminal::new(PtyBackend { out })?)
 }
 
-fn restore() -> io::Result<()> {
-    execute!(stdout(), cursor::Show, LeaveAlternateScreen)?;
+fn restore(terminal: &mut HostTerminal) -> io::Result<()> {
+    execute!(terminal.backend_mut(), cursor::Show, LeaveAlternateScreen)?;
     disable_raw_mode()
+}
+
+/// Crossterm command backend. Ratatui diffs cells; we queue cursor / color /
+/// print commands instead of stitching SGR strings. The PTY is still the only
+/// way out of a Zellij pane — iTerm2's GPU is not reachable from here.
+struct PtyBackend {
+    out: io::Stdout,
+}
+
+impl Backend for PtyBackend {
+    type Error = io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        let mut last: Option<(u16, u16)> = None;
+        let mut fg = Color::Reset;
+        let mut bg = Color::Reset;
+        let mut modifier = Modifier::empty();
+        for (x, y, cell) in content {
+            if !matches!(last, Some((px, py)) if x == px.saturating_add(1) && y == py) {
+                queue!(self.out, cursor::MoveTo(x, y))?;
+            }
+            last = Some((x, y));
+            if cell.modifier != modifier {
+                queue!(self.out, SetAttribute(Attribute::Reset))?;
+                if cell.modifier.contains(Modifier::BOLD) {
+                    queue!(self.out, SetAttribute(Attribute::Bold))?;
+                }
+                if cell.modifier.contains(Modifier::DIM) {
+                    queue!(self.out, SetAttribute(Attribute::Dim))?;
+                }
+                modifier = cell.modifier;
+                fg = Color::Reset;
+                bg = Color::Reset;
+            }
+            if cell.fg != fg || cell.bg != bg {
+                queue!(
+                    self.out,
+                    SetColors(Colors::new(to_crossterm(cell.fg), to_crossterm(cell.bg)))
+                )?;
+                fg = cell.fg;
+                bg = cell.bg;
+            }
+            queue!(self.out, Print(cell.symbol()))?;
+        }
+        queue!(
+            self.out,
+            SetAttribute(Attribute::Reset),
+            SetColors(Colors::new(
+                crossterm::style::Color::Reset,
+                crossterm::style::Color::Reset
+            ))
+        )
+    }
+
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        execute!(self.out, cursor::Hide)
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        execute!(self.out, cursor::Show)
+    }
+
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        let (x, y) = cursor::position()?;
+        Ok(Position { x, y })
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        let position = position.into();
+        execute!(self.out, cursor::MoveTo(position.x, position.y))
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        execute!(self.out, TermClear(ClearType::All))
+    }
+
+    fn clear_region(&mut self, clear_type: Region) -> io::Result<()> {
+        let kind = match clear_type {
+            Region::All => ClearType::All,
+            Region::AfterCursor => ClearType::FromCursorDown,
+            Region::BeforeCursor => ClearType::FromCursorUp,
+            Region::CurrentLine => ClearType::CurrentLine,
+            Region::UntilNewLine => ClearType::UntilNewLine,
+        };
+        execute!(self.out, TermClear(kind))
+    }
+
+    fn size(&self) -> io::Result<Size> {
+        let (width, height) = term_size()?;
+        Ok(Size::new(width, height))
+    }
+
+    fn window_size(&mut self) -> io::Result<WindowSize> {
+        let columns_rows = self.size()?;
+        Ok(WindowSize {
+            columns_rows,
+            pixels: Size::new(0, 0),
+        })
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+}
+
+impl io::Write for PtyBackend {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.out.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+}
+
+fn to_crossterm(color: Color) -> crossterm::style::Color {
+    use crossterm::style::Color as C;
+    match color {
+        Color::Reset => C::Reset,
+        Color::Black => C::Black,
+        Color::Red => C::Red,
+        Color::Green => C::Green,
+        Color::Yellow => C::Yellow,
+        Color::Blue => C::Blue,
+        Color::Magenta => C::Magenta,
+        Color::Cyan => C::Cyan,
+        Color::Gray => C::Grey,
+        Color::DarkGray => C::DarkGrey,
+        Color::LightRed => C::DarkRed,
+        Color::LightGreen => C::DarkGreen,
+        Color::LightYellow => C::DarkYellow,
+        Color::LightBlue => C::DarkBlue,
+        Color::LightMagenta => C::DarkMagenta,
+        Color::LightCyan => C::DarkCyan,
+        Color::White => C::White,
+        Color::Rgb(r, g, b) => C::Rgb { r, g, b },
+        Color::Indexed(index) => C::AnsiValue(index),
+    }
 }
