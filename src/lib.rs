@@ -16,7 +16,10 @@ pub use float_size::{float_size_from_config, FloatSize};
 pub use floating_state::FloatingLayerState;
 pub use render::{paint, Frame, PaintCtx};
 pub use status::Status;
-pub use toggle::{closes_the_board, duplicate_close_ids, now_ms};
+pub use toggle::{
+    closes_the_board, duplicate_close_ids, duplicate_close_ids_with_focus, now_ms,
+    TOGGLE_DEBOUNCE_MS,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {

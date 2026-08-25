@@ -8,13 +8,28 @@ pub const TOGGLE_DEBOUNCE_MS: u64 = 500;
 ///
 /// `own_id` is the instance making the decision. The oldest instance owns
 /// toggle; a young oldest only drops newcomers (held Alt+q). After the
-/// debounce, the oldest closes everyone. Newcomers only close themselves so
-/// a missed PaneUpdate on the oldest cannot stack windows.
+/// debounce, a live oldest closes everyone. A leftover that was hidden
+/// only closes itself so the next Alt+q can open. Young newcomers stay
+/// and let the oldest decide — if they also closed themselves, leftover
+/// + new would both vanish (looks like the first open failed).
 pub fn duplicate_close_ids(
     own_id: u32,
     board_ids: &[u32],
     opened_at_ms: u64,
     now_ms: u64,
+) -> Vec<u32> {
+    duplicate_close_ids_with_focus(own_id, board_ids, opened_at_ms, now_ms, false)
+}
+
+/// `leftover` is sticky: set when this instance was hidden or unfocused.
+/// LaunchPlugin may show the leftover and steal focus; do not recompute
+/// leftover from the current focus/float flags at sibling-detect time.
+pub fn duplicate_close_ids_with_focus(
+    own_id: u32,
+    board_ids: &[u32],
+    opened_at_ms: u64,
+    now_ms: u64,
+    leftover: bool,
 ) -> Vec<u32> {
     if board_ids.len() <= 1 || !board_ids.contains(&own_id) {
         return Vec::new();
@@ -24,6 +39,9 @@ pub fn duplicate_close_ids(
     let young = have_clock && now_ms.saturating_sub(opened_at_ms) < TOGGLE_DEBOUNCE_MS;
 
     if own_id != oldest {
+        if young {
+            return Vec::new();
+        }
         return vec![own_id];
     }
     if young {
@@ -33,17 +51,15 @@ pub fn duplicate_close_ids(
             .filter(|id| *id != own_id)
             .collect();
     }
+    if leftover {
+        return vec![own_id];
+    }
     board_ids.to_vec()
 }
 
 /// Hide the floating layer only when the surviving board is going away.
-/// A key-repeat newcomer closing itself must not hide the oldest pane.
 pub fn closes_the_board(close_ids: &[u32], plugin_ids: &[u32]) -> bool {
-    plugin_ids
-        .iter()
-        .copied()
-        .min()
-        .is_some_and(|oldest| close_ids.contains(&oldest))
+    !plugin_ids.is_empty() && plugin_ids.iter().all(|id| close_ids.contains(id))
 }
 
 pub fn now_ms() -> u64 {
@@ -68,7 +84,10 @@ mod tests {
         let now = opened + 80;
         assert!(now - opened < TOGGLE_DEBOUNCE_MS);
         assert_eq!(duplicate_close_ids(3, &[3, 9], opened, now), vec![9]);
-        assert_eq!(duplicate_close_ids(9, &[3, 9], opened, now), vec![9]);
+        assert_eq!(
+            duplicate_close_ids(9, &[3, 9], opened, now),
+            Vec::<u32>::new()
+        );
     }
 
     #[test]
@@ -77,6 +96,32 @@ mod tests {
         let now = opened + TOGGLE_DEBOUNCE_MS;
         assert_eq!(duplicate_close_ids(3, &[3, 9], opened, now), vec![3, 9]);
         assert_eq!(duplicate_close_ids(9, &[3, 9], opened, now), vec![9]);
+    }
+
+    #[test]
+    fn hidden_leftover_lets_a_new_press_open() {
+        use super::duplicate_close_ids_with_focus;
+        let leftover_opened = 1_000;
+        let now = leftover_opened + 5_000;
+        assert_eq!(
+            duplicate_close_ids_with_focus(3, &[3, 9], leftover_opened, now, true),
+            vec![3]
+        );
+        assert_eq!(
+            duplicate_close_ids_with_focus(9, &[3, 9], now, now + 20, false),
+            Vec::<u32>::new()
+        );
+    }
+
+    #[test]
+    fn live_oldest_still_toggles_after_debounce() {
+        use super::duplicate_close_ids_with_focus;
+        let opened = 1_000;
+        let now = opened + TOGGLE_DEBOUNCE_MS;
+        assert_eq!(
+            duplicate_close_ids_with_focus(3, &[3, 9], opened, now, false),
+            vec![3, 9]
+        );
     }
 
     #[test]

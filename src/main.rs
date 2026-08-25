@@ -3,12 +3,18 @@
 use std::collections::BTreeMap;
 
 use zellij_agent_board::{
-    closes_the_board, duplicate_close_ids, float_size_from_config, now_ms, Action, AgentId, Board,
-    FloatSize, FloatingLayerState, Key, PaintCtx, PanePlace,
+    closes_the_board, duplicate_close_ids_with_focus, float_size_from_config, now_ms, Action,
+    AgentId, Board, FloatSize, FloatingLayerState, Key, PaintCtx, PanePlace, TOGGLE_DEBOUNCE_MS,
 };
 use zellij_tile::prelude::*;
 
 const PLUGIN_NAME: &str = "zellij-agent-board";
+/// Default Zellij float is a title strip. Treat anything this large as enlarged.
+const ENLARGE_MIN_ROWS: usize = 12;
+const ENLARGE_MIN_COLS: usize = 40;
+/// One enlarge retry after open. After this, never resize again (leftovers
+/// must not keep calling change_floating_panes_coordinates).
+const OPEN_ENLARGE_RETRY_MS: u64 = 400;
 const SCAN_LAUNCHER: &str = r#"
 s="${ZELLIJ_AGENT_BOARD_SCAN:-$HOME/.config/zellij/plugins/zellij-agent-board-scan.sh}"
 if [ -x "$s" ]; then exec "$s"; fi
@@ -30,8 +36,11 @@ struct State {
     pane_manifest: Option<PaneManifest>,
     float_size: FloatSize,
     enlarge_pending: bool,
+    enlarge_issued: bool,
     enlarged_once: bool,
     opened_at_ms: u64,
+    /// Sticky: hidden or unfocused. Next Alt+q must keep the newcomer.
+    suppressed: bool,
 }
 
 register_plugin!(State);
@@ -68,40 +77,50 @@ impl ZellijPlugin for State {
                     if let Some(id) = self.own_plugin_id {
                         rename_plugin_pane(id, PLUGIN_NAME);
                     }
-                    // Same order as overview: detect Alt+q toggle before other work.
+                    // Same order as overview: toggle, enlarge, then host work.
                     self.close_if_duplicate();
                     self.enlarge_if_floating();
                     self.remember_sessions(&fetch_live_sessions());
                     self.request_scan();
-                    set_timeout(1.0);
+                    // One short tick so the first enlarge can run after PaneUpdate.
+                    set_timeout(0.05);
                 }
                 true
             }
             Event::Timer(_) => {
                 self.board.tick();
+                if self.within_open_enlarge_window() && !self.enlarged_once {
+                    self.enlarge_pending = false;
+                    self.enlarge_issued = false;
+                    self.enlarge_if_floating();
+                }
+                if !self.suppressed {
+                    self.request_scan();
+                }
                 set_timeout(1.0);
                 true
             }
-            // Zellij often restores a small float on open; re-apply 94%.
-            Event::Visible(true) => {
-                self.enlarged_once = false;
-                self.enlarge_pending = false;
-                self.enlarge_if_floating();
-                true
+            Event::Visible(false) => {
+                if !self.is_young() {
+                    self.suppressed = true;
+                }
+                false
             }
-            Event::Visible(false) => false,
             Event::SessionUpdate(sessions, _) => {
                 if let Some(session) = sessions.iter().find(|session| session.is_current_session) {
                     self.current_session = Some(session.name.clone());
                     self.floating_layer
                         .capture(self.previous_pane_was_floating(session));
+                    self.mark_suppressed_if_layer_hidden(session);
                 }
                 self.remember_sessions(&sessions);
-                self.request_scan();
+                // Scan on open + timer. SessionUpdate storms on LaunchPlugin
+                // and each scan is pgrep/lsof across every agent.
                 true
             }
             Event::PaneUpdate(manifest) => {
                 self.pane_manifest = Some(manifest);
+                self.mark_suppressed_if_unfocused();
                 self.close_if_duplicate();
                 self.enlarge_if_floating();
                 if let Some(session) = self.current_session.clone() {
@@ -150,8 +169,11 @@ impl ZellijPlugin for State {
     fn render(&mut self, rows: usize, cols: usize) {
         if self.enlarge_pending {
             self.enlarge_pending = false;
+            if viewport_is_large(rows, cols) {
+                self.enlarged_once = true;
+            }
+        } else if viewport_is_large(rows, cols) {
             self.enlarged_once = true;
-            return;
         }
         if !self.can_paint() {
             return;
@@ -167,25 +189,20 @@ impl ZellijPlugin for State {
 
 impl State {
     fn can_paint(&self) -> bool {
-        if !self.permissions_granted {
-            return false;
-        }
-        let Some(own_id) = self.own_plugin_id else {
-            return false;
-        };
-        let Some(manifest) = self.pane_manifest.as_ref() else {
-            return false;
-        };
-        let floating = manifest
-            .panes
-            .values()
-            .flatten()
-            .any(|pane| pane.is_plugin && pane.id == own_id && pane.is_floating);
-        !floating || self.enlarged_once
+        // Paint as soon as we have permission. overview waits for enlarge and
+        // can stay a title strip; we still grow once, but do not skip the frame.
+        self.permissions_granted && self.own_plugin_id.is_some()
+    }
+
+    fn within_open_enlarge_window(&self) -> bool {
+        !self.enlarged_once
+            && self.opened_at_ms > 0
+            && now_ms().saturating_sub(self.opened_at_ms) < OPEN_ENLARGE_RETRY_MS
     }
 
     /// Copied from overview: second LaunchPlugin opens a sibling; oldest closes all.
-    fn close_if_duplicate(&self) {
+    /// A leftover that was hidden only closes itself so the newcomer can stay.
+    fn close_if_duplicate(&mut self) {
         if !self.permissions_granted || !self.own_pane_is_listed() {
             return;
         }
@@ -208,15 +225,72 @@ impl State {
             .filter(|pane| pane.is_plugin && same_board_plugin(pane.plugin_url.as_deref(), own_url))
             .map(|pane| pane.id)
             .collect();
-        let close_ids = duplicate_close_ids(own_id, &board_ids, self.opened_at_ms, now_ms());
+        let close_ids = duplicate_close_ids_with_focus(
+            own_id,
+            &board_ids,
+            self.opened_at_ms,
+            now_ms(),
+            self.suppressed,
+        );
         if close_ids.is_empty() {
             return;
         }
         if closes_the_board(&close_ids, &board_ids) {
+            self.suppressed = true;
             self.restore_floating_layer();
         }
         for id in close_ids {
             close_pane_with_id(PaneId::Plugin(id));
+        }
+    }
+
+    fn is_young(&self) -> bool {
+        self.opened_at_ms > 0 && now_ms().saturating_sub(self.opened_at_ms) < TOGGLE_DEBOUNCE_MS
+    }
+
+    fn mark_suppressed_if_unfocused(&mut self) {
+        if self.is_young() {
+            return;
+        }
+        let Some(own_id) = self.own_plugin_id else {
+            return;
+        };
+        let Some(manifest) = self.pane_manifest.as_ref() else {
+            return;
+        };
+        if manifest
+            .panes
+            .values()
+            .flatten()
+            .any(|pane| pane.is_plugin && pane.id == own_id && !pane.is_focused)
+        {
+            self.suppressed = true;
+        }
+    }
+
+    /// Hide leaves the leftover focused; unfocused/Visible often never fire.
+    /// The tab that owns this pane is the only float-layer flag we can trust.
+    fn mark_suppressed_if_layer_hidden(&mut self, session: &SessionInfo) {
+        if self.is_young() {
+            return;
+        }
+        let Some(own_id) = self.own_plugin_id else {
+            return;
+        };
+        let Some(tab_pos) = session.panes.panes.iter().find_map(|(&tab, panes)| {
+            panes
+                .iter()
+                .any(|pane| pane.is_plugin && pane.id == own_id)
+                .then_some(tab)
+        }) else {
+            return;
+        };
+        if session
+            .tabs
+            .iter()
+            .any(|tab| tab.position == tab_pos && !tab.are_floating_panes_visible)
+        {
+            self.suppressed = true;
         }
     }
 
@@ -240,7 +314,12 @@ impl State {
     }
 
     fn enlarge_if_floating(&mut self) {
-        if self.enlarged_once || self.enlarge_pending || !self.permissions_granted {
+        if self.suppressed
+            || self.enlarged_once
+            || self.enlarge_pending
+            || self.enlarge_issued
+            || !self.permissions_granted
+        {
             return;
         }
         let Some(own_id) = self.own_plugin_id else {
@@ -268,11 +347,12 @@ impl State {
             return;
         };
         self.enlarge_pending = true;
+        self.enlarge_issued = true;
         change_floating_panes_coordinates(vec![(PaneId::Plugin(own_id), coords)]);
     }
 
     fn request_scan(&mut self) {
-        if !self.permissions_granted || self.scan_inflight {
+        if self.suppressed || !self.permissions_granted || self.scan_inflight {
             return;
         }
         self.scan_inflight = true;
@@ -323,16 +403,18 @@ impl State {
             .copied()
     }
 
-    fn apply(&self, action: Action) -> bool {
+    fn apply(&mut self, action: Action) -> bool {
         match action {
             Action::Dismiss => {
                 self.dismiss();
                 false
             }
             Action::Jump { session, pane_id } => {
+                // Same as overview: dismiss, then move. overview uses go_to_tab;
+                // we focus the agent pane instead.
                 self.dismiss();
                 if self.current_session.as_deref() == Some(session.as_str()) {
-                    focus_terminal_pane(pane_id, true, false);
+                    focus_terminal_pane(pane_id, false, false);
                 } else {
                     switch_session_with_focus(&session, None, Some((pane_id, false)));
                 }
@@ -342,10 +424,11 @@ impl State {
         }
     }
 
-    fn dismiss(&self) {
-        // Match overview: restore the floating layer, then close this plugin.
-        // hide_self() leaves the pane around and breaks LaunchPlugin toggle.
-        self.restore_floating_layer();
+    fn dismiss(&mut self) {
+        // Close only. hide_floating_panes before close_self leaves a leftover
+        // that the next Alt+q treats as a toggle (looks like it did not open).
+        // If close is dropped, this instance stays leftover and must not toggle.
+        self.suppressed = true;
         close_self();
     }
 }
@@ -448,6 +531,10 @@ fn pane_id(pane: &PaneInfo) -> PaneId {
     } else {
         PaneId::Terminal(pane.id)
     }
+}
+
+fn viewport_is_large(rows: usize, cols: usize) -> bool {
+    rows >= ENLARGE_MIN_ROWS && cols >= ENLARGE_MIN_COLS
 }
 
 fn write_plugin_lines(lines: &[String]) {
