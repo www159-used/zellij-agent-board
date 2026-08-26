@@ -56,3 +56,27 @@ mkdir -p "$spool_dir"
 tmp="${spool_dir}/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}.tmp.$$"
 printf '%s\n' "$line" >"$tmp"
 mv -f "$tmp" "${spool_dir}/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}"
+
+# Unread done → OSC 9 on this pane's tty. Zellij forwards it to the host
+# terminal. Only `stop` (not afterAgentResponse) so one done cycle rings once.
+# Skip if this finished_at is already SEEN. Never `zellij pipe --plugin`.
+if [ "$event" = "stop" ]; then
+  seen="${TMPDIR:-/tmp}/zellij-agent-board/seen/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}"
+  seen_at=""
+  if [ -f "$seen" ]; then
+    seen_at=$(awk '{print $4}' "$seen")
+  fi
+  if [ "$seen_at" != "$epoch" ]; then
+    place=$(basename "${PWD:-}")
+    [ -n "$place" ] || place="pane ${ZELLIJ_PANE_ID}"
+    msg="${ZELLIJ_SESSION_NAME} ${place} done"
+    if [ -e /dev/tty ]; then
+      printf '\033]9;%s\007' "$msg" >/dev/tty 2>/dev/null || true
+    else
+      parent_tty=$(ps -p "${PPID:-0}" -o tty= 2>/dev/null | tr -d ' ')
+      if [ -n "$parent_tty" ] && [ "$parent_tty" != "??" ] && [ -e "/dev/${parent_tty}" ]; then
+        printf '\033]9;%s\007' "$msg" >"/dev/${parent_tty}" 2>/dev/null || true
+      fi
+    fi
+  fi
+fi
