@@ -26,7 +26,7 @@
   --card-border: #61687c;
   --separator: var(--card-border);
 
-  /* 底栏药丸；名单里时间列也用 tip-bg 做 gutter */
+  /* 底栏药丸；名单里时间列默认 gutter；done 未读/陈旧再叠色 */
   --tip-fg: #161a22;
   --tip-bg: #a2c5ce;
   --tip-typed: var(--focus);

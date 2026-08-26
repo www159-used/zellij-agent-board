@@ -404,28 +404,11 @@ fn agent_row(
         status_style,
     ));
 
-    let when = match agent.status {
-        Status::Working | Status::Compact => agent
-            .started_at
-            .map(|started| fmt_elapsed(board.wall_now.saturating_sub(started)))
-            .unwrap_or_default(),
-        Status::Done => agent
-            .finished_at
-            .map(|finished| {
-                let base = if board.wall_at_open > 0 {
-                    board.wall_at_open
-                } else {
-                    board.wall_now
-                };
-                fmt_ago(base.saturating_sub(finished))
-            })
-            .unwrap_or_default(),
-        _ => String::new(),
-    };
+    let (when, when_color) = time_cell(agent, board);
     let when_style = Style::default().fg(if masked {
         theme().mask_fg
     } else {
-        time_color(agent.status)
+        when_color
     });
     spans.push(Span::styled(
         format!(" {}", pad_right(&when, 11)),
@@ -627,11 +610,54 @@ fn status_color(status: Status) -> ratatui::style::Color {
     }
 }
 
-/// Clock column uses tip-bg so it reads as its own gutter, not another status chip.
-fn time_color(status: Status) -> ratatui::style::Color {
-    match status {
-        Status::Working | Status::Compact | Status::Done => theme().tip_bg,
-        _ => theme().mask_fg,
+/// Seconds shown in the clock column (working elapsed or done ago).
+fn agent_time_secs(agent: &Agent, board: &Board) -> Option<u64> {
+    match agent.status {
+        Status::Working | Status::Compact => agent
+            .started_at
+            .map(|started| board.wall_now.saturating_sub(started)),
+        Status::Done => {
+            let base = if board.wall_at_open > 0 {
+                board.wall_at_open
+            } else {
+                board.wall_now
+            };
+            agent
+                .finished_at
+                .map(|finished| base.saturating_sub(finished))
+        }
+        _ => None,
+    }
+}
+
+/// Clock column: working stays neutral; done uses two tiers plus a "new" label.
+fn time_cell(agent: &Agent, board: &Board) -> (String, ratatui::style::Color) {
+    const STALE_DONE_SECS: u64 = 2 * 3600;
+
+    let theme = theme();
+    match agent.status {
+        Status::Working | Status::Compact => {
+            let when = agent_time_secs(agent, board)
+                .map(fmt_elapsed)
+                .unwrap_or_default();
+            (when, theme.tip_bg)
+        }
+        Status::Done => {
+            let Some(secs) = agent_time_secs(agent, board) else {
+                return (String::new(), theme.mask_fg);
+            };
+            if agent.unread_done() {
+                (
+                    format!("new {}", fmt_elapsed(secs)),
+                    theme.pin_mark,
+                )
+            } else if secs > STALE_DONE_SECS {
+                (fmt_ago(secs), theme.mask_fg)
+            } else {
+                (fmt_ago(secs), theme.tip_bg)
+            }
+        }
+        _ => (String::new(), theme.mask_fg),
     }
 }
 
@@ -796,7 +822,7 @@ mod tests {
         assert!(text.contains("working"));
         assert!(text.contains("2m14s"));
         assert!(text.contains("done"));
-        assert!(text.contains("2m14s ago"), "{text}");
+        assert!(text.contains("new 2m14s"), "{text}");
     }
 
     #[test]
@@ -876,6 +902,7 @@ mod tests {
         done.started_at = None;
         done.finished_at = Some(1_700_000_000);
         done.pane_title = "Ship it".into();
+        done.visited = true;
         board.agents.push(done);
         let text = painted(&board, 20, 110, "ww");
         let working = text
@@ -1023,6 +1050,102 @@ mod tests {
         assert_eq!(fmt_elapsed(134), "2m14s");
         assert_eq!(fmt_elapsed(3661), "1h1m");
         assert_eq!(fmt_ago(134), "2m14s ago");
+    }
+
+    #[test]
+    fn done_time_uses_two_colors_and_a_new_label() {
+        let mut board = Board {
+            hooks_installed: true,
+            wall_now: 1_700_000_134,
+            wall_at_open: 1_700_000_134,
+            ..Board::default()
+        };
+        let mut unread = agent();
+        unread.status = Status::Done;
+        unread.started_at = None;
+        unread.finished_at = Some(1_700_000_000);
+        unread.visited = false;
+
+        let mut fresh = agent();
+        fresh.id.pane_id = 4;
+        fresh.status = Status::Done;
+        fresh.started_at = None;
+        fresh.finished_at = Some(1_700_000_100);
+        fresh.visited = true;
+
+        let mut stale = agent();
+        stale.id.pane_id = 5;
+        stale.status = Status::Done;
+        stale.started_at = None;
+        stale.finished_at = Some(1_699_992_000);
+        stale.visited = true;
+
+        board.agents = vec![unread, fresh, stale];
+        let text = paint(
+            &board,
+            PaintCtx {
+                rows: 20,
+                cols: 110,
+                home: "ww",
+            },
+        )
+        .lines
+        .join("\n");
+        let unread_line = text
+            .lines()
+            .find(|line| line.contains('!') && line.contains("new 2m14s"))
+            .expect("unread done row");
+        let fresh_line = text
+            .lines()
+            .find(|line| line.contains("34s ago"))
+            .expect("fresh done row");
+        let stale_line = text
+            .lines()
+            .find(|line| line.contains("2h15m ago"))
+            .expect("stale done row");
+
+        assert!(
+            unread_line.contains("\u{1b}[38;2;249;169;182m"),
+            "unread done time should use pin-mark: {unread_line}"
+        );
+        assert!(
+            fresh_line.contains("\u{1b}[38;2;162;197;206m"),
+            "read done time should stay on tip-bg: {fresh_line}"
+        );
+        assert!(
+            stale_line.contains("\u{1b}[38;2;61;68;84m"),
+            "stale done time should fade to mask-fg: {stale_line}"
+        );
+    }
+
+    #[test]
+    fn working_time_stays_neutral() {
+        let mut board = Board {
+            hooks_installed: true,
+            wall_now: 1_700_000_800,
+            ..Board::default()
+        };
+        let mut agent = agent();
+        agent.started_at = Some(1_700_000_000);
+        board.agents.push(agent);
+        let text = paint(
+            &board,
+            PaintCtx {
+                rows: 16,
+                cols: 110,
+                home: "",
+            },
+        )
+        .lines
+        .join("\n");
+        let row = text
+            .lines()
+            .find(|line| line.contains("working") && line.contains("13m20s"))
+            .expect("working row");
+        assert!(
+            row.contains("\u{1b}[38;2;162;197;206m"),
+            "working time should stay on tip-bg: {row}"
+        );
     }
 
     #[test]

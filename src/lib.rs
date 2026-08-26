@@ -721,7 +721,7 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(board.agents[1].status, Status::Done);
         assert_eq!(board.agents[1].finished_at, Some(1_700_000_000));
         let joined = board.lines().join("\n");
-        assert!(joined.contains("ago"), "{joined}");
+        assert!(joined.contains("new 0s"), "{joined}");
         assert_eq!(board.agents.len(), 2);
         assert!(board.agents[1].unread_done());
     }
@@ -838,7 +838,7 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(board.wall_at_open, 1_700_000_134);
         let before = board.lines().join("\n");
         assert!(before.contains("2m14s"), "{before}");
-        assert!(before.contains("2m14s ago"), "{before}");
+        assert!(before.contains("new 2m14s"), "{before}");
 
         board.tick();
         board.tick();
@@ -851,7 +851,7 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(board.wall_at_open, 1_700_000_134);
         let after = board.lines().join("\n");
         assert!(after.contains("2m16s"), "{after}");
-        assert!(after.contains("2m14s ago"), "{after}");
+        assert!(after.contains("new 2m14s"), "{after}");
         assert!(!after.contains("16m"), "{after}");
     }
 
