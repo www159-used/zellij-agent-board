@@ -20,9 +20,11 @@ pub use floating_state::FloatingLayerState;
 #[cfg(not(target_arch = "wasm32"))]
 pub use protocol::persist_seen;
 pub use protocol::{
-    focus_path, format_focus, format_jump, format_places, format_seen, parse_focus, parse_jump,
-    parse_places, places_path, seen_dir, spool_dir, PIPE_NAME,
+    focus_path, format_focus, format_jump, format_places, format_seen, merge_places, parse_focus,
+    parse_jump, parse_places, places_path, seen_dir, spool_dir, PIPE_NAME,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use protocol::{host_places_path, load_places, persist_places};
 pub use render::{frame_patch, paint, paint_to_size, render_board, Frame, FramePatch, PaintCtx};
 #[cfg(not(target_arch = "wasm32"))]
 pub use scan::{
@@ -39,12 +41,20 @@ pub use toggle::{
 pub enum Key {
     Up,
     Down,
+    First,
+    Last,
+    HalfPageDown,
+    HalfPageUp,
+    PageDown,
+    PageUp,
     Confirm,
     Dismiss,
     ToggleHelp,
     StartHint,
     Backspace,
     Input(char),
+    Digit(u8),
+    GPrefix,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +83,9 @@ pub struct Board {
     pub wall_at_open: u64,
     pub help_visible: bool,
     hint: Option<HintState>,
+    motion_count: Option<u32>,
+    g_pending: bool,
+    page_len: usize,
 }
 
 impl Board {
@@ -263,6 +276,19 @@ impl Board {
         true
     }
 
+    pub fn sessions_missing_titles(&self) -> Vec<String> {
+        let mut sessions: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|agent| agent.tab_name.is_empty() && agent.pane_title.is_empty())
+            .map(|agent| agent.id.session.clone())
+            .filter(|name| !name.is_empty())
+            .collect();
+        sessions.sort();
+        sessions.dedup();
+        sessions
+    }
+
     pub fn decide(&mut self, key: Key) -> Action {
         if self.help_visible {
             return match key {
@@ -294,29 +320,82 @@ impl Board {
                 }
                 Key::Input(ch) => self.apply_hint_input(ch),
                 Key::Confirm => self.jump_at(self.selected),
-                Key::Up | Key::Down | Key::ToggleHelp => Action::None,
+                _ => Action::None,
             };
         }
         match key {
             Key::ToggleHelp => {
+                self.clear_motion();
                 self.help_visible = true;
                 Action::None
             }
             Key::Dismiss => Action::Dismiss,
-            Key::Up => {
-                if self.selected > 0 {
-                    self.selected -= 1;
+            Key::Digit(digit) => {
+                self.g_pending = false;
+                self.push_count_digit(digit);
+                Action::None
+            }
+            Key::GPrefix => {
+                if self.g_pending {
+                    self.g_pending = false;
+                    self.goto_counted_or_first();
+                } else {
+                    self.g_pending = true;
                 }
+                Action::None
+            }
+            Key::First => {
+                self.g_pending = false;
+                self.goto_counted_or_first();
+                Action::None
+            }
+            Key::Last => {
+                self.g_pending = false;
+                self.goto_counted_or_last();
+                Action::None
+            }
+            Key::Up => {
+                self.g_pending = false;
+                let steps = self.take_count();
+                self.move_by(-(steps as isize));
                 Action::None
             }
             Key::Down => {
-                if !self.agents.is_empty() {
-                    self.selected = (self.selected + 1).min(self.agents.len() - 1);
-                }
+                self.g_pending = false;
+                let steps = self.take_count();
+                self.move_by(steps as isize);
                 Action::None
             }
-            Key::Confirm => self.jump_at(self.selected),
+            Key::HalfPageDown => {
+                self.g_pending = false;
+                let steps = self.half_page() * self.take_count();
+                self.move_by(steps as isize);
+                Action::None
+            }
+            Key::HalfPageUp => {
+                self.g_pending = false;
+                let steps = self.half_page() * self.take_count();
+                self.move_by(-(steps as isize));
+                Action::None
+            }
+            Key::PageDown => {
+                self.g_pending = false;
+                let steps = self.page_span() * self.take_count();
+                self.move_by(steps as isize);
+                Action::None
+            }
+            Key::PageUp => {
+                self.g_pending = false;
+                let steps = self.page_span() * self.take_count();
+                self.move_by(-(steps as isize));
+                Action::None
+            }
+            Key::Confirm => {
+                self.clear_motion();
+                self.jump_at(self.selected)
+            }
             Key::StartHint => {
+                self.clear_motion();
                 self.hint = Some(HintState {
                     labels: vec![None; self.agents.len()],
                     query: String::new(),
@@ -326,6 +405,76 @@ impl Board {
             }
             Key::Backspace | Key::Input(_) => Action::None,
         }
+    }
+
+    pub fn set_page_len(&mut self, len: usize) {
+        self.page_len = len;
+    }
+
+    fn clear_motion(&mut self) {
+        self.motion_count = None;
+        self.g_pending = false;
+    }
+
+    fn push_count_digit(&mut self, digit: u8) {
+        if digit == 0 && self.motion_count.is_none() {
+            self.selected = 0;
+            return;
+        }
+        let next = self
+            .motion_count
+            .unwrap_or(0)
+            .saturating_mul(10)
+            .saturating_add(u32::from(digit));
+        self.motion_count = Some(next.min(10_000));
+    }
+
+    fn take_count(&mut self) -> usize {
+        self.motion_count.take().unwrap_or(1).max(1) as usize
+    }
+
+    fn page_span(&self) -> usize {
+        if self.page_len == 0 {
+            10
+        } else {
+            self.page_len
+        }
+    }
+
+    fn half_page(&self) -> usize {
+        (self.page_span() / 2).max(1)
+    }
+
+    fn move_by(&mut self, delta: isize) {
+        if self.agents.is_empty() {
+            return;
+        }
+        let last = self.agents.len() as isize - 1;
+        self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
+    }
+
+    fn goto_counted_or_first(&mut self) {
+        if let Some(count) = self.motion_count.take() {
+            self.goto_line(count);
+        } else if !self.agents.is_empty() {
+            self.selected = 0;
+        }
+    }
+
+    fn goto_counted_or_last(&mut self) {
+        if let Some(count) = self.motion_count.take() {
+            self.goto_line(count);
+        } else if !self.agents.is_empty() {
+            self.selected = self.agents.len() - 1;
+        }
+    }
+
+    fn goto_line(&mut self, line: u32) {
+        if self.agents.is_empty() {
+            return;
+        }
+        let index = (line.max(1) as usize).saturating_sub(1);
+        self.selected = index.min(self.agents.len() - 1);
     }
 
     pub fn is_hinting(&self) -> bool {
@@ -980,9 +1129,34 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         )]));
         assert_eq!(board.agents[0].tab_name, "refactor/use-yotta");
         assert_eq!(board.agents[0].pane_title, "refactor/use-yotta");
+        assert!(board.sessions_missing_titles().is_empty());
         let text = board.lines().join("\n");
         assert!(text.contains("done"), "{text}");
         assert!(text.contains("use-yotta"), "{text}");
+        assert!(board.sessions_missing_titles().is_empty());
+    }
+
+    #[test]
+    fn sessions_missing_titles_skips_named_rows() {
+        let mut board = Board::default();
+        board.ingest(
+            "META hooks=1 epoch=1700000134\n\
+             SCAN ww 3 agent /Users/ww/.local/bin/agent\n\
+             SCAN lp 0 agent /Users/ww/.local/bin/agent\n",
+        );
+        assert_eq!(board.sessions_missing_titles(), ["lp", "ww"]);
+        board.apply_places([(
+            AgentId {
+                session: "ww".into(),
+                pane_id: 3,
+            },
+            PanePlace {
+                tab_position: 0,
+                tab_name: "self".into(),
+                pane_title: "review".into(),
+            },
+        )]);
+        assert_eq!(board.sessions_missing_titles(), ["lp"]);
     }
 
     #[test]
@@ -1086,10 +1260,77 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
             .any(|line| line.contains('›') && line.contains('8')));
         assert!(lines
             .last()
-            .is_some_and(|line| line.contains("e go") && line.contains("? help")));
+            .is_some_and(|line| line.contains(" go ") && line.contains(" more ")));
         assert!(!lines
             .iter()
             .any(|line| line.contains('›') && line.contains("/1")));
+    }
+
+    fn ingest_panes(board: &mut Board, count: u32) {
+        let mut scan = String::from("META hooks=1\n");
+        for pane in 1..=count {
+            scan.push_str(&format!(
+                "SCAN ww {pane} agent /Users/ww/.local/bin/agent --workspace /tmp/{pane}\n"
+            ));
+        }
+        board.ingest(&scan);
+    }
+
+    #[test]
+    fn counted_j_moves_that_many_rows() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 15);
+        board.decide(Key::Digit(1));
+        board.decide(Key::Digit(0));
+        board.decide(Key::Down);
+        assert_eq!(board.selected, 10);
+    }
+
+    #[test]
+    fn gg_goes_to_the_first_row_and_g_to_the_last() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.selected = 5;
+        board.decide(Key::GPrefix);
+        board.decide(Key::GPrefix);
+        assert_eq!(board.selected, 0);
+        board.decide(Key::Last);
+        assert_eq!(board.selected, 7);
+    }
+
+    #[test]
+    fn counted_g_is_a_one_based_line() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.decide(Key::Digit(3));
+        board.decide(Key::Last);
+        assert_eq!(board.selected, 2);
+        board.decide(Key::Digit(3));
+        board.decide(Key::GPrefix);
+        board.decide(Key::GPrefix);
+        assert_eq!(board.selected, 2);
+    }
+
+    #[test]
+    fn ctrl_d_moves_half_the_page() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 20);
+        board.set_page_len(10);
+        board.decide(Key::HalfPageDown);
+        assert_eq!(board.selected, 5);
+        board.decide(Key::HalfPageUp);
+        assert_eq!(board.selected, 0);
+        board.decide(Key::PageDown);
+        assert_eq!(board.selected, 10);
+    }
+
+    #[test]
+    fn lone_zero_goes_to_the_first_row() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 6);
+        board.selected = 4;
+        board.decide(Key::Digit(0));
+        assert_eq!(board.selected, 0);
     }
 
     #[test]

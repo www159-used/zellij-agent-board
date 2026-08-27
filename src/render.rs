@@ -137,14 +137,30 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
         .border_style(Style::default().fg(theme().focus));
     let inner = block.inner(area);
     block.render(area, buffer);
+    let key = |text: &str| {
+        Span::styled(
+            format!("{text:<22}"),
+            Style::default()
+                .fg(theme().tip_typed)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
     let lines = vec![
-        Line::from("h/j/k/l, arrows  move"),
-        Line::from("e / Enter         jump to pane"),
-        Line::from("s                 flash search"),
-        Line::from("Alt+q             toggle board (global)"),
-        Line::from("q / Esc           close"),
-        Line::from("!                 done, not opened yet"),
-        Line::from("?                 close help"),
+        Line::from(vec![key("j/k  h/l  arrows"), Span::raw("move")]),
+        Line::from(vec![
+            key("10j  0  gg  G"),
+            Span::raw("count / first / last"),
+        ]),
+        Line::from(vec![
+            key("C-d  C-u  C-f  C-b"),
+            Span::raw("half page / page"),
+        ]),
+        Line::from(vec![key("e  Enter"), Span::raw("go")]),
+        Line::from(vec![key("s"), Span::raw("search")]),
+        Line::from(vec![key("q  Esc"), Span::raw("close")]),
+        Line::from(vec![key("Alt+q"), Span::raw("toggle board")]),
+        Line::from(vec![key("!"), Span::raw("done, not opened yet")]),
+        Line::from(vec![key("?"), Span::raw("close help")]),
     ];
     Paragraph::new(lines).render(inner, buffer);
 }
@@ -262,7 +278,7 @@ fn render_scroll_arrows(area: Rect, start: usize, end: usize, total: usize, buff
 
 fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
     let line = if board.help_visible {
-        Line::from("? / q / Esc close help")
+        footer_hints(area.width, None, &[("q", "close"), ("?", "close")])
     } else if board.is_hinting() {
         Line::from(vec![
             Span::styled(
@@ -285,18 +301,67 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
             Span::styled("  Esc cancel", Style::default().fg(theme().mask_fg)),
         ])
     } else {
-        let mut spans = Vec::new();
-        if !home.is_empty() {
-            spans.push(Span::styled(
-                format!(" {home} "),
-                Style::default().fg(theme().tip_fg).bg(theme().session),
-            ));
-            spans.push(Span::raw("  "));
-        }
-        spans.push(Span::raw("hjkl move   e go   s search   q close   ? help"));
-        Line::from(spans)
+        footer_hints(
+            area.width,
+            (!home.is_empty()).then_some(home),
+            &[
+                ("j/k", "move"),
+                ("e", "go"),
+                ("s", "search"),
+                ("q", "close"),
+                ("?", "more"),
+            ],
+        )
     };
     Paragraph::new(line).render(area, buffer);
+}
+
+fn footer_hints(width: u16, home: Option<&str>, pairs: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    if let Some(name) = home {
+        let pill = format!(" {name} ");
+        used += pill.chars().count() + 2;
+        spans.push(Span::styled(
+            pill,
+            Style::default().fg(theme().tip_fg).bg(theme().session),
+        ));
+        spans.push(Span::raw("  "));
+    }
+    let budget = usize::from(width);
+    for (index, (key, action)) in pairs.iter().enumerate() {
+        let labeled = key.chars().count() + action.chars().count() + 4;
+        let bare = key.chars().count() + 2;
+        let (chunk, extra) = if used + labeled <= budget {
+            (
+                vec![
+                    Span::styled(
+                        format!(" {key} "),
+                        Style::default().fg(theme().tip_fg).bg(theme().tip_bg),
+                    ),
+                    Span::raw(format!(" {action} ")),
+                ],
+                labeled,
+            )
+        } else if used + bare <= budget {
+            (
+                vec![Span::styled(
+                    format!(" {key} "),
+                    Style::default().fg(theme().tip_fg).bg(theme().tip_bg),
+                )],
+                bare,
+            )
+        } else {
+            break;
+        };
+        if index > 0 && used + extra <= budget {
+            spans.push(Span::styled(" ", Style::default().fg(theme().mask_fg)));
+            used += 1;
+        }
+        used += extra;
+        spans.extend(chunk);
+    }
+    Line::from(spans)
 }
 
 fn header_line(board: &Board) -> Line<'static> {
@@ -405,11 +470,7 @@ fn agent_row(
     ));
 
     let (when, when_color) = time_cell(agent, board);
-    let when_style = Style::default().fg(if masked {
-        theme().mask_fg
-    } else {
-        when_color
-    });
+    let when_style = Style::default().fg(if masked { theme().mask_fg } else { when_color });
     spans.push(Span::styled(
         format!(" {}", pad_right(&when, 11)),
         when_style,
@@ -647,10 +708,7 @@ fn time_cell(agent: &Agent, board: &Board) -> (String, ratatui::style::Color) {
                 return (String::new(), theme.mask_fg);
             };
             if agent.unread_done() {
-                (
-                    format!("new {}", fmt_elapsed(secs)),
-                    theme.pin_mark,
-                )
+                (format!("new {}", fmt_elapsed(secs)), theme.pin_mark)
             } else if secs > STALE_DONE_SECS {
                 (fmt_ago(secs), theme.mask_fg)
             } else {
@@ -865,9 +923,11 @@ mod tests {
         board.agents.push(agent());
         let text = painted(&board, 12, 80, "ww");
         assert!(text.contains(" ww "));
-        assert!(text.contains("e go"));
-        assert!(text.contains("s search"));
-        assert!(text.contains("? help"));
+        assert!(text.contains(" go "));
+        assert!(text.contains(" search "));
+        assert!(text.contains(" more "));
+        assert!(!text.contains("hjkl"));
+        assert!(!text.contains("^d"));
     }
 
     #[test]
@@ -1030,7 +1090,8 @@ mod tests {
         board.decide(Key::ToggleHelp);
         let text = painted(&board, 16, 60, "ww");
         assert!(text.contains("help"));
-        assert!(text.contains("jump to pane"));
+        assert!(text.contains("C-d"));
+        assert!(text.contains("count / first / last"));
         assert!(!text.contains("Shell cargo test --lib"));
     }
 

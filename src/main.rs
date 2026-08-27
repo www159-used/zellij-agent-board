@@ -13,7 +13,32 @@ const PLUGIN_NAME: &str = "zellij-agent-board";
 const PLACES_WRITER: &str = r#"
 dir="${TMPDIR:-/tmp}/zellij-agent-board"
 mkdir -p "$dir"
-printf '%s' "${ZAB_PLACES}" >"$dir/places"
+file="$dir/places"
+incoming="$dir/places.incoming"
+printf '%s' "${ZAB_PLACES}" >"$incoming"
+if [ ! -s "$incoming" ]; then
+  rm -f "$incoming"
+  exit 0
+fi
+if [ ! -f "$file" ]; then
+  mv "$incoming" "$file"
+  exit 0
+fi
+awk '
+  FNR == NR {
+    if ($0 ~ /^PLACE /) {
+      split($0, a, /[ \t]+/)
+      seen[a[2] SUBSEP a[3]] = 1
+      print
+    }
+    next
+  }
+  /^PLACE / {
+    split($0, a, /[ \t]+/)
+    if (!((a[2] SUBSEP a[3]) in seen)) print
+  }
+' "$incoming" "$file" | sort >"$file.tmp" && mv "$file.tmp" "$file"
+rm -f "$incoming"
 "#;
 
 const FOCUS_WRITER: &str = r#"
@@ -400,11 +425,13 @@ impl State {
     }
 
     fn flush_places(&mut self) {
-        let text = format_places(
-            self.places
-                .iter()
-                .map(|(id, place)| (id.clone(), place.clone())),
-        );
+        let text = format_places(self.places.iter().filter_map(|(id, place)| {
+            if place.tab_name.is_empty() && place.pane_title.is_empty() {
+                None
+            } else {
+                Some((id.clone(), place.clone()))
+            }
+        }));
         if text == self.last_places {
             return;
         }

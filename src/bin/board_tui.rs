@@ -1,9 +1,15 @@
 //! Host TUI adapter. Scan, spool, places, keys, and ratatui live here.
+//!
+//! MVC loop: `Board` + the places file are the model. The first frame paints
+//! that cache. A background `list-panes` pass is the controller — it only
+//! writes the cache and dirty-redraws when a title actually changed.
 
 use std::fs;
 use std::io::{self, stdout, Write};
 use std::path::Path;
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::cursor;
@@ -22,8 +28,9 @@ use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use zellij_agent_board::{
-    focus_path, format_jump, parse_focus, parse_places, persist_seen, places_path, render_board,
-    scan_host_text, scan_places_for, spool_dir, Action, AgentId, Board, Key, PIPE_NAME,
+    focus_path, format_jump, host_places_path, load_places, parse_focus, persist_places,
+    persist_seen, places_path, render_board, scan_host_text, scan_places_for, spool_dir, Action,
+    AgentId, Board, Key, PanePlace, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -40,7 +47,9 @@ struct App {
     last_places: Instant,
     last_tick: Instant,
     places_mtime: Option<SystemTime>,
+    host_places_mtime: Option<SystemTime>,
     spool_mtime: Option<SystemTime>,
+    places_rx: Option<Receiver<Vec<(AgentId, PanePlace)>>>,
 }
 
 fn main() -> io::Result<()> {
@@ -65,12 +74,20 @@ impl App {
             last_places: now - PLACES_EVERY,
             last_tick: now,
             places_mtime: None,
+            host_places_mtime: None,
             spool_mtime: None,
+            places_rx: None,
         }
     }
 
     fn bootstrap(&mut self) {
-        self.rescan();
+        self.last_scan = Instant::now();
+        self.load_model();
+        self.start_reconcile();
+    }
+
+    fn load_model(&mut self) {
+        self.board.ingest(&scan_host_text());
         self.reload_places();
         self.reload_spool();
         self.mark_launch_focus();
@@ -80,8 +97,16 @@ impl App {
         let mut dirty = true;
         loop {
             if dirty {
+                if let Ok(size) = terminal.size() {
+                    self.board
+                        .set_page_len(visible_page(size.width, size.height));
+                }
                 draw(terminal, &self.board, &self.home)?;
                 dirty = false;
+            }
+            dirty |= self.take_host_places();
+            if dirty {
+                continue;
             }
             if event::poll(POLL)? {
                 loop {
@@ -105,7 +130,9 @@ impl App {
             if now.duration_since(self.last_scan) >= SCAN_EVERY {
                 dirty |= self.rescan();
             }
-            if file_changed(&places_path(), &mut self.places_mtime) {
+            if file_changed(&places_path(), &mut self.places_mtime)
+                || file_changed(&host_places_path(), &mut self.host_places_mtime)
+            {
                 dirty |= self.reload_places();
             }
             if dir_changed(&spool_dir(), &mut self.spool_mtime) {
@@ -137,37 +164,74 @@ impl App {
     fn rescan(&mut self) -> bool {
         self.last_scan = Instant::now();
         let ingest = self.board.ingest(&scan_host_text());
-        if self.should_refresh_places() {
-            self.last_places = Instant::now();
-            ingest | self.reload_host_places()
-        } else {
-            ingest
+        if self.places_rx.is_none() && places_due(self.last_places.elapsed()) {
+            self.start_reconcile();
         }
-    }
-
-    fn should_refresh_places(&self) -> bool {
-        self.board
-            .agents
-            .iter()
-            .any(|agent| agent.pane_title.is_empty())
-            || Instant::now().duration_since(self.last_places) >= PLACES_EVERY
+        ingest
     }
 
     fn reload_places(&mut self) -> bool {
-        let text = fs::read_to_string(places_path()).unwrap_or_default();
-        self.board.apply_places(parse_places(&text))
+        self.board.apply_places(load_places())
     }
 
-    fn reload_host_places(&mut self) -> bool {
-        let mut sessions: Vec<String> = self
-            .board
-            .agents
-            .iter()
-            .map(|agent| agent.id.session.clone())
-            .collect();
-        sessions.sort();
-        sessions.dedup();
-        self.board.apply_places(scan_places_for(&sessions))
+    fn start_reconcile(&mut self) {
+        if self.places_rx.is_some() {
+            return;
+        }
+        let sessions = reconcile_sessions(
+            self.board
+                .agents
+                .iter()
+                .map(|agent| agent.id.session.clone()),
+            self.board.sessions_missing_titles(),
+            &self.home,
+        );
+        if sessions.is_empty() {
+            self.last_places = Instant::now();
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            for session in sessions {
+                if tx.send(scan_places_for(&[session])).is_err() {
+                    break;
+                }
+            }
+        });
+        self.places_rx = Some(rx);
+    }
+
+    fn take_host_places(&mut self) -> bool {
+        let mut batch = Vec::new();
+        let mut done = false;
+        if let Some(rx) = &self.places_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(places) => batch.push(places),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if done {
+            self.places_rx = None;
+            self.last_places = Instant::now();
+        }
+        let mut dirty = false;
+        for places in batch {
+            persist_places(places.clone());
+            if let Ok(meta) = fs::metadata(places_path()) {
+                self.places_mtime = meta.modified().ok();
+            }
+            if let Ok(meta) = fs::metadata(host_places_path()) {
+                self.host_places_mtime = meta.modified().ok();
+            }
+            dirty |= self.board.apply_places(places);
+        }
+        dirty
     }
 
     fn reload_spool(&mut self) -> bool {
@@ -208,7 +272,54 @@ enum Loop {
     Quit,
 }
 
+fn places_due(elapsed: Duration) -> bool {
+    elapsed >= PLACES_EVERY
+}
+
+fn reconcile_sessions(
+    sessions: impl IntoIterator<Item = String>,
+    missing: impl IntoIterator<Item = String>,
+    home: &str,
+) -> Vec<String> {
+    let mut rest: Vec<String> = sessions
+        .into_iter()
+        .filter(|name| !name.is_empty())
+        .collect();
+    rest.sort();
+    rest.dedup();
+    let mut missing: Vec<String> = missing
+        .into_iter()
+        .filter(|name| !name.is_empty() && name != home)
+        .collect();
+    missing.sort();
+    missing.dedup();
+    let mut out = Vec::new();
+    if !home.is_empty() && rest.iter().any(|name| name == home) {
+        out.push(home.to_string());
+    }
+    for name in missing {
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    for name in rest {
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 fn map_key(event: KeyEvent, hinting: bool) -> Option<Key> {
+    if event.modifiers.contains(KeyModifiers::CONTROL) && !hinting {
+        return match event.code {
+            KeyCode::Char('d') => Some(Key::HalfPageDown),
+            KeyCode::Char('u') => Some(Key::HalfPageUp),
+            KeyCode::Char('f') => Some(Key::PageDown),
+            KeyCode::Char('b') => Some(Key::PageUp),
+            _ => None,
+        };
+    }
     if event.modifiers != KeyModifiers::NONE && event.modifiers != KeyModifiers::SHIFT {
         return None;
     }
@@ -218,6 +329,13 @@ fn map_key(event: KeyEvent, hinting: bool) -> Option<Key> {
         KeyCode::Backspace if hinting => Some(Key::Backspace),
         KeyCode::Char('s') if !hinting => Some(Key::StartHint),
         KeyCode::Char(ch) if hinting => Some(Key::Input(ch)),
+        KeyCode::Home if !hinting => Some(Key::First),
+        KeyCode::End if !hinting => Some(Key::Last),
+        KeyCode::PageDown if !hinting => Some(Key::PageDown),
+        KeyCode::PageUp if !hinting => Some(Key::PageUp),
+        KeyCode::Char('g') if !hinting => Some(Key::GPrefix),
+        KeyCode::Char('G') if !hinting => Some(Key::Last),
+        KeyCode::Char(ch) if !hinting && ch.is_ascii_digit() => Some(Key::Digit(ch as u8 - b'0')),
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Left | KeyCode::Char('h') if !hinting => {
             Some(Key::Up)
         }
@@ -267,6 +385,12 @@ fn zellij_bin() -> String {
 /// Draw through ratatui's cell diff. The PTY is still the only pipe out of
 /// a Zellij pane — there is no direct Metal/iTerm2 handle — but we no longer
 /// stitch ANSI lines ourselves.
+fn visible_page(width: u16, height: u16) -> usize {
+    let per = if width >= 50 { 2 } else { 1 };
+    let budget = usize::from(height.saturating_sub(4));
+    (budget / per).max(1)
+}
+
 fn draw(terminal: &mut HostTerminal, board: &Board, home: &str) -> io::Result<()> {
     terminal.draw(|frame| {
         let area = frame.area();
@@ -453,5 +577,42 @@ fn to_crossterm(color: Color) -> crossterm::style::Color {
         Color::White => C::White,
         Color::Rgb(r, g, b) => C::Rgb { r, g, b },
         Color::Indexed(index) => C::AnsiValue(index),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{places_due, reconcile_sessions, PLACES_EVERY};
+    use std::time::Duration;
+
+    #[test]
+    fn first_paint_does_not_refresh_places_just_because_titles_are_empty() {
+        assert!(!places_due(Duration::ZERO));
+        assert!(!places_due(PLACES_EVERY - Duration::from_millis(1)));
+        assert!(places_due(PLACES_EVERY));
+    }
+
+    #[test]
+    fn reconcile_checks_home_then_missing_then_the_rest() {
+        assert_eq!(
+            reconcile_sessions(
+                ["ww".into(), "lp".into(), "daily".into(), "ww".into()],
+                ["lp".into(), "daily".into()],
+                "ww"
+            ),
+            vec!["ww", "daily", "lp"]
+        );
+        assert_eq!(
+            reconcile_sessions(["lp".into(), "".into()], ["lp".into()], ""),
+            vec!["lp"]
+        );
+        assert_eq!(
+            reconcile_sessions(
+                ["ww".into(), "lp".into(), "jcm".into()],
+                ["lp".into()],
+                "ww"
+            ),
+            vec!["ww", "lp", "jcm"]
+        );
     }
 }
