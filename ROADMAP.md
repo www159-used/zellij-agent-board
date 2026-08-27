@@ -1,33 +1,22 @@
 # Roadmap
 
-Zellij Agent Board 规划路线图。
+## 接下来做（v0.5.0）
 
-执行跟踪见 [GitHub Issues](https://github.com/www159-used/zellij-agent-board/issues)。
+- [#4](https://github.com/www159-used/zellij-agent-board/issues/4) **Working 计时跨重开**：日常多测测新加的 `started/` 机制，确认中途重开 board 不会把时间重置成 0。
+- [#2](https://github.com/www159-used/zellij-agent-board/issues/2) **多 Agent 搜索优化**：按 `s` 只在当前屏幕看得到的 agent 上标快捷键；支持输 session 名先滚动到该分组。
+- [#1](https://github.com/www159-used/zellij-agent-board/issues/1) **Plan / Ask 状态提醒**：Agent 等用户选方案或确认时，给个醒目状态或发通知，一眼看出在等人。
+- [#3](https://github.com/www159-used/zellij-agent-board/issues/3) **通知积压平滑处理**：通知来得急或者 board 关着时，再打开能把状态顺畅对齐，不丢事件。
+- [#5](https://github.com/www159-used/zellij-agent-board/issues/5) **补 v0.4.0 发版记录**：把首帧缓存、places.host、滚动修复等写进 CHANGELOG。
 
-## 近期规划 (v0.5.0)
+## 后面有空再看
 
-- [#4 验证 Working 耗时跨重开持久化](https://github.com/www159-used/zellij-agent-board/issues/4) —— 确认新版 `started/` 机制在多回合下计时稳定
-- [#2 Agent 较多时优化搜索与跳转体验](https://github.com/www159-used/zellij-agent-board/issues/2) —— 按 `s` 仅在可视区域分配 hint label；支持先跳 session
-- [#1 支持 Plan / Ask 模式待确认状态与通知联动](https://github.com/www159-used/zellij-agent-board/issues/1) —— 当 agent 停留在等待用户选择时提供专门标记与通知
-- [#3 完善后台通知积压处理](https://github.com/www159-used/zellij-agent-board/issues/3) —— 解决多条通知并发或 board 关闭期间的状态对齐
-- [#5 整理 v0.4.0 CHANGELOG 与 Release 说明](https://github.com/www159-used/zellij-agent-board/issues/5) —— 补齐版本更新记录
+- 弹窗界面居中
+- 和 Overview 深度联动（首屏直接当 agent 门厅、legacy tab 跳进 space）
+- 做个好看的 icon
+- 简单的本地使用统计
 
-## 后续探索
+## 暂时不做 / 避坑原则
 
-- 界面居中布局
-- 与 Overview 深度联动（首屏 agent 聚合管理、从 legacy session 跳转进入）
-- 专属应用 Icon
-- 使用习惯统计与分析
-
-## 当前定论（暂不做）
-
-- **不引入 SQLite / 内存双缓冲**：现有的 `places` + `places.host` 文件合并机制性能与简单度已足够
-- **日常 Alt+q 不走 `skip_plugin_cache`**：仅在 Overview (Alt+y) 需要时使用
-- **保持轻量桥接架构**：不随意修改 WASM 空桥与 new-pane 唤起机制
-
-## 版本历史
-
-- **v0.4.0**：MVC 架构改造，首帧读缓存秒开，后台异步对账；`places.host` 隔离；滚动视口优化；`started/` 记录回合起始时间
-- **v0.3.x**：相对时间展示、未读 Done 标记、系统通知联动、桥接模式
-- **v0.2.x**：快捷键切换、flash.nvim 风格跳转高亮
-- **v0.1.x**：基础原型与 UI 框架
+- **不搞 SQLite / 内存双缓冲**：现有的 `places` + `places.host` 双文件读时合并就够快够稳了。
+- **日常 Alt+q 别加 `skip_plugin_cache`**：会导致每次重复加载 WASM 堆积内存，只有 Alt+y overview 需要。
+- **不改动当前的轻量桥接方式**（空桥 + new-pane）：保证秒开和低发热。
