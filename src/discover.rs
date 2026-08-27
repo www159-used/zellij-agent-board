@@ -35,6 +35,11 @@ pub enum HostLine {
         id: AgentId,
         finished_at: u64,
     },
+    /// Current working turn started. Survives spool being overwritten by tool hooks.
+    Started {
+        id: AgentId,
+        started_at: u64,
+    },
 }
 
 /// One `SCAN session pane tool [argv…]` line from the host script.
@@ -117,6 +122,15 @@ pub fn parse_host_line(line: &str) -> Option<HostLine> {
             Some(HostLine::Seen {
                 id: AgentId { session, pane_id },
                 finished_at,
+            })
+        }
+        "STARTED" => {
+            let session = parts.next()?.to_string();
+            let pane_id = parts.next()?.parse().ok()?;
+            let started_at = parts.next()?.parse().ok()?;
+            Some(HostLine::Started {
+                id: AgentId { session, pane_id },
+                started_at,
             })
         }
         _ => None,
@@ -229,6 +243,16 @@ mod tests {
                     pane_id: 3,
                 },
                 finished_at: 1_700_000_000,
+            })
+        );
+        assert_eq!(
+            parse_host_line("STARTED ww 3 1700000000"),
+            Some(HostLine::Started {
+                id: AgentId {
+                    session: "ww".into(),
+                    pane_id: 3,
+                },
+                started_at: 1_700_000_000,
             })
         );
     }

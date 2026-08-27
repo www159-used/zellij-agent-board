@@ -207,10 +207,7 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         return;
     }
 
-    let per = if wide { 2 } else { 1 };
-    let budget = usize::from(body.height);
-    let max_agents = (budget / per).max(1).min(board.agents.len());
-    let (start, end) = window(board.agents.len(), board.selected, max_agents);
+    let (start, end) = list_viewport(board, body.height, wide, multi);
 
     let mut y = body.y;
     let mut last_session = None;
@@ -743,16 +740,47 @@ fn line_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(Span::width).sum()
 }
 
-fn window(len: usize, selected: usize, max_items: usize) -> (usize, usize) {
-    if len == 0 || max_items == 0 {
+fn list_viewport(board: &Board, body_height: u16, wide: bool, multi: bool) -> (usize, usize) {
+    let len = board.agents.len();
+    if len == 0 || body_height == 0 {
         return (0, 0);
     }
-    let max_items = max_items.min(len);
-    let mut start = selected.saturating_sub(max_items / 2);
-    if start + max_items > len {
-        start = len - max_items;
+    let selected = board.selected.min(len - 1);
+    let mut start = selected;
+    while start > 0
+        && measure_agent_block(board, start - 1, selected + 1, wide, multi) <= body_height
+    {
+        start -= 1;
     }
-    (start, start + max_items)
+    let mut end = selected + 1;
+    while end < len && measure_agent_block(board, start, end + 1, wide, multi) <= body_height {
+        end += 1;
+    }
+    (start, end)
+}
+
+fn measure_agent_block(board: &Board, start: usize, end: usize, wide: bool, multi: bool) -> u16 {
+    let mut lines = 0u16;
+    let mut last_session = if start > 0 {
+        Some(board.agents[start - 1].id.session.as_str())
+    } else {
+        None
+    };
+    for index in start..end {
+        let session = board.agents[index].id.session.as_str();
+        if multi && last_session != Some(session) {
+            if last_session.is_some() {
+                lines = lines.saturating_add(1);
+            }
+            lines = lines.saturating_add(1);
+        }
+        last_session = Some(session);
+        lines = lines.saturating_add(1);
+        if wide && activity_text(&board.agents[index]).is_some() {
+            lines = lines.saturating_add(1);
+        }
+    }
+    lines
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -1254,6 +1282,30 @@ mod tests {
         assert!(
             patch_bytes < full / 2,
             "tick patch {patch_bytes} vs full clear {full}"
+        );
+    }
+
+    #[test]
+    fn list_viewport_keeps_selected_row_visible_with_session_heads() {
+        let mut board = Board::default();
+        let mut scan = String::from("META hooks=1\n");
+        for pane in 1..=6 {
+            scan.push_str(&format!(
+                "SCAN ww {pane} agent /Users/ww/.local/bin/agent --workspace /tmp/{pane}\n"
+            ));
+        }
+        board.ingest(&scan);
+        board.selected = 5;
+        let text = painted(&board, 6, 80, "ww");
+        assert!(
+            text.lines().any(|line| line.starts_with('›')),
+            "selected row should stay on screen:\n{text}"
+        );
+        assert!(
+            !text
+                .lines()
+                .any(|line| line.starts_with('›') && line.contains("/1")),
+            "viewport should scroll past the first row:\n{text}"
         );
     }
 }

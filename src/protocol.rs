@@ -30,6 +30,10 @@ pub fn seen_dir() -> std::path::PathBuf {
     runtime_dir().join("seen")
 }
 
+pub fn started_dir() -> std::path::PathBuf {
+    runtime_dir().join("started")
+}
+
 fn tmp_root() -> std::path::PathBuf {
     std::env::var("TMPDIR")
         .or_else(|_| std::env::var("TMP"))
@@ -116,6 +120,10 @@ pub fn format_seen(session: &str, pane_id: u32, finished_at: u64) -> String {
     format!("SEEN {session} {pane_id} {finished_at}")
 }
 
+pub fn format_started(session: &str, pane_id: u32, started_at: u64) -> String {
+    format!("STARTED {session} {pane_id} {started_at}")
+}
+
 pub fn format_focus(session: &str, pane_id: u32) -> String {
     format!("FOCUS {session} {pane_id}")
 }
@@ -140,10 +148,7 @@ pub fn persist_places(incoming: impl IntoIterator<Item = (AgentId, PanePlace)>) 
     let host = std::fs::read_to_string(&host_path).unwrap_or_default();
     let merged = merge_places(parse_places(&host), incoming);
     let text = format_places(merged);
-    let _ = std::fs::write(&host_path, &text);
-    let wasm = std::fs::read_to_string(places_path()).unwrap_or_default();
-    let shared = format_places(merge_places(parse_places(&wasm), parse_places(&text)));
-    let _ = std::fs::write(places_path(), shared);
+    let _ = std::fs::write(&host_path, text);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -157,6 +162,25 @@ pub fn persist_seen(session: &str, pane_id: u32, finished_at: u64) {
         path,
         format!("{}\n", format_seen(session, pane_id, finished_at)),
     );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn persist_started(session: &str, pane_id: u32, started_at: u64) {
+    let dir = started_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join(format!("{session}-{pane_id}"));
+    let _ = std::fs::write(
+        path,
+        format!("{}\n", format_started(session, pane_id, started_at)),
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn clear_started(session: &str, pane_id: u32) {
+    let path = started_dir().join(format!("{session}-{pane_id}"));
+    let _ = std::fs::remove_file(path);
 }
 
 pub fn parse_focus(text: &str) -> Option<(String, u32)> {

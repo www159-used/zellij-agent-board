@@ -29,7 +29,7 @@ use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use zellij_agent_board::{
     focus_path, format_jump, host_places_path, load_places, parse_focus, persist_places,
-    persist_seen, places_path, render_board, scan_host_text, scan_places_for, spool_dir, Action,
+    persist_seen, render_board, scan_host_text, scan_places_for, spool_dir, Action,
     AgentId, Board, Key, PanePlace, PIPE_NAME,
 };
 
@@ -46,7 +46,6 @@ struct App {
     last_scan: Instant,
     last_places: Instant,
     last_tick: Instant,
-    places_mtime: Option<SystemTime>,
     host_places_mtime: Option<SystemTime>,
     spool_mtime: Option<SystemTime>,
     places_rx: Option<Receiver<Vec<(AgentId, PanePlace)>>>,
@@ -73,7 +72,6 @@ impl App {
             last_scan: now - SCAN_EVERY,
             last_places: now - PLACES_EVERY,
             last_tick: now,
-            places_mtime: None,
             host_places_mtime: None,
             spool_mtime: None,
             places_rx: None,
@@ -104,35 +102,19 @@ impl App {
                 draw(terminal, &self.board, &self.home)?;
                 dirty = false;
             }
-            dirty |= self.take_host_places();
-            if dirty {
-                continue;
-            }
             if event::poll(POLL)? {
-                loop {
-                    match event::read()? {
-                        Event::Key(key) if key.kind == KeyEventKind::Press => {
-                            match self.handle_key(key) {
-                                Loop::Continue => dirty = true,
-                                Loop::Quit => return Ok(()),
-                            }
-                        }
-                        Event::Resize(_, _) => dirty = true,
-                        _ => {}
-                    }
-                    if !event::poll(Duration::ZERO)? {
-                        break;
-                    }
+                match self.drain_keys()? {
+                    DrainKeys::Quit => return Ok(()),
+                    DrainKeys::Dirty => dirty = true,
+                    DrainKeys::Idle => {}
                 }
-                continue;
             }
+            dirty |= self.take_host_places();
             let now = Instant::now();
             if now.duration_since(self.last_scan) >= SCAN_EVERY {
                 dirty |= self.rescan();
             }
-            if file_changed(&places_path(), &mut self.places_mtime)
-                || file_changed(&host_places_path(), &mut self.host_places_mtime)
-            {
+            if file_changed(&host_places_path(), &mut self.host_places_mtime) {
                 dirty |= self.reload_places();
             }
             if dir_changed(&spool_dir(), &mut self.spool_mtime) {
@@ -146,18 +128,45 @@ impl App {
         }
     }
 
+    fn drain_keys(&mut self) -> io::Result<DrainKeys> {
+        let mut dirty = false;
+        loop {
+            match event::read()? {
+                Event::Key(key)
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
+                    match self.handle_key(key) {
+                        Loop::Changed => dirty = true,
+                        Loop::Quit => return Ok(DrainKeys::Quit),
+                        Loop::Ignored => {}
+                    }
+                }
+                Event::Resize(_, _) => dirty = true,
+                _ => {}
+            }
+            if !event::poll(Duration::ZERO)? {
+                break;
+            }
+        }
+        Ok(if dirty {
+            DrainKeys::Dirty
+        } else {
+            DrainKeys::Idle
+        })
+    }
+
     fn handle_key(&mut self, event: KeyEvent) -> Loop {
         let Some(key) = map_key(event, self.board.is_hinting()) else {
-            return Loop::Continue;
+            return Loop::Ignored;
         };
         match self.board.decide(key) {
             Action::Dismiss => Loop::Quit,
             Action::Jump { session, pane_id } => {
                 persist_done_seen(&self.board, &session, pane_id);
                 send_jump(&session, pane_id);
-                Loop::Continue
+                Loop::Changed
             }
-            Action::None => Loop::Continue,
+            Action::None => Loop::Changed,
         }
     }
 
@@ -223,9 +232,6 @@ impl App {
         let mut dirty = false;
         for places in batch {
             persist_places(places.clone());
-            if let Ok(meta) = fs::metadata(places_path()) {
-                self.places_mtime = meta.modified().ok();
-            }
             if let Ok(meta) = fs::metadata(host_places_path()) {
                 self.host_places_mtime = meta.modified().ok();
             }
@@ -268,8 +274,15 @@ impl App {
 }
 
 enum Loop {
-    Continue,
+    Changed,
     Quit,
+    Ignored,
+}
+
+enum DrainKeys {
+    Quit,
+    Dirty,
+    Idle,
 }
 
 fn places_due(elapsed: Duration) -> bool {

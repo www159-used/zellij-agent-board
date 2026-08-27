@@ -57,6 +57,19 @@ tmp="${spool_dir}/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}.tmp.$$"
 printf '%s\n' "$line" >"$tmp"
 mv -f "$tmp" "${spool_dir}/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}"
 
+# Last spool line is often a tool hook. Persist the turn start separately
+# so working elapsed survives q / Alt+q.
+started="${TMPDIR:-/tmp}/zellij-agent-board/started/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}"
+case "$event" in
+  beforeSubmitPrompt)
+    mkdir -p "$(dirname "$started")"
+    printf 'STARTED %s %s %s\n' "${ZELLIJ_SESSION_NAME}" "${ZELLIJ_PANE_ID}" "${epoch}" >"$started"
+    ;;
+  stop|afterAgentResponse|sessionEnd)
+    rm -f "$started"
+    ;;
+esac
+
 # Unread done → OSC 9 on this pane's tty. Zellij forwards it to the host
 # terminal. Only `stop` (not afterAgentResponse) so one done cycle rings once.
 # Skip if this finished_at is already SEEN. Never `zellij pipe --plugin`.

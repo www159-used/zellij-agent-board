@@ -20,8 +20,9 @@ pub use floating_state::FloatingLayerState;
 #[cfg(not(target_arch = "wasm32"))]
 pub use protocol::persist_seen;
 pub use protocol::{
-    focus_path, format_focus, format_jump, format_places, format_seen, merge_places, parse_focus,
-    parse_jump, parse_places, places_path, seen_dir, spool_dir, PIPE_NAME,
+    focus_path, format_focus, format_jump, format_places, format_seen, format_started,
+    merge_places, parse_focus, parse_jump, parse_places, places_path, seen_dir, spool_dir,
+    started_dir, PIPE_NAME,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use protocol::{host_places_path, load_places, persist_places};
@@ -92,32 +93,41 @@ impl Board {
     pub fn ingest(&mut self, text: &str) -> bool {
         let before = self.agents.clone();
         let before_hooks = self.hooks_installed;
-        let (found, hooks, seen) = self.collect_host_lines(text);
+        let (found, hooks, seen, started) = self.collect_host_lines(text);
         self.replace_from_scan(found);
         self.apply_notices(hooks);
         self.apply_seen(seen);
+        self.apply_started(started);
         self.hooks_installed != before_hooks || self.agents != before
     }
 
     /// Pipe / spool notice. Updates status on existing rows only; never creates or drops rows.
     pub fn ingest_notice(&mut self, text: &str) {
-        let (_, hooks, seen) = self.collect_host_lines(text);
+        let (_, hooks, seen, started) = self.collect_host_lines(text);
         self.apply_notices(hooks);
         self.apply_seen(seen);
+        self.apply_started(started);
     }
 
     fn collect_host_lines(
         &mut self,
         text: &str,
-    ) -> (Vec<Found>, Vec<HookNotice>, Vec<(AgentId, u64)>) {
+    ) -> (
+        Vec<Found>,
+        Vec<HookNotice>,
+        Vec<(AgentId, u64)>,
+        Vec<(AgentId, u64)>,
+    ) {
         let mut found = Vec::new();
         let mut hooks = Vec::new();
         let mut seen = Vec::new();
+        let mut started = Vec::new();
         for line in text.lines() {
             match parse_host_line(line) {
                 Some(HostLine::Scan(row)) => found.push(row),
                 Some(HostLine::Hook(notice)) => hooks.push(notice),
                 Some(HostLine::Seen { id, finished_at }) => seen.push((id, finished_at)),
+                Some(HostLine::Started { id, started_at }) => started.push((id, started_at)),
                 Some(HostLine::Meta {
                     hooks_installed,
                     epoch,
@@ -137,7 +147,7 @@ impl Board {
                 None => {}
             }
         }
-        (found, hooks, seen)
+        (found, hooks, seen, started)
     }
 
     fn apply_notices(&mut self, hooks: Vec<HookNotice>) {
@@ -162,6 +172,13 @@ impl Board {
     ) {
         if let Some(status) = Status::from_cursor_hook(event) {
             self.apply_hook(id, status, detail, at_epoch, at_stamp);
+            if event == "beforeSubmitPrompt" {
+                if let Some(agent) = self.agents.iter().find(|agent| agent.id == *id) {
+                    if let Some(started_at) = agent.started_at {
+                        persist_turn_start(id, started_at);
+                    }
+                }
+            }
         }
     }
 
@@ -186,14 +203,20 @@ impl Board {
                         agent.visited = false;
                     }
                     if changing || agent.started_at.is_none() {
-                        agent.started_at =
+                        let candidate =
                             at_epoch.or_else(|| (self.wall_now > 0).then_some(self.wall_now));
+                        agent.started_at = match (agent.started_at, candidate) {
+                            (Some(old), Some(new)) => Some(old.min(new)),
+                            (Some(old), None) => Some(old),
+                            (None, next) => next,
+                        };
                     }
                     if !detail.is_empty() {
                         agent.detail = detail.to_string();
                     }
                 }
                 Status::Done => {
+                    clear_turn_start(&agent.id);
                     agent.started_at = None;
                     if changing {
                         agent.visited = false;
@@ -205,6 +228,7 @@ impl Board {
                     }
                 }
                 Status::Idle | Status::Ended => {
+                    clear_turn_start(&agent.id);
                     agent.detail.clear();
                     agent.finished_at = None;
                     agent.started_at = None;
@@ -664,6 +688,20 @@ impl Board {
         }
     }
 
+    fn apply_started(&mut self, started: Vec<(AgentId, u64)>) {
+        for (id, started_at) in started {
+            if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) {
+                if !matches!(agent.status, Status::Working | Status::Compact) {
+                    continue;
+                }
+                match agent.started_at {
+                    Some(old) if old <= started_at => {}
+                    _ => agent.started_at = Some(started_at),
+                }
+            }
+        }
+    }
+
     fn jump_at(&mut self, index: usize) -> Action {
         if self.is_hinting() {
             self.hint = None;
@@ -749,6 +787,18 @@ impl Board {
             self.recompute_hint_labels();
         }
     }
+}
+
+fn persist_turn_start(id: &AgentId, started_at: u64) {
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::protocol::persist_started(&id.session, id.pane_id, started_at);
+    let _ = (id, started_at);
+}
+
+fn clear_turn_start(id: &AgentId) {
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::protocol::clear_started(&id.session, id.pane_id);
+    let _ = id;
 }
 
 fn sort_agent_rows(agents: &mut [Agent]) {
@@ -971,6 +1021,21 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(reopened.agents[0].started_at, Some(1_700_000_000));
         let joined = reopened.lines().join("\n");
         assert!(joined.contains("3m20s"), "{joined}");
+    }
+
+    #[test]
+    fn working_elapsed_keeps_turn_start_after_later_tool_hook() {
+        let mut reopened = Board::default();
+        reopened.ingest(
+            "META hooks=1 epoch=1700000200\n\
+             SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n\
+             HOOK ww 3 postToolUse @1700000199 +08-24T15:03 Grep src\n\
+             STARTED ww 3 1700000000\n",
+        );
+        assert_eq!(reopened.agents[0].started_at, Some(1_700_000_000));
+        let joined = reopened.lines().join("\n");
+        assert!(joined.contains("3m20s"), "{joined}");
+        assert!(!joined.contains("1s"), "{joined}");
     }
 
     #[test]

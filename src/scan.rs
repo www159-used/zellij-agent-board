@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent::{keep_cursor_agent, AgentId, PanePlace};
-use crate::protocol::{seen_dir, spool_dir};
+use crate::protocol::{seen_dir, spool_dir, started_dir};
 
 pub fn scan_host_text() -> String {
     let epoch = unix_now();
@@ -55,12 +55,19 @@ pub fn scan_host_text() -> String {
                 out.push('\n');
             }
         }
+        if let Some(started) = read_started(&key) {
+            out.push_str(&started);
+            if !started.ends_with('\n') {
+                out.push('\n');
+            }
+        }
         live_keys.push(key);
     }
     // A failed match (0 live keys) must not wipe hook history.
     if !live_keys.is_empty() {
         prune_spool(&live_keys);
         prune_dir(&seen_dir(), &live_keys);
+        prune_dir(&started_dir(), &live_keys);
     }
     out
 }
@@ -311,6 +318,10 @@ fn read_spool(key: &str) -> Option<String> {
 
 fn read_seen(key: &str) -> Option<String> {
     std::fs::read_to_string(seen_dir().join(key)).ok()
+}
+
+fn read_started(key: &str) -> Option<String> {
+    std::fs::read_to_string(started_dir().join(key)).ok()
 }
 
 fn prune_spool(live_keys: &[String]) {
