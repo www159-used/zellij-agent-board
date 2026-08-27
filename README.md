@@ -4,7 +4,7 @@ English · [中文](docs/zh/README.md)
 
 Floating Zellij dashboard of running coding agents, with live status from Cursor hooks, and jump-to-pane.
 
-> Framework only: module seams and a dismissable placeholder pane. Product: [docs/zh/PRODUCT.md](docs/zh/PRODUCT.md).
+> Framework only: module seams and a dismissable placeholder pane. Product: [docs/zh/PRODUCT.md](docs/zh/PRODUCT.md). Roadmap: [ROADMAP.md](ROADMAP.md).
 
 This is not [zellij-agent](../zellij-agent/README.md) (the daily floating agent launcher).
 
