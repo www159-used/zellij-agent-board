@@ -73,6 +73,8 @@ struct HintState {
     labels: Vec<Option<String>>,
     query: String,
     jump_prefix: String,
+    /// Rows visible when flash started; labels and query stay inside it.
+    scope: (usize, usize),
 }
 
 /// Vim / Helix `/` — incremental search in the list, not a picker.
@@ -99,6 +101,8 @@ pub struct Board {
     motion_count: Option<u32>,
     g_pending: bool,
     page_len: usize,
+    list_height: u16,
+    wide_list: bool,
 }
 
 impl Board {
@@ -469,6 +473,7 @@ impl Board {
                     labels: vec![None; self.agents.len()],
                     query: String::new(),
                     jump_prefix: String::new(),
+                    scope: self.visible_range(),
                 });
                 Action::None
             }
@@ -494,6 +499,74 @@ impl Board {
 
     pub fn set_page_len(&mut self, len: usize) {
         self.page_len = len;
+    }
+
+    pub fn set_list_geometry(&mut self, width: u16, height: u16) {
+        self.wide_list = width >= 50;
+        let content = if height >= 3 {
+            height.saturating_sub(1)
+        } else {
+            height
+        };
+        let chrome = 1 + u16::from(!self.hooks_installed);
+        self.list_height = content.saturating_sub(chrome);
+    }
+
+    pub fn visible_range(&self) -> (usize, usize) {
+        if self.list_height == 0 {
+            return (0, self.agents.len());
+        }
+        self.list_viewport(self.list_height, self.wide_list)
+    }
+
+    pub fn list_viewport(&self, body_height: u16, wide: bool) -> (usize, usize) {
+        let len = self.agents.len();
+        if len == 0 || body_height == 0 {
+            return (0, 0);
+        }
+        let selected = self.selected.min(len - 1);
+        let multi = self
+            .agents
+            .windows(2)
+            .any(|pair| pair[0].id.session != pair[1].id.session);
+        let mut start = selected;
+        while start > 0
+            && self.measure_agent_block(start - 1, selected + 1, wide, multi) <= body_height
+        {
+            start -= 1;
+        }
+        let mut end = selected + 1;
+        while end < len && self.measure_agent_block(start, end + 1, wide, multi) <= body_height {
+            end += 1;
+        }
+        (start, end)
+    }
+
+    fn measure_agent_block(&self, start: usize, end: usize, wide: bool, multi: bool) -> u16 {
+        let mut lines = 0u16;
+        // Same as paint: a viewport that starts mid-session still draws a header.
+        let mut last_session = None;
+        for index in start..end {
+            let session = self.agents[index].id.session.as_str();
+            if multi && last_session != Some(session) {
+                if last_session.is_some() {
+                    lines = lines.saturating_add(1);
+                }
+                lines = lines.saturating_add(1);
+            }
+            last_session = Some(session);
+            lines = lines.saturating_add(1);
+            if wide && self.row_has_activity(index) {
+                lines = lines.saturating_add(1);
+            }
+        }
+        lines
+    }
+
+    fn row_has_activity(&self, index: usize) -> bool {
+        self.agents
+            .get(index)
+            .is_some_and(|agent| !agent.detail.is_empty() || agent.status == Status::Found)
     }
 
     fn clear_motion(&mut self) {
@@ -674,7 +747,10 @@ impl Board {
 
         let mut query = hint.query.clone();
         query.push(ch);
-        let has_matches = self.agents.iter().any(|agent| agent_matches(agent, &query));
+        let (start, end) = self.hint_scope();
+        let has_matches = self.agents[start..end]
+            .iter()
+            .any(|agent| agent_matches(agent, &query));
         if !has_matches {
             return Action::None;
         }
@@ -721,12 +797,15 @@ impl Board {
             return;
         };
         let query = hint.query.clone();
+        let (start, end) = hint.scope;
+        let (start, end) = (start.min(self.agents.len()), end.min(self.agents.len()));
         let matches: Vec<usize> = self
             .agents
             .iter()
             .enumerate()
             .filter_map(|(index, agent)| {
-                (!query.is_empty() && agent_matches(agent, &query)).then_some(index)
+                (index >= start && index < end && !query.is_empty() && agent_matches(agent, &query))
+                    .then_some(index)
             })
             .collect();
         let mut available: Vec<u8> = HINT_ALPHABET
@@ -735,8 +814,7 @@ impl Board {
             .filter(|candidate| {
                 let mut extended = query.clone();
                 extended.push(char::from(*candidate));
-                !self
-                    .agents
+                !self.agents[start..end]
                     .iter()
                     .any(|agent| agent_matches(agent, &extended))
             })
@@ -754,14 +832,30 @@ impl Board {
         }
     }
 
+    fn hint_scope(&self) -> (usize, usize) {
+        let len = self.agents.len();
+        let (start, end) = self
+            .hint
+            .as_ref()
+            .map(|hint| hint.scope)
+            .unwrap_or((0, len));
+        let start = start.min(len);
+        (start, end.min(len).max(start))
+    }
+
     fn reveal_first_hint_match(&mut self) {
-        if let Some(index) = self
+        let Some(index) = self
             .hint
             .as_ref()
             .and_then(|hint| hint.labels.iter().position(Option::is_some))
-        {
-            self.selected = index;
+        else {
+            return;
+        };
+        let (start, end) = self.visible_range();
+        if index >= start && index < end {
+            return;
         }
+        self.selected = index;
     }
 
     fn match_indices(&self, query: &str) -> Vec<usize> {
@@ -1647,6 +1741,83 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
                 pane_id: 8,
             }
         );
+    }
+
+    #[test]
+    fn flash_ignores_a_unique_match_outside_the_viewport() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.set_list_geometry(80, 8);
+        board.selected = 7;
+        let (start, end) = board.visible_range();
+        assert!(start > 0);
+        board.agents[0].tab_name = "Geo-DB".into();
+        for agent in board.agents[start..end].iter_mut() {
+            agent.tab_name = "notes".into();
+        }
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Input('g')), Action::None);
+        assert_eq!(board.hint_query(), "");
+        assert!(board.is_hinting());
+    }
+
+    #[test]
+    fn flash_sole_visible_match_jumps_even_if_more_exist_offscreen() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.set_list_geometry(80, 8);
+        board.selected = 7;
+        let (start, end) = board.visible_range();
+        assert!(start > 0);
+        board.agents[0].tab_name = "Geo-DB".into();
+        board.agents[end - 1].tab_name = "Geo-DB".into();
+        board.decide(Key::StartHint);
+        assert_eq!(
+            board.decide(Key::Input('g')),
+            Action::Jump {
+                session: "ww".into(),
+                pane_id: board.agents[end - 1].id.pane_id,
+            }
+        );
+        assert!(!board.is_hinting());
+    }
+
+    #[test]
+    fn flash_labels_stay_inside_the_visible_viewport() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.set_list_geometry(80, 8);
+        board.selected = 7;
+        let (start, end) = board.visible_range();
+        assert!(start > 0);
+        for agent in &mut board.agents {
+            agent.tab_name = "notes".into();
+        }
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Input('o')), Action::None);
+        for index in 0..board.agents.len() {
+            if index >= start && index < end {
+                assert!(board.hint_label(index).is_some(), "visible {index}");
+            } else {
+                assert!(board.hint_label(index).is_none(), "offscreen {index}");
+            }
+        }
+    }
+
+    #[test]
+    fn flash_does_not_scroll_away_when_matches_are_already_visible() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.set_list_geometry(80, 8);
+        board.decide(Key::Last);
+        let selected = board.selected;
+        assert!(selected > 0);
+        for agent in &mut board.agents {
+            agent.tab_name = "notes".into();
+        }
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Input('o')), Action::None);
+        assert_eq!(board.selected, selected);
     }
 
     #[test]

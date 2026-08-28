@@ -98,6 +98,7 @@ impl App {
                 if let Ok(size) = terminal.size() {
                     self.board
                         .set_page_len(visible_page(size.width, size.height));
+                    self.board.set_list_geometry(size.width, size.height);
                 }
                 draw(terminal, &self.board, &self.home)?;
                 dirty = false;

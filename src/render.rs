@@ -209,7 +209,7 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         return;
     }
 
-    let (start, end) = list_viewport(board, body.height, wide, multi);
+    let (start, end) = board.list_viewport(body.height, wide);
 
     let mut y = body.y;
     let mut last_session = None;
@@ -760,49 +760,6 @@ fn line_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(Span::width).sum()
 }
 
-fn list_viewport(board: &Board, body_height: u16, wide: bool, multi: bool) -> (usize, usize) {
-    let len = board.agents.len();
-    if len == 0 || body_height == 0 {
-        return (0, 0);
-    }
-    let selected = board.selected.min(len - 1);
-    let mut start = selected;
-    while start > 0
-        && measure_agent_block(board, start - 1, selected + 1, wide, multi) <= body_height
-    {
-        start -= 1;
-    }
-    let mut end = selected + 1;
-    while end < len && measure_agent_block(board, start, end + 1, wide, multi) <= body_height {
-        end += 1;
-    }
-    (start, end)
-}
-
-fn measure_agent_block(board: &Board, start: usize, end: usize, wide: bool, multi: bool) -> u16 {
-    let mut lines = 0u16;
-    let mut last_session = if start > 0 {
-        Some(board.agents[start - 1].id.session.as_str())
-    } else {
-        None
-    };
-    for index in start..end {
-        let session = board.agents[index].id.session.as_str();
-        if multi && last_session != Some(session) {
-            if last_session.is_some() {
-                lines = lines.saturating_add(1);
-            }
-            lines = lines.saturating_add(1);
-        }
-        last_session = Some(session);
-        lines = lines.saturating_add(1);
-        if wide && activity_text(&board.agents[index]).is_some() {
-            lines = lines.saturating_add(1);
-        }
-    }
-    lines
-}
-
 fn truncate(text: &str, max: usize) -> String {
     let count = text.chars().count();
     if count <= max {
@@ -1115,7 +1072,6 @@ mod tests {
         assert!(board.agent_matches(0));
         assert!(board.agent_matches(1));
         let text = painted(&board, 20, 110, "ww");
-        // Tab hit must show tab text (not project "learn"); project hit shows "openapi".
         assert!(
             text.contains("notes"),
             "tab hit missing from place column:\n{text}"
