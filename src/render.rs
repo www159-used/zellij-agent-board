@@ -157,6 +157,7 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
         ]),
         Line::from(vec![key("e  Enter"), Span::raw("go")]),
         Line::from(vec![key("s"), Span::raw("search")]),
+        Line::from(vec![key("/  n  N"), Span::raw("find / next / prev")]),
         Line::from(vec![key("q  Esc"), Span::raw("close")]),
         Line::from(vec![key("Alt+q"), Span::raw("toggle board")]),
         Line::from(vec![key("!"), Span::raw("done, not opened yet")]),
@@ -183,7 +184,8 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         .windows(2)
         .any(|pair| pair[0].id.session != pair[1].id.session);
     let hinting = board.is_hinting();
-    let flash = hinting && !board.hint_query().is_empty();
+    let flash = (hinting && !board.hint_query().is_empty())
+        || (board.is_searching() && !board.search_query().is_empty());
     if hinting {
         buffer.set_style(area, Style::default().bg(theme().mask));
     }
@@ -276,6 +278,23 @@ fn render_scroll_arrows(area: Rect, start: usize, end: usize, total: usize, buff
 fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
     let line = if board.help_visible {
         footer_hints(area.width, None, &[("q", "close"), ("?", "close")])
+    } else if board.is_searching() {
+        Line::from(vec![
+            Span::styled(
+                " / ",
+                Style::default().fg(theme().tip_fg).bg(theme().tip_bg),
+            ),
+            Span::styled(
+                format!("{}█", board.search_query()),
+                Style::default()
+                    .fg(ratatui::style::Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  Enter accept  n/N  Esc",
+                Style::default().fg(theme().mask_fg),
+            ),
+        ])
     } else if board.is_hinting() {
         Line::from(vec![
             Span::styled(
@@ -305,6 +324,7 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
                 ("j/k", "move"),
                 ("e", "go"),
                 ("s", "search"),
+                ("/", "find"),
                 ("q", "close"),
                 ("?", "more"),
             ],
@@ -420,7 +440,7 @@ fn session_head(board: &Board, name: &str, flash: bool) -> Line<'static> {
     });
     let mut spans = vec![Span::styled("◆ ", mark)];
     let range = (!muted)
-        .then(|| text_match_range_local(name, board.hint_query()))
+        .then(|| text_match_range_local(name, board.highlight_query()))
         .flatten();
     if range.is_some() {
         spans.extend(highlight_text(name, range, mark));
@@ -477,13 +497,13 @@ fn agent_row(
     // Flash highlights the matched field. The normal place column may show
     // project while the hit was tab/session — swap in the hit text so the
     // match (and tip row) always has a visible highlight.
-    let place = if !masked && board.is_hinting() && !board.hint_query().is_empty() {
+    let place = if !masked && !board.highlight_query().is_empty() {
         place_for_match(agent, field, home, multi)
     } else {
         place_label(agent, home, multi)
     };
-    let place_range = (!masked && !board.hint_query().is_empty())
-        .then(|| text_match_range_local(&place, board.hint_query()))
+    let place_range = (!masked && !board.highlight_query().is_empty())
+        .then(|| text_match_range_local(&place, board.highlight_query()))
         .flatten();
     spans.push(Span::raw(" "));
     if masked {

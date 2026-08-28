@@ -52,6 +52,9 @@ pub enum Key {
     Dismiss,
     ToggleHelp,
     StartHint,
+    StartSearch,
+    NextMatch,
+    PrevMatch,
     Backspace,
     Input(char),
     Digit(u8),
@@ -72,6 +75,13 @@ struct HintState {
     jump_prefix: String,
 }
 
+/// Vim / Helix `/` — incremental search in the list, not a picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchState {
+    query: String,
+    origin: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct Board {
     pub agents: Vec<Agent>,
@@ -84,6 +94,8 @@ pub struct Board {
     pub wall_at_open: u64,
     pub help_visible: bool,
     hint: Option<HintState>,
+    search: Option<SearchState>,
+    last_search: String,
     motion_count: Option<u32>,
     g_pending: bool,
     page_len: usize,
@@ -323,6 +335,39 @@ impl Board {
                 _ => Action::None,
             };
         }
+        if self.is_searching() {
+            return match key {
+                Key::Dismiss => {
+                    if let Some(search) = self.search.take() {
+                        self.selected = search.origin.min(self.agents.len().saturating_sub(1));
+                    }
+                    Action::None
+                }
+                Key::Confirm => {
+                    if let Some(search) = self.search.take() {
+                        self.last_search = search.query;
+                    }
+                    Action::None
+                }
+                Key::Backspace => {
+                    if let Some(search) = self.search.as_mut() {
+                        search.query.pop();
+                    }
+                    self.reveal_search_match();
+                    Action::None
+                }
+                Key::Input(ch) => self.apply_search_input(ch),
+                Key::NextMatch => {
+                    self.goto_match(1);
+                    Action::None
+                }
+                Key::PrevMatch => {
+                    self.goto_match(-1);
+                    Action::None
+                }
+                _ => Action::None,
+            };
+        }
         if self.is_hinting() {
             return match key {
                 Key::Dismiss => {
@@ -427,6 +472,22 @@ impl Board {
                 });
                 Action::None
             }
+            Key::StartSearch => {
+                self.clear_motion();
+                self.search = Some(SearchState {
+                    query: String::new(),
+                    origin: self.selected,
+                });
+                Action::None
+            }
+            Key::NextMatch => {
+                self.goto_match(1);
+                Action::None
+            }
+            Key::PrevMatch => {
+                self.goto_match(-1);
+                Action::None
+            }
             Key::Backspace | Key::Input(_) => Action::None,
         }
     }
@@ -505,6 +566,25 @@ impl Board {
         self.hint.is_some()
     }
 
+    pub fn is_searching(&self) -> bool {
+        self.search.is_some()
+    }
+
+    pub fn search_query(&self) -> &str {
+        self.search
+            .as_ref()
+            .map(|search| search.query.as_str())
+            .unwrap_or("")
+    }
+
+    pub fn highlight_query(&self) -> &str {
+        if self.is_searching() {
+            self.search_query()
+        } else {
+            self.hint_query()
+        }
+    }
+
     pub fn hint_query(&self) -> &str {
         self.hint
             .as_ref()
@@ -527,7 +607,7 @@ impl Board {
     }
 
     pub fn agent_matches(&self, index: usize) -> bool {
-        let query = self.hint_query();
+        let query = self.highlight_query();
         if query.is_empty() {
             return true;
         }
@@ -539,7 +619,7 @@ impl Board {
     /// Which searchable field hit, for paint highlight.
     /// Prefer session → project → tab.
     pub fn hint_match_field(&self, index: usize) -> Option<HintField> {
-        let query = self.hint_query();
+        let query = self.highlight_query();
         if query.is_empty() {
             return None;
         }
@@ -550,7 +630,7 @@ impl Board {
     }
 
     pub fn hint_match_range(&self, index: usize) -> Option<(usize, usize)> {
-        let query = self.hint_query();
+        let query = self.highlight_query();
         if query.is_empty() {
             return None;
         }
@@ -619,6 +699,23 @@ impl Board {
         Action::None
     }
 
+    fn apply_search_input(&mut self, ch: char) -> Action {
+        let ch = ch.to_ascii_lowercase();
+        let Some(search) = self.search.as_ref() else {
+            return Action::None;
+        };
+        let mut query = search.query.clone();
+        query.push(ch);
+        if !self.agents.iter().any(|agent| agent_matches(agent, &query)) {
+            return Action::None;
+        }
+        if let Some(search) = self.search.as_mut() {
+            search.query = query;
+        }
+        self.reveal_search_match();
+        Action::None
+    }
+
     fn recompute_hint_labels(&mut self) {
         let Some(hint) = self.hint.as_ref() else {
             return;
@@ -667,6 +764,66 @@ impl Board {
         }
     }
 
+    fn match_indices(&self, query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        self.agents
+            .iter()
+            .enumerate()
+            .filter_map(|(index, agent)| agent_matches(agent, query).then_some(index))
+            .collect()
+    }
+
+    fn active_search_query(&self) -> &str {
+        if let Some(search) = &self.search {
+            search.query.as_str()
+        } else {
+            self.last_search.as_str()
+        }
+    }
+
+    fn reveal_search_match(&mut self) {
+        let origin = self
+            .search
+            .as_ref()
+            .map(|search| search.origin)
+            .unwrap_or(0);
+        let query = self.search_query().to_string();
+        let hits = self.match_indices(&query);
+        if hits.is_empty() {
+            if let Some(search) = &self.search {
+                self.selected = search.origin.min(self.agents.len().saturating_sub(1));
+            }
+            return;
+        }
+        self.selected = hits
+            .iter()
+            .copied()
+            .find(|&index| index >= origin)
+            .unwrap_or(hits[0]);
+    }
+
+    fn goto_match(&mut self, dir: isize) {
+        let query = self.active_search_query().to_string();
+        let hits = self.match_indices(&query);
+        if hits.is_empty() {
+            return;
+        }
+        self.selected = if dir >= 0 {
+            hits.iter()
+                .copied()
+                .find(|&index| index > self.selected)
+                .unwrap_or(hits[0])
+        } else {
+            hits.iter()
+                .copied()
+                .rev()
+                .find(|&index| index < self.selected)
+                .unwrap_or(*hits.last().unwrap())
+        };
+    }
+
     pub fn mark_visited(&mut self, id: &AgentId) -> bool {
         let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == *id) else {
             return false;
@@ -706,6 +863,7 @@ impl Board {
         if self.is_hinting() {
             self.hint = None;
         }
+        self.search = None;
         let Some(agent) = self.agents.get_mut(index) else {
             return Action::None;
         };
@@ -1456,7 +1614,6 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         board.agents[1].detail = "Shell cargo test".into();
         board.agents[1].pane_title = "retry".into();
         board.decide(Key::StartHint);
-        // session/project "ww" is in scope → sole match jumps
         assert_eq!(
             board.decide(Key::Input('w')),
             Action::Jump {
@@ -1465,7 +1622,6 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
             }
         );
         board.decide(Key::StartHint);
-        // pane title / detail / status are out of scope
         assert_eq!(board.decide(Key::Input('r')), Action::None);
         assert_eq!(board.hint_query(), "");
         assert_eq!(board.decide(Key::Input('s')), Action::None);
@@ -1491,6 +1647,68 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
                 pane_id: 8,
             }
         );
+    }
+
+    #[test]
+    fn slash_search_moves_selection_and_enter_stays_on_the_board() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.selected = 0;
+        assert_eq!(board.agents[0].id.session, "lp");
+        board.decide(Key::StartSearch);
+        assert_eq!(board.decide(Key::Input('w')), Action::None);
+        assert_eq!(board.search_query(), "w");
+        assert_eq!(board.agents[board.selected].id.session, "ww");
+        assert_eq!(board.decide(Key::Confirm), Action::None);
+        assert!(!board.is_searching());
+        assert_eq!(board.agents[board.selected].id.session, "ww");
+    }
+
+    #[test]
+    fn slash_search_escape_restores_the_origin_row() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.selected = 0;
+        board.decide(Key::StartSearch);
+        board.decide(Key::Input('w'));
+        assert_eq!(board.selected, 1);
+        assert_eq!(board.decide(Key::Dismiss), Action::None);
+        assert_eq!(board.selected, 0);
+        assert!(!board.is_searching());
+    }
+
+    #[test]
+    fn n_walks_matches_after_search_accept() {
+        let mut board = Board::default();
+        board.ingest(
+            "\
+META hooks=1
+SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/a
+SCAN ww 4 agent /Users/ww/.local/bin/agent --workspace /tmp/b
+SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
+",
+        );
+        board.decide(Key::StartSearch);
+        board.decide(Key::Input('w'));
+        board.decide(Key::Confirm);
+        let first = board.selected;
+        assert_eq!(board.agents[first].id.session, "ww");
+        board.decide(Key::NextMatch);
+        assert_eq!(board.agents[board.selected].id.session, "ww");
+        assert_ne!(board.selected, first);
+        board.decide(Key::NextMatch);
+        assert_eq!(board.selected, first);
+    }
+
+    #[test]
+    fn slash_search_ignores_pane_title_and_detail() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.agents[1].detail = "Shell cargo test".into();
+        board.agents[1].pane_title = "retry".into();
+        board.decide(Key::StartSearch);
+        assert_eq!(board.decide(Key::Input('r')), Action::None);
+        assert_eq!(board.search_query(), "");
     }
 
     #[test]

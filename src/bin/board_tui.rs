@@ -29,8 +29,8 @@ use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use zellij_agent_board::{
     focus_path, format_jump, host_places_path, load_places, parse_focus, persist_places,
-    persist_seen, render_board, scan_host_text, scan_places_for, spool_dir, Action,
-    AgentId, Board, Key, PanePlace, PIPE_NAME,
+    persist_seen, render_board, scan_host_text, scan_places_for, spool_dir, Action, AgentId, Board,
+    Key, PanePlace, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -156,7 +156,7 @@ impl App {
     }
 
     fn handle_key(&mut self, event: KeyEvent) -> Loop {
-        let Some(key) = map_key(event, self.board.is_hinting()) else {
+        let Some(key) = map_key(event, self.board.is_hinting(), self.board.is_searching()) else {
             return Loop::Ignored;
         };
         match self.board.decide(key) {
@@ -323,8 +323,9 @@ fn reconcile_sessions(
     out
 }
 
-fn map_key(event: KeyEvent, hinting: bool) -> Option<Key> {
-    if event.modifiers.contains(KeyModifiers::CONTROL) && !hinting {
+fn map_key(event: KeyEvent, hinting: bool, searching: bool) -> Option<Key> {
+    let typing = hinting || searching;
+    if event.modifiers.contains(KeyModifiers::CONTROL) && !typing {
         return match event.code {
             KeyCode::Char('d') => Some(Key::HalfPageDown),
             KeyCode::Char('u') => Some(Key::HalfPageUp),
@@ -338,21 +339,24 @@ fn map_key(event: KeyEvent, hinting: bool) -> Option<Key> {
     }
     match event.code {
         KeyCode::Esc | KeyCode::Char('q') => Some(Key::Dismiss),
-        KeyCode::Char('?') if !hinting => Some(Key::ToggleHelp),
-        KeyCode::Backspace if hinting => Some(Key::Backspace),
-        KeyCode::Char('s') if !hinting => Some(Key::StartHint),
-        KeyCode::Char(ch) if hinting => Some(Key::Input(ch)),
-        KeyCode::Home if !hinting => Some(Key::First),
-        KeyCode::End if !hinting => Some(Key::Last),
-        KeyCode::PageDown if !hinting => Some(Key::PageDown),
-        KeyCode::PageUp if !hinting => Some(Key::PageUp),
-        KeyCode::Char('g') if !hinting => Some(Key::GPrefix),
-        KeyCode::Char('G') if !hinting => Some(Key::Last),
-        KeyCode::Char(ch) if !hinting && ch.is_ascii_digit() => Some(Key::Digit(ch as u8 - b'0')),
-        KeyCode::Up | KeyCode::Char('k') | KeyCode::Left | KeyCode::Char('h') if !hinting => {
+        KeyCode::Char('?') if !typing => Some(Key::ToggleHelp),
+        KeyCode::Backspace if typing => Some(Key::Backspace),
+        KeyCode::Char('s') if !typing => Some(Key::StartHint),
+        KeyCode::Char('/') if !typing => Some(Key::StartSearch),
+        KeyCode::Char('n') if !typing => Some(Key::NextMatch),
+        KeyCode::Char('N') if !typing => Some(Key::PrevMatch),
+        KeyCode::Char(ch) if typing => Some(Key::Input(ch)),
+        KeyCode::Home if !typing => Some(Key::First),
+        KeyCode::End if !typing => Some(Key::Last),
+        KeyCode::PageDown if !typing => Some(Key::PageDown),
+        KeyCode::PageUp if !typing => Some(Key::PageUp),
+        KeyCode::Char('g') if !typing => Some(Key::GPrefix),
+        KeyCode::Char('G') if !typing => Some(Key::Last),
+        KeyCode::Char(ch) if !typing && ch.is_ascii_digit() => Some(Key::Digit(ch as u8 - b'0')),
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Left | KeyCode::Char('h') if !typing => {
             Some(Key::Up)
         }
-        KeyCode::Down | KeyCode::Char('j') | KeyCode::Right | KeyCode::Char('l') if !hinting => {
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Right | KeyCode::Char('l') if !typing => {
             Some(Key::Down)
         }
         KeyCode::Enter | KeyCode::Char('e') => Some(Key::Confirm),
