@@ -79,3 +79,13 @@ cargo build --release --bin board-tui
 `e2e/scenes/` are host scenes: each input paints a frame at the declared size; `expect` checkpoints read that frame. `board-tui --replay` runs them without a TTY. `./scripts/e2e-zellij.sh` starts a throwaway Zellij session, dumps the board footer chrome, and checks that `q` closes `board-tui`. A headless session cannot grant plugin permissions, so the TUI is started directly with `new-pane`; plugin loading is best effort. The script skips if `zellij` is absent; set `ZAB_E2E_ZELLIJ_REQUIRED=1` to fail instead. Permission granting, Alt+q toggling, and cross-session jumps still need interactive verification.
 
 `scripts/package-release.sh VERSION TARGET WASM TUI [OUT_DIR]` creates a platform bundle and SHA-256 checksum. Run it with `bash`, then run `bash scripts/test-release-package.sh ARCHIVE` to extract and install the archive in a temporary directory. The release workflow runs this check on every platform before publishing.
+
+## Usage stats
+
+The host TUI records anonymous, local-only usage events (board opens, jumps, and feature use) as one JSON object per line in `~/.local/share/zellij-agent-board/usage.jsonl`. Nothing leaves the machine. Set `ZELLIJ_AGENT_BOARD_NO_STATS` to turn it off, or `ZELLIJ_AGENT_BOARD_STATS` to override the path.
+
+```bash
+board-tui --stats
+```
+
+Each line carries a `v` schema version, an epoch-second `ts`, an `event` name, and event-specific fields. Adding events or fields stays backward compatible; see the schema contract in `src/stats.rs`.

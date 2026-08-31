@@ -14,6 +14,8 @@ mod render;
 mod scan;
 #[cfg(not(target_arch = "wasm32"))]
 mod scene;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stats;
 mod status;
 #[cfg(not(target_arch = "wasm32"))]
 mod store;

@@ -29,10 +29,11 @@ use ratatui::layout::{Position, Size};
 use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
+use serde_json::json;
 use zellij_agent_board::{
     focus_path, format_jump, load_places, load_scan, parse_focus, persist_seen, places_path,
     reconcile_once, render_board, run_reconcile, runtime_dir, scan_path, scan_places_for,
-    spool_dir, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
+    spool_dir, stats, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -55,6 +56,9 @@ struct App {
     scan_mtime: Option<SystemTime>,
     places_mtime: Option<SystemTime>,
     spool_mtime: Option<SystemTime>,
+    session_start: Instant,
+    jumps: u64,
+    max_agents: u64,
 }
 
 fn log_path() -> PathBuf {
@@ -184,12 +188,20 @@ fn prune_board_log_gz(dir: &Path, keep: usize) {
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("--stats") => {
+            print!(
+                "{}",
+                stats::format_summary(&stats::summarize(&stats::read_log()))
+            );
+            return Ok(());
+        }
         Some("-h" | "--help") => {
             eprint!(
                 "\
 board-tui — host dashboard for zellij-agent-board
 
   board-tui                         live board (needs a TTY)
+  board-tui --stats                 show local usage summary
   board-tui --reconcile             write the host store once and exit
   board-tui --replay FILE.scene     run an e2e scene; no TTY
 
@@ -259,6 +271,9 @@ impl App {
             scan_mtime: None,
             places_mtime: None,
             spool_mtime: None,
+            session_start: now,
+            jumps: 0,
+            max_agents: 0,
         }
     }
 
@@ -266,6 +281,30 @@ impl App {
         self.load_model();
         spawn_reconcile(&mut self.reconcile);
         self.last_reconcile = Instant::now();
+        self.note_agents();
+        stats::record(
+            "open",
+            &[
+                ("session", json!(self.home)),
+                ("agents", json!(self.max_agents)),
+            ],
+        );
+    }
+
+    fn note_agents(&mut self) {
+        self.max_agents = self.max_agents.max(self.board.agents.len() as u64);
+    }
+
+    fn record_close(&self) {
+        stats::record(
+            "close",
+            &[
+                ("session", json!(self.home)),
+                ("secs", json!(self.session_start.elapsed().as_secs())),
+                ("jumps", json!(self.jumps)),
+                ("max_agents", json!(self.max_agents)),
+            ],
+        );
     }
 
     fn load_model(&mut self) {
@@ -321,12 +360,16 @@ impl App {
             }
             if event::poll(POLL)? {
                 match self.drain_input()? {
-                    DrainInput::Quit => return Ok(()),
+                    DrainInput::Quit => {
+                        self.record_close();
+                        return Ok(());
+                    }
                     DrainInput::Dirty => dirty = true,
                     DrainInput::Idle => {}
                 }
             }
             dirty |= self.take_store();
+            self.note_agents();
             let now = Instant::now();
             if now.duration_since(self.last_reconcile) >= SCAN_EVERY {
                 spawn_reconcile(&mut self.reconcile);
@@ -396,6 +439,7 @@ impl App {
             return Loop::Ignored;
         };
         let before = ModeSnap::capture(&self.board);
+        self.note_feature(&key);
         match self.board.decide(key) {
             Action::Dismiss => {
                 log::info!("quit");
@@ -403,6 +447,11 @@ impl App {
             }
             Action::Jump { session, pane_id } => {
                 log_mode_ends(&before, &self.board, "jump");
+                self.jumps += 1;
+                stats::record(
+                    "jump",
+                    &[("from", json!(self.home)), ("to", json!(session))],
+                );
                 persist_done_seen(&self.board, &session, pane_id);
                 send_jump(&session, pane_id, "key");
                 Loop::Changed
@@ -412,6 +461,21 @@ impl App {
                 Loop::Changed
             }
         }
+    }
+
+    /// Count the intent behind feature keys. Fires only in the board's base
+    /// state so typing inside search / flash never inflates the numbers.
+    fn note_feature(&self, key: &Key) {
+        if self.board.help_visible || self.board.is_searching() || self.board.is_hinting() {
+            return;
+        }
+        let event = match key {
+            Key::StartSearch => "search",
+            Key::StartHint => "flash",
+            Key::ToggleHelp => "help",
+            _ => return,
+        };
+        stats::record(event, &[("session", json!(self.home))]);
     }
 
     /// Pointer input: a click jumps to the row under it, motion previews
@@ -427,6 +491,11 @@ impl App {
                 {
                     Action::Jump { session, pane_id } => {
                         log_mode_ends(&before, &self.board, "jump");
+                        self.jumps += 1;
+                        stats::record(
+                            "jump",
+                            &[("from", json!(self.home)), ("to", json!(session))],
+                        );
                         persist_done_seen(&self.board, &session, pane_id);
                         send_jump(&session, pane_id, "click");
                         Loop::Changed
