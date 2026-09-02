@@ -23,3 +23,11 @@ jobs:
       - run: cargo lint
       - run: cargo test --lib
       - run: cargo wasm
+      - run: cargo build --release --bin board-tui
+      - name: Install zellij
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://github.com/zellij-org/zellij/releases/download/v0.45.0/zellij-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: ZAB_E2E_ZELLIJ_REQUIRED=1 ./scripts/e2e-zellij.sh

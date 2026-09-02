@@ -9,6 +9,8 @@ mod protocol;
 mod render;
 #[cfg(not(target_arch = "wasm32"))]
 mod scan;
+#[cfg(not(target_arch = "wasm32"))]
+mod scene;
 mod status;
 mod theme;
 mod toggle;
@@ -32,6 +34,8 @@ pub use scan::{
     places_from_list_panes_json, scan_host_text, scan_places, scan_places_for,
     zellij_ids_from_env_blob,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use scene::{run_scene, SceneError};
 pub use status::Status;
 pub use toggle::{
     bridge_close_plan, closes_the_board, duplicate_close_ids, duplicate_close_ids_with_focus,

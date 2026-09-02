@@ -1,0 +1,15 @@
+# ? swaps the list for help. A second ? brings the list back.
+size 80 16
+meta hooks=1
+scan ww 3 /tmp/ww
+place ww 3 0 notes notes
+
+expect screen contains notes
+expect screen contains found
+key ?
+expect screen contains help
+expect screen contains count / first / last
+expect screen excludes notes
+key ?
+expect screen contains notes
+expect screen excludes count / first / last

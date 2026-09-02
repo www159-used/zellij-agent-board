@@ -1,0 +1,10 @@
+# Enter jumps to the selected row. Rows sort by session, so lp is first.
+size 80 16
+meta hooks=1
+scan lp 8 /tmp/lp
+scan ww 3 /tmp/ww
+
+expect selected lp 8
+expect screen contains lp
+key enter
+expect action jump lp 8
