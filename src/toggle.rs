@@ -127,6 +127,58 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The plugin opens the host board with `zellij action new-pane … -- board-tui`.
+/// That short-lived command pane must not be adopted as the TUI: when it
+/// exits, `CommandPaneExited` looks like the user quit and the bridge
+/// `close_self`s — Alt+q loads then dies in ~200ms.
+pub fn looks_like_board_tui(command: Option<&str>, title: &str) -> bool {
+    let command = command.unwrap_or("");
+    if is_tui_launcher_command(command) {
+        return false;
+    }
+    command_invokes_board_tui(command) || title.contains("board-tui")
+}
+
+pub fn is_tui_launcher_command(command: &str) -> bool {
+    command.contains("zellij") && command.contains("new-pane")
+}
+
+fn command_invokes_board_tui(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .any(|token| token.rsplit('/').next() == Some("board-tui"))
+}
+
+/// The real board is a regular terminal. Command-pane exits are the
+/// launcher / places / focus writers — never a user quit.
+pub fn is_host_tui_exit(tui_id: Option<u32>, closed_id: u32, command_pane: bool) -> bool {
+    !command_pane && tui_id == Some(closed_id)
+}
+
+/// First event after permissions opens once. Later `SessionUpdate`s /
+/// `PaneUpdate`s must not spawn another pane; only the Timer retries.
+pub fn should_open_tui(
+    permissions: bool,
+    dying: bool,
+    tui_up: bool,
+    attempts: u8,
+    from_timer: bool,
+) -> bool {
+    if !permissions || dying || tui_up {
+        return false;
+    }
+    if attempts == 0 {
+        return true;
+    }
+    from_timer && attempts < 3
+}
+
+/// `hide_self` means the user saw the board. A pane that dies before that
+/// is a failed `NewFloatingPane`, not `q`.
+pub fn should_shutdown_on_tui_close(bridge_hidden: bool) -> bool {
+    bridge_hidden
+}
+
 #[cfg(test)]
 mod tests {
     use super::{closes_the_board, duplicate_close_ids, TOGGLE_DEBOUNCE_MS};
@@ -225,6 +277,58 @@ mod tests {
             bridge_close_plan(3, &[3, 5, 9], 1_000, 2_000, false),
             BridgeClosePlan::Drop { ids: vec![3] }
         );
+    }
+
+    #[test]
+    fn launcher_command_is_not_the_host_tui() {
+        use super::looks_like_board_tui;
+        let launcher = "zellij --session zab action new-pane --floating --near-current-pane --close-on-exit --name board-tui --width 80% --height 80% --x 10% --y 10% -- /Users/ww/.config/zellij/plugins/board-tui";
+        assert!(
+            !looks_like_board_tui(Some(launcher), "board-tui"),
+            "adopting the launcher makes CommandPaneExited look like q"
+        );
+        assert!(!looks_like_board_tui(
+            Some("zellij action new-pane --floating -- board-tui"),
+            "zellij"
+        ));
+    }
+
+    #[test]
+    fn real_board_tui_pane_is_recognized() {
+        use super::looks_like_board_tui;
+        assert!(looks_like_board_tui(
+            Some("/Users/ww/.config/zellij/plugins/board-tui"),
+            "board-tui"
+        ));
+        assert!(looks_like_board_tui(None, "board-tui"));
+        assert!(!looks_like_board_tui(Some("/bin/bash"), "bash"));
+    }
+
+    #[test]
+    fn command_pane_exit_is_never_a_user_quit() {
+        use super::is_host_tui_exit;
+        assert!(!is_host_tui_exit(Some(9), 9, true));
+        assert!(is_host_tui_exit(Some(9), 9, false));
+        assert!(!is_host_tui_exit(None, 9, false));
+        assert!(!is_host_tui_exit(Some(9), 8, false));
+    }
+
+    #[test]
+    fn first_open_is_once_and_later_updates_do_not_spawn() {
+        use super::should_open_tui;
+        assert!(should_open_tui(true, false, false, 0, false));
+        assert!(!should_open_tui(true, false, false, 1, false));
+        assert!(should_open_tui(true, false, false, 1, true));
+        assert!(!should_open_tui(true, false, false, 3, true));
+        assert!(!should_open_tui(true, false, true, 0, false));
+        assert!(!should_open_tui(false, false, false, 0, false));
+    }
+
+    #[test]
+    fn failed_launch_does_not_quit_the_bridge() {
+        use super::should_shutdown_on_tui_close;
+        assert!(!should_shutdown_on_tui_close(false));
+        assert!(should_shutdown_on_tui_close(true));
     }
 
     #[test]

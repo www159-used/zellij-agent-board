@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use zellij_agent_board::{
-    bridge_close_plan, float_size_from_config, format_focus, format_places, now_ms, parse_jump,
+    bridge_close_plan, float_size_from_config, format_focus, format_places, is_host_tui_exit,
+    looks_like_board_tui, now_ms, parse_jump, should_open_tui, should_shutdown_on_tui_close,
     AgentId, BridgeClosePlan, FloatSize, FloatingLayerState, PanePlace,
 };
 use zellij_tile::prelude::*;
@@ -47,6 +48,23 @@ mkdir -p "$dir"
 printf '%s' "${ZAB_FOCUS}" >"$dir/focus"
 "#;
 
+/// `bash -c` (not `-l`) keeps ZAB_* env. Absolute zellij — plugin PATH
+/// has no Homebrew. Regular `new-pane`, not a command pane (those steal Esc).
+const TUI_LAUNCHER: &str = r#"
+zellij_bin="${ZAB_ZELLIJ:-/opt/homebrew/bin/zellij}"
+cmd=("$zellij_bin")
+if [ -n "${ZAB_SESSION:-}" ]; then
+  cmd+=(--session "$ZAB_SESSION")
+fi
+cmd+=(action new-pane --floating --close-on-exit --name board-tui
+  --width "$ZAB_W" --height "$ZAB_H" --x "$ZAB_X" --y "$ZAB_Y")
+if [ -n "${ZAB_TAB:-}" ]; then
+  cmd+=(--tab-id "$ZAB_TAB")
+fi
+cmd+=(-- "$ZAB_TUI")
+"${cmd[@]}"
+"#;
+
 #[derive(Default)]
 struct State {
     own_plugin_id: Option<u32>,
@@ -54,6 +72,7 @@ struct State {
     permissions_granted: bool,
     floating_layer: FloatingLayerState,
     current_session: Option<String>,
+    own_tab_id: Option<usize>,
     tab_names: BTreeMap<(String, usize), String>,
     places: BTreeMap<AgentId, PanePlace>,
     known_board_ids: std::collections::BTreeSet<u32>,
@@ -105,16 +124,23 @@ impl ZellijPlugin for State {
                     if let Some(id) = self.own_plugin_id {
                         rename_plugin_pane(id, PLUGIN_NAME);
                     }
-                    self.enlarge_self();
+                    // A previous quit may have hidden the float layer.
+                    // LaunchPlugin { floating } then lands in that layer and
+                    // Alt+q looks like a no-op. Do not enlarge this empty
+                    // pane — it would cover the board until SessionUpdate.
+                    let _ = self.show_float();
                     if !self.close_if_duplicate() {
-                        set_timeout(0.1);
+                        self.ensure_tui(false);
+                        if self.tui_id.is_none() {
+                            set_timeout(0.5);
+                        }
                     }
                 }
                 false
             }
             Event::Timer(_) => {
-                if !self.dying && self.permissions_granted && self.tui_id.is_none() {
-                    self.ensure_tui();
+                if self.permissions_granted && self.tui_id.is_none() {
+                    self.ensure_tui(true);
                     if self.tui_id.is_none() && self.tui_attempts < 3 {
                         set_timeout(0.4);
                     }
@@ -126,6 +152,7 @@ impl ZellijPlugin for State {
                     if self.current_session.as_deref() != Some(session.name.as_str()) {
                         self.current_session = Some(session.name.clone());
                     }
+                    self.remember_own_tab(session);
                     self.floating_layer
                         .capture(self.previous_pane_was_floating(session));
                     self.remember_launch_focus(session);
@@ -163,12 +190,16 @@ impl ZellijPlugin for State {
                 }
                 false
             }
-            Event::CommandPaneExited(pane_id, _, _)
-            | Event::PaneClosed(PaneId::Terminal(pane_id)) => {
-                if self.tui_id == Some(pane_id) {
+            Event::CommandPaneExited(..) => false,
+            Event::PaneClosed(PaneId::Terminal(pane_id)) => {
+                if is_host_tui_exit(self.tui_id, pane_id, false) {
                     self.tui_id = None;
                     self.tui_visible = false;
-                    self.shutdown_bridge();
+                    if should_shutdown_on_tui_close(self.bridge_hidden) {
+                        self.shutdown_bridge();
+                    } else if self.tui_attempts < 3 {
+                        set_timeout(0.4);
+                    }
                 }
                 false
             }
@@ -230,16 +261,19 @@ impl State {
         }
     }
 
-    fn ensure_tui(&mut self) {
-        if self.dying || !self.permissions_granted {
-            return;
-        }
+    fn ensure_tui(&mut self, from_timer: bool) {
         self.adopt_existing_tui();
         if self.tui_id.is_some() {
             self.hide_bridge_keep_tui();
             return;
         }
-        if self.tui_attempts >= 3 || self.find_tui_pane().is_some() {
+        if !should_open_tui(
+            self.permissions_granted,
+            self.dying,
+            self.tui_id.is_some() || self.find_tui_pane().is_some(),
+            self.tui_attempts,
+            from_timer,
+        ) {
             return;
         }
         self.open_tui();
@@ -268,74 +302,65 @@ impl State {
 
     fn open_tui(&mut self) {
         self.tui_attempts = self.tui_attempts.saturating_add(1);
-        // `zellij action new-pane --floating` is the path we already verified
-        // from the host. Opening a command pane from inside plugin `update`
-        // either returns None or lands in a hidden float layer.
+        let _ = self.show_float();
         let mut context = BTreeMap::new();
         context.insert("zellij_agent_board".to_string(), "tui-launch".to_string());
-        let mut args = vec!["zellij".to_string()];
+        let mut env = BTreeMap::new();
+        env.insert("ZAB_TUI".to_string(), self.tui_path.clone());
+        env.insert("ZAB_W".to_string(), self.float_size.width.clone());
+        env.insert("ZAB_H".to_string(), self.float_size.height.clone());
+        env.insert("ZAB_X".to_string(), self.float_size.x.clone());
+        env.insert("ZAB_Y".to_string(), self.float_size.y.clone());
+        env.insert("ZAB_ZELLIJ".to_string(), "/opt/homebrew/bin/zellij".into());
         if let Some(session) = self
             .current_session
             .as_deref()
             .filter(|name| !name.is_empty())
         {
-            args.push("--session".into());
-            args.push(session.to_string());
+            env.insert("ZAB_SESSION".to_string(), session.to_string());
         }
-        args.extend([
-            "action".into(),
-            "new-pane".into(),
-            "--floating".into(),
-            "--near-current-pane".into(),
-            "--close-on-exit".into(),
-            "--name".into(),
-            "board-tui".into(),
-            "--width".into(),
-            self.float_size.width.clone(),
-            "--height".into(),
-            self.float_size.height.clone(),
-            "--x".into(),
-            self.float_size.x.clone(),
-            "--y".into(),
-            self.float_size.y.clone(),
-            "--".into(),
-            self.tui_path.clone(),
-        ]);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_command(&args, context);
+        if let Some(tab_id) = self.own_tab_id {
+            env.insert("ZAB_TAB".to_string(), tab_id.to_string());
+        }
+        run_command_with_env_variables_and_cwd(
+            &["/bin/bash", "-c", TUI_LAUNCHER],
+            env,
+            PathBuf::from("."),
+            context,
+        );
     }
 
-    fn enlarge_self(&self) {
-        let Some(id) = self.own_plugin_id else {
-            return;
-        };
-        let Some(coords) = self.float_coords() else {
-            return;
-        };
-        change_floating_panes_coordinates(vec![(PaneId::Plugin(id), coords)]);
+    fn show_float(&self) -> Result<bool, String> {
+        show_floating_panes(self.own_tab_id)
     }
 
-    fn float_coords(&self) -> Option<FloatingPaneCoordinates> {
-        FloatingPaneCoordinates::new(
-            Some(self.float_size.x.clone()),
-            Some(self.float_size.y.clone()),
-            Some(self.float_size.width.clone()),
-            Some(self.float_size.height.clone()),
-            None,
-            None,
-        )
+    fn remember_own_tab(&mut self, session: &SessionInfo) {
+        if let Some(own) = self.own_plugin_id {
+            for tab in &session.tabs {
+                let Some(panes) = session.panes.panes.get(&tab.position) else {
+                    continue;
+                };
+                if panes.iter().any(|pane| pane.is_plugin && pane.id == own) {
+                    self.own_tab_id = Some(tab.tab_id);
+                    return;
+                }
+            }
+        }
+        if let Some(tab) = session.tabs.iter().find(|tab| tab.active) {
+            self.own_tab_id = Some(tab.tab_id);
+        }
     }
 
     fn hide_bridge_keep_tui(&mut self) {
         if self.bridge_hidden {
             return;
         }
-        let _ = show_floating_panes(None);
+        let _ = self.show_float();
         if let Some(id) = self.tui_id {
             show_pane_with_id(PaneId::Terminal(id), true, true);
         }
         hide_self();
-        let _ = show_floating_panes(None);
+        let _ = self.show_float();
         if let Some(id) = self.tui_id {
             show_pane_with_id(PaneId::Terminal(id), true, true);
         }
@@ -363,7 +388,7 @@ impl State {
             close_pane_with_id(PaneId::Plugin(*id));
         }
         if self.floating_layer.should_hide_on_close() {
-            let _ = hide_floating_panes(None);
+            let _ = hide_floating_panes(self.own_tab_id);
         }
         close_self();
     }
@@ -534,10 +559,7 @@ fn is_board_tui(pane: &PaneInfo) -> bool {
     if pane.is_plugin {
         return false;
     }
-    pane.terminal_command
-        .as_deref()
-        .is_some_and(|command| command.contains("board-tui"))
-        || pane.title.contains("board-tui")
+    looks_like_board_tui(pane.terminal_command.as_deref(), &pane.title)
 }
 
 fn tab_names_from_sessions(sessions: &[SessionInfo]) -> BTreeMap<(String, usize), String> {

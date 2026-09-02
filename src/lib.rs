@@ -39,7 +39,8 @@ pub use scene::{run_scene, SceneError};
 pub use status::Status;
 pub use toggle::{
     bridge_close_plan, closes_the_board, duplicate_close_ids, duplicate_close_ids_with_focus,
-    now_ms, BridgeClosePlan, TOGGLE_DEBOUNCE_MS,
+    is_host_tui_exit, looks_like_board_tui, now_ms, should_open_tui, should_shutdown_on_tui_close,
+    BridgeClosePlan, TOGGLE_DEBOUNCE_MS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
