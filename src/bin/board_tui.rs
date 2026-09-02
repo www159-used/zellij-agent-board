@@ -95,8 +95,7 @@ board-tui — host dashboard for zellij-agent-board
 
 fn replay(path: &str) -> io::Result<()> {
     let source = fs::read_to_string(path)?;
-    zellij_agent_board::run_scene(&source)
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{path}: {err}")))
+    zellij_agent_board::run_scene(&source).map_err(|err| io::Error::other(format!("{path}: {err}")))
 }
 
 impl App {
