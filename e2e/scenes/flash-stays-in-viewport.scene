@@ -1,0 +1,32 @@
+# s / flash only matches rows that are on screen. A unique hit above the
+# viewport must not jump. Checkpoints read the 80×8 frame, not the full list.
+size 80 8
+meta hooks=1
+scan ww 1 /tmp/1
+scan ww 2 /tmp/2
+scan ww 3 /tmp/3
+scan ww 4 /tmp/4
+scan ww 5 /tmp/5
+scan ww 6 /tmp/6
+scan ww 7 /tmp/7
+scan ww 8 /tmp/8
+
+key G
+expect selected ww 8
+place ww 1 0 Geo-DB Geo-DB
+place ww 2 0 notes notes
+place ww 3 0 notes notes
+place ww 4 0 notes notes
+place ww 5 0 notes notes
+place ww 6 0 notes notes
+place ww 7 0 notes notes
+place ww 8 0 notes notes
+
+expect screen contains notes
+expect screen excludes Geo-DB
+key s
+key input g
+expect action none
+expect hinting yes
+expect selected ww 8
+expect screen excludes Geo-DB

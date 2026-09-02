@@ -52,6 +52,36 @@ struct App {
 }
 
 fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("-h" | "--help") => {
+            eprint!(
+                "\
+board-tui — host dashboard for zellij-agent-board
+
+  board-tui                         live board (needs a TTY)
+  board-tui --replay FILE.scene     run an e2e scene; no TTY
+"
+            );
+            return Ok(());
+        }
+        Some("--replay") => {
+            let Some(path) = args.get(1) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "board-tui --replay FILE.scene",
+                ));
+            };
+            return replay(path);
+        }
+        Some(other) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown argument {other}"),
+            ));
+        }
+        None => {}
+    }
     let mut app = App::new();
     app.bootstrap();
     let mut terminal = setup()?;
@@ -61,6 +91,12 @@ fn main() -> io::Result<()> {
         Ok(ok) => ok,
         Err(panic) => std::panic::resume_unwind(panic),
     }
+}
+
+fn replay(path: &str) -> io::Result<()> {
+    let source = fs::read_to_string(path)?;
+    zellij_agent_board::run_scene(&source)
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{path}: {err}")))
 }
 
 impl App {

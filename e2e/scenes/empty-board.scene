@@ -1,0 +1,9 @@
+# Empty board is a gray line plus the usual footer, not a crash.
+size 80 16
+meta hooks=1
+
+expect screen contains no cursor agents
+expect screen contains go
+expect screen contains more
+expect screen excludes found
+expect screen excludes hooks

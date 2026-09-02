@@ -1,3 +1,4 @@
 [alias]
 lint = "clippy --lib --all-targets -- -D warnings"
+e2e = "test --lib scenes_in_e2e"
 wasm = "build --target wasm32-wasip1 --release --features plugin --bin zellij-agent-board"

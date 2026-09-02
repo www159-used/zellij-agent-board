@@ -45,6 +45,11 @@ The WASM pane hides itself and opens `board-tui` in a command pane. Cursor hooks
 cargo fmt --check
 cargo lint
 cargo test --lib
+cargo e2e
+cargo run --bin board-tui -- --replay e2e/scenes/jump-first-row.scene
+./scripts/e2e-zellij.sh
 cargo wasm
 cargo build --release --bin board-tui
 ```
+
+`e2e/scenes/` are host scenes: each input paints a frame at the declared size; `expect` checkpoints read that frame. `board-tui --replay` runs them without a TTY. `./scripts/e2e-zellij.sh` loads the WASM in a throwaway Zellij session, dumps the board footer chrome, and checks that `q` closes `board-tui`. A headless session cannot grant plugin permissions, so the TUI pane is started from the layout. Skip that script if `zellij` is not installed; set `ZAB_E2E_ZELLIJ_REQUIRED=1` to fail instead.

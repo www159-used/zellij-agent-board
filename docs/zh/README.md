@@ -43,6 +43,11 @@ WASM 会 `hide_self`，再在 command pane 里开 `board-tui`。Cursor hook 只�
 cargo fmt --check
 cargo lint
 cargo test --lib
+cargo e2e
+cargo run --bin board-tui -- --replay e2e/scenes/jump-first-row.scene
+./scripts/e2e-zellij.sh
 cargo wasm
 cargo build --release --bin board-tui
 ```
+
+`e2e/scenes/` 是 host 场景：每步按声明尺寸画出当前帧，`expect` 检查点只看这一帧。`board-tui --replay` 不用 TTY。`./scripts/e2e-zellij.sh` 在一次性 session 里加载 WASM，dump 板底栏 chrome，再发 `q` 确认 `board-tui` 关掉。无头 session 没法点插件 Allow，所以 TUI pane 由 layout 拉起。没装 `zellij` 就跳过；要强制失败就设 `ZAB_E2E_ZELLIJ_REQUIRED=1`。

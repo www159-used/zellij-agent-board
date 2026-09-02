@@ -1,0 +1,22 @@
+# / search moves the selection. Enter stays on the board; n walks matches.
+size 80 16
+meta hooks=1
+scan lp 8 /tmp/lp
+scan ww 3 /tmp/a
+scan ww 4 /tmp/b
+
+expect selected lp 8
+key /
+expect searching yes
+key input w
+expect selected ww 3
+expect searching yes
+expect screen contains Enter accept
+key enter
+expect searching no
+expect selected ww 3
+expect action none
+key n
+expect selected ww 4
+key n
+expect selected ww 3
