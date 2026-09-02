@@ -105,45 +105,42 @@ pub struct Board {
     wide_list: bool,
 }
 
+#[derive(Default)]
+struct HostParse {
+    found: Vec<Found>,
+    hooks: Vec<HookNotice>,
+    seen: Vec<(AgentId, u64)>,
+    started: Vec<(AgentId, u64)>,
+}
+
 impl Board {
     pub fn ingest(&mut self, text: &str) -> bool {
         let before = self.agents.clone();
         let before_hooks = self.hooks_installed;
-        let (found, hooks, seen, started) = self.collect_host_lines(text);
-        self.replace_from_scan(found);
-        self.apply_notices(hooks);
-        self.apply_seen(seen);
-        self.apply_started(started);
+        let parsed = self.collect_host_lines(text);
+        self.replace_from_scan(parsed.found);
+        self.apply_notices(parsed.hooks);
+        self.apply_seen(parsed.seen);
+        self.apply_started(parsed.started);
         self.hooks_installed != before_hooks || self.agents != before
     }
 
     /// Pipe / spool notice. Updates status on existing rows only; never creates or drops rows.
     pub fn ingest_notice(&mut self, text: &str) {
-        let (_, hooks, seen, started) = self.collect_host_lines(text);
-        self.apply_notices(hooks);
-        self.apply_seen(seen);
-        self.apply_started(started);
+        let parsed = self.collect_host_lines(text);
+        self.apply_notices(parsed.hooks);
+        self.apply_seen(parsed.seen);
+        self.apply_started(parsed.started);
     }
 
-    fn collect_host_lines(
-        &mut self,
-        text: &str,
-    ) -> (
-        Vec<Found>,
-        Vec<HookNotice>,
-        Vec<(AgentId, u64)>,
-        Vec<(AgentId, u64)>,
-    ) {
-        let mut found = Vec::new();
-        let mut hooks = Vec::new();
-        let mut seen = Vec::new();
-        let mut started = Vec::new();
+    fn collect_host_lines(&mut self, text: &str) -> HostParse {
+        let mut parsed = HostParse::default();
         for line in text.lines() {
             match parse_host_line(line) {
-                Some(HostLine::Scan(row)) => found.push(row),
-                Some(HostLine::Hook(notice)) => hooks.push(notice),
-                Some(HostLine::Seen { id, finished_at }) => seen.push((id, finished_at)),
-                Some(HostLine::Started { id, started_at }) => started.push((id, started_at)),
+                Some(HostLine::Scan(row)) => parsed.found.push(row),
+                Some(HostLine::Hook(notice)) => parsed.hooks.push(notice),
+                Some(HostLine::Seen { id, finished_at }) => parsed.seen.push((id, finished_at)),
+                Some(HostLine::Started { id, started_at }) => parsed.started.push((id, started_at)),
                 Some(HostLine::Meta {
                     hooks_installed,
                     epoch,
@@ -163,7 +160,7 @@ impl Board {
                 None => {}
             }
         }
-        (found, hooks, seen, started)
+        parsed
     }
 
     fn apply_notices(&mut self, hooks: Vec<HookNotice>) {
