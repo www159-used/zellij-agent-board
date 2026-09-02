@@ -53,10 +53,7 @@ EOF
 
 cat > "$tmp/layout.kdl" <<EOF
 layout {
-    pane command="sleep" {
-        args "30"
-    }
-    floating_panes {
+    pane split_direction="vertical" {
         pane command="$tui" name="board-tui" close_on_exit=true
         pane {
             plugin location="file:$wasm" {
@@ -90,7 +87,12 @@ find_tui() {
     | python3 "$tmp/find_tui.py"
 }
 
-zellij --config "$tmp/config.kdl" --layout "$tmp/layout.kdl" attach --create-background "$session"
+# attach --create-background ignores a top-level --layout (CI then gets
+# the default tab and no board-tui). options --default-layout is the one
+# that sticks. Keep board-tui tiled so list-panes sees it even if floating
+# panes start hidden.
+zellij --config "$tmp/config.kdl" attach --create-background "$session" \
+  options --default-layout "$tmp/layout.kdl"
 
 tui_pane=""
 layout=""
