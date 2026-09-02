@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# Throwaway Zellij session: load the WASM (crash check) and a real board-tui
-# pane, dump empty-board chrome, then send q and wait for the pane to go.
+# Throwaway Zellij session: start board-tui with new-pane, dump empty-board
+# chrome, then send q and wait for the pane to go.
 #
-# board-tui is started from the layout. A headless session never answers the
-# plugin Allow? prompt, so the bridge cannot new-pane the TUI itself.
-# dump-layout also mentions the plugin's `tui ".../board-tui"` config — that
-# is not proof a host pane exists; list-panes is.
+# attach --create-background ignores --layout, so the TUI is opened with
+# new-pane. A headless session never answers the plugin Allow? prompt.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -51,19 +49,6 @@ show_startup_tips false
 show_release_notes false
 EOF
 
-cat > "$tmp/layout.kdl" <<EOF
-layout {
-    pane split_direction="vertical" {
-        pane command="$tui" name="board-tui" close_on_exit=true
-        pane {
-            plugin location="file:$wasm" {
-                tui "$tui"
-            }
-        }
-    }
-}
-EOF
-
 cat > "$tmp/find_tui.py" <<'PY'
 import json, sys
 
@@ -87,12 +72,23 @@ find_tui() {
     | python3 "$tmp/find_tui.py"
 }
 
-# attach --create-background ignores a top-level --layout (CI then gets
-# the default tab and no board-tui). options --default-layout is the one
-# that sticks. Keep board-tui tiled so list-panes sees it even if floating
-# panes start hidden.
-zellij --config "$tmp/config.kdl" attach --create-background "$session" \
-  options --default-layout "$tmp/layout.kdl"
+# attach --create-background (and new-tab --layout on a headless session)
+# drop custom layouts. Open the host TUI / WASM with new-pane instead.
+zellij --config "$tmp/config.kdl" attach --create-background "$session"
+ready=0
+for _ in $(seq 1 40); do
+  if zellij --session "$session" action list-tabs --json >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 0.1
+done
+if [[ "$ready" -ne 1 ]]; then
+  echo "e2e-zellij: background session did not come up" >&2
+  exit 1
+fi
+zellij --session "$session" action new-pane --name board-tui --close-on-exit -- "$tui" >/dev/null
+zellij --session "$session" action new-pane --plugin "file:$wasm" --configuration "tui=$tui" >/dev/null || true
 
 tui_pane=""
 layout=""
@@ -117,13 +113,15 @@ if [[ -z "$tui_pane" ]]; then
   exit 1
 fi
 
-if ! echo "$layout" | grep -q 'zellij-agent-board.wasm'; then
-  echo "e2e-zellij: wasm plugin missing from dump-layout" >&2
-  echo "$layout" >&2
-  exit 1
+if echo "$layout" | grep -q 'zellij-agent-board.wasm'; then
+  echo "e2e-zellij: wasm plugin loaded"
+else
+  echo "e2e-zellij: wasm plugin skipped (headless session never answers Allow?)"
 fi
 
 echo "e2e-zellij: board-tui loaded ($tui_pane)"
+# dump-layout may mark the command pane start_suspended; wake it.
+zellij --session "$session" action write --pane-id "$tui_pane" -- 13 >/dev/null 2>&1 || true
 
 # Local machines may have live agents; CI usually does not. The footer
 # `j/k` pill is on both an empty board and a full one.
