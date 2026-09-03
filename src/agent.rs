@@ -103,7 +103,8 @@ impl PanePlace {
     }
 }
 
-/// Cursor CLI wrapper argv: keep interactive `agent`, drop one-shot subcommands.
+/// Cursor / CodeBuddy CLI wrapper argv: keep interactive sessions, drop
+/// one-shot subcommands.
 ///
 /// `agent ls` is special: the session picker keeps argv=`ls` even after you
 /// resume a chat. The host scan decides whether a `ls` process is a live chat
@@ -113,10 +114,19 @@ pub fn keep_cursor_agent(argv: &[String]) -> bool {
         .first()
         .map(|s| s.rsplit('/').next().unwrap_or(s))
         .unwrap_or("");
-    if bin != "agent" && bin != "cursor-agent" {
+    if !matches!(bin, "agent" | "cursor-agent" | "codebuddy" | "cbc") {
         return false;
     }
-    let skip = ["status", "whoami", "login", "logout", "update", "about"];
+    let skip = [
+        "status",
+        "whoami",
+        "login",
+        "logout",
+        "update",
+        "about",
+        "--version",
+        "-V",
+    ];
     !argv.iter().skip(1).any(|arg| skip.contains(&arg.as_str()))
 }
 
@@ -175,6 +185,17 @@ mod tests {
             "index.js",
             "ls"
         ])));
+    }
+
+    #[test]
+    fn keeps_codebuddy_and_drops_one_shots() {
+        assert!(keep_cursor_agent(&argv(&["codebuddy"])));
+        assert!(keep_cursor_agent(&argv(&["/Users/ww/.local/bin/codebuddy"])));
+        assert!(keep_cursor_agent(&argv(&["codebuddy", "-c"])));
+        assert!(keep_cursor_agent(&argv(&["codebuddy", "-r"])));
+        assert!(!keep_cursor_agent(&argv(&["codebuddy", "--version"])));
+        assert!(!keep_cursor_agent(&argv(&["codebuddy", "update"])));
+        assert!(!keep_cursor_agent(&argv(&["node", "server.js"])));
     }
 
     #[test]

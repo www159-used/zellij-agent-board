@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cursor hook → zellij-agent-board. Always exit 0. Only report inside a Zellij pane.
+# Cursor / CodeBuddy hook → zellij-agent-board. Always exit 0. Only report inside a Zellij pane.
 set -u
 trap 'exit 0' EXIT
 
@@ -26,7 +26,7 @@ tool = str(data.get("tool_name") or "")
 inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
 cmd = str(inp.get("command") or data.get("command") or "")
 path = str(inp.get("file_path") or inp.get("path") or "")
-msg = str(data.get("agent_message") or "")
+msg = str(data.get("agent_message") or data.get("prompt") or "")
 extra = cmd or path or msg
 bits = [bit for bit in (tool, extra) if bit]
 detail = " ".join(" ".join(bits).split())[:160]
@@ -39,6 +39,19 @@ else
   [ -n "$event" ] || event=$(printf '%s' "$payload" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
   detail=""
 fi
+
+# Normalize Claude Code / CodeBuddy (PascalCase) event names to the
+# Cursor-style names the board consumes (src/status.rs).
+case "$event" in
+  SessionStart) event=sessionStart ;;
+  SessionEnd) event=sessionEnd ;;
+  UserPromptSubmit) event=beforeSubmitPrompt ;;
+  PreToolUse) event=preToolUse ;;
+  PostToolUse) event=postToolUse ;;
+  PostToolUseFailure) event=postToolUseFailure ;;
+  Stop) event=stop ;;
+  PreCompact) event=preCompact ;;
+esac
 
 [ -n "$event" ] || exit 0
 

@@ -19,6 +19,8 @@ Zellij 0.44 or newer is required.
 
 Builds the WASM bridge and the host `board-tui`, then copies both to `~/.config/zellij/plugins/`. Override the WASM path with `ZELLIJ_AGENT_BOARD_PLUGIN_PATH`. The TUI path can be overridden with `ZELLIJ_AGENT_BOARD_TUI` or a `tui` plugin config key.
 
+`install-hooks.sh` registers the agent hook for Cursor (`~/.cursor/hooks.json`) and CodeBuddy (`~/.codebuddy/settings.json`). Pass `cursor` or `codebuddy` to install for one only; the default is both.
+
 ## Keybinding
 
 Add to `keybinds` in `~/.config/zellij/config.kdl`. Use a `file:` URL.

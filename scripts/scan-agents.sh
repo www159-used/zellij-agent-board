@@ -5,18 +5,20 @@ set -u
 trap 'exit 0' EXIT
 
 spool_dir="${TMPDIR:-/tmp}/zellij-agent-board-spool"
-hooks_json="${HOME}/.cursor/hooks.json"
 
 epoch=$(date +%s)
-if [[ -f "$hooks_json" ]] && grep -q 'zellij-agent-board-hook' "$hooks_json"; then
-  printf 'META hooks=1 epoch=%s\n' "$epoch"
-else
-  printf 'META hooks=0 epoch=%s\n' "$epoch"
-fi
+hooks=0
+for hooks_json in "${HOME}/.cursor/hooks.json" "${HOME}/.codebuddy/settings.json"; do
+  if [[ -f "$hooks_json" ]] && grep -q 'zellij-agent-board-hook' "$hooks_json"; then
+    hooks=1
+    break
+  fi
+done
+printf 'META hooks=%s epoch=%s\n' "$hooks" "$epoch"
 
 is_cursor_agent() {
   local comm=$1
-  [[ "$comm" == "agent" || "$comm" == "cursor-agent" ]]
+  [[ "$comm" == "agent" || "$comm" == "cursor-agent" || "$comm" == "codebuddy" || "$comm" == "cbc" ]]
 }
 
 # `agent ls` keeps argv=`ls` after you pick a session and chat. A pure picker
@@ -26,18 +28,18 @@ holding_chat_store() {
   lsof -p "$pid" -Fn 2>/dev/null | grep -q '/.cursor/chats/.*/store\.db'
 }
 
+# Enumerate via ps, not pgrep: macOS pgrep silently skips some live
+# processes (observed with a Zellij-launched `codebuddy`).
 pids=""
-while read -r pid; do
+while read -r pid comm; do
   [[ -n "${pid:-}" ]] || continue
+  is_cursor_agent "${comm##*/}" || continue
   if [[ -n "$pids" ]]; then
     pids="$pids,$pid"
   else
     pids="$pid"
   fi
-done <<EOF
-$(pgrep -a -x agent || true)
-$(pgrep -a -x cursor-agent || true)
-EOF
+done < <(ps ax -ww -o pid= -o comm=)
 
 live_keys=()
 

@@ -190,10 +190,13 @@ fn env_value(blob: &str, key: &str) -> Option<String> {
 }
 
 fn hooks_installed() -> bool {
-    let path = home_dir().join(".cursor/hooks.json");
-    std::fs::read_to_string(path)
-        .map(|text| text.contains("zellij-agent-board-hook"))
-        .unwrap_or(false)
+    let home = home_dir();
+    let cursor = std::fs::read_to_string(home.join(".cursor/hooks.json"));
+    let codebuddy = std::fs::read_to_string(home.join(".codebuddy/settings.json"));
+    [cursor, codebuddy]
+        .into_iter()
+        .flatten()
+        .any(|text| text.contains("zellij-agent-board-hook"))
 }
 
 fn home_dir() -> std::path::PathBuf {
@@ -210,9 +213,35 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Candidate pids from a `ps ax -o pid=,comm=` dump. pgrep is avoided on
+/// purpose: macOS pgrep silently skips some live processes (observed with a
+/// Zellij-launched `codebuddy`), while `ps ax` sees everything.
 fn agent_pids() -> Vec<u32> {
-    let mut pids = pgrep("agent");
-    pids.extend(pgrep("cursor-agent"));
+    let Ok(output) = Command::new(ps_bin())
+        .args(["ax", "-ww", "-o", "pid=", "-o", "comm="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    agent_pids_from_text(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn agent_pids_from_text(text: &str) -> Vec<u32> {
+    const WANTED: [&str; 4] = ["agent", "cursor-agent", "codebuddy", "cbc"];
+    let mut pids = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.trim_start().split_whitespace();
+        let (Some(pid), Some(comm)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let bin = comm.rsplit('/').next().unwrap_or(comm);
+        if !WANTED.contains(&bin) {
+            continue;
+        }
+        if let Ok(pid) = pid.parse::<u32>() {
+            pids.push(pid);
+        }
+    }
     pids.sort_unstable();
     pids.dedup();
     pids
@@ -227,27 +256,12 @@ fn first_bin(candidates: &[&str], fallback: &str) -> String {
         .to_string()
 }
 
-fn pgrep_bin() -> String {
-    first_bin(&["/usr/bin/pgrep", "/bin/pgrep"], "pgrep")
-}
-
 fn ps_bin() -> String {
     first_bin(&["/bin/ps", "/usr/bin/ps"], "ps")
 }
 
 fn lsof_bin() -> String {
     first_bin(&["/usr/sbin/lsof", "/usr/bin/lsof"], "lsof")
-}
-
-fn pgrep(name: &str) -> Vec<u32> {
-    let output = Command::new(pgrep_bin()).args(["-x", name]).output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse().ok())
-        .collect()
 }
 
 fn ps_args(pids: &[u32]) -> std::collections::BTreeMap<u32, String> {
@@ -352,7 +366,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        places_from_list_panes_json, ps_command_args, scan_places_for, zellij_ids_from_env_blob,
+        agent_pids_from_text, places_from_list_panes_json, ps_command_args, scan_places_for,
+        zellij_ids_from_env_blob,
     };
 
     #[test]
@@ -387,12 +402,20 @@ mod tests {
     }
 
     #[test]
-    fn live_scan_finds_zellij_agents_when_pgrep_does() {
-        let has_agent = std::process::Command::new(super::pgrep_bin())
-            .args(["-x", "agent"])
-            .output()
+    fn agent_pids_reads_ps_comm_text() {
+        let text = "  123 /Users/ww/.local/bin/agent\n  456 codebuddy\n  789 /usr/sbin/distnoted\n  810 vim\n   32 /bin/zsh\n";
+        assert_eq!(agent_pids_from_text(text), vec![123, 456]);
+    }
+
+    #[test]
+    fn live_scan_finds_zellij_agents_when_they_run() {
+        let dump = std::process::Command::new(super::ps_bin())
+            .args(["ax", "-ww", "-o", "pid=", "-o", "comm="])
+            .output();
+        let has_agent = dump
             .ok()
-            .is_some_and(|output| output.status.success() && !output.stdout.is_empty());
+            .map(|output| !super::agent_pids_from_text(&String::from_utf8_lossy(&output.stdout)).is_empty())
+            .unwrap_or(false);
         if !has_agent {
             return;
         }
@@ -422,9 +445,6 @@ mod tests {
 
     #[test]
     fn prefers_absolute_host_bins_when_present() {
-        if Path::new("/usr/bin/pgrep").is_file() {
-            assert_eq!(super::pgrep_bin(), "/usr/bin/pgrep");
-        }
         if Path::new("/bin/ps").is_file() {
             assert_eq!(super::ps_bin(), "/bin/ps");
         }
