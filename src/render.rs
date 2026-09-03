@@ -314,7 +314,14 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
                     .fg(theme().tip_typed)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Esc cancel", Style::default().fg(theme().mask_fg)),
+            Span::styled(
+                if board.hint_query().is_empty() {
+                    "  Esc cancel"
+                } else {
+                    "  Enter go  Esc"
+                },
+                Style::default().fg(theme().mask_fg),
+            ),
         ])
     } else {
         footer_hints(

@@ -404,7 +404,10 @@ impl Board {
                     Action::None
                 }
                 Key::Input(ch) => self.apply_hint_input(ch),
-                Key::Confirm => self.jump_at(self.selected),
+                Key::Confirm => match self.hint_confirm_target() {
+                    Some(index) => self.jump_at(index),
+                    None => Action::None,
+                },
                 _ => Action::None,
             };
         }
@@ -853,6 +856,15 @@ impl Board {
             .unwrap_or((0, len));
         let start = start.min(len);
         (start, end.min(len).max(start))
+    }
+
+    /// Enter jumps the first labeled match.
+    fn hint_confirm_target(&self) -> Option<usize> {
+        self.hint
+            .as_ref()?
+            .labels
+            .iter()
+            .position(Option::is_some)
     }
 
     fn reveal_first_hint_match(&mut self) {
@@ -1762,6 +1774,62 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
                 pane_id: 8,
             }
         );
+    }
+
+    #[test]
+    fn flash_enter_jumps_to_a_match_even_when_selection_stays_put() {
+        let mut board = Board::default();
+        board.ingest(
+            "\
+META hooks=1
+SCAN zab 1 agent /Users/ww/.local/bin/agent --workspace /tmp/zab
+SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww
+SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
+",
+        );
+        board.agents[0].tab_name = "notes".into();
+        board.agents[1].tab_name = "logs".into();
+        board.agents[2].tab_name = "main".into();
+        board.selected = 2;
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Input('o')), Action::None);
+        assert_eq!(board.selected, 2);
+        assert_eq!(
+            board.decide(Key::Confirm),
+            Action::Jump {
+                session: "lp".into(),
+                pane_id: 8,
+            }
+        );
+        assert!(!board.is_hinting());
+    }
+
+    #[test]
+    fn flash_enter_jumps_the_first_match() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.agents[0].tab_name = "notes".into();
+        board.agents[1].tab_name = "logs".into();
+        board.selected = 1;
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Input('o')), Action::None);
+        assert_eq!(board.selected, 1);
+        assert_eq!(
+            board.decide(Key::Confirm),
+            Action::Jump {
+                session: "lp".into(),
+                pane_id: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn flash_enter_without_matches_stays_put() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Confirm), Action::None);
+        assert!(board.is_hinting());
     }
 
     #[test]
