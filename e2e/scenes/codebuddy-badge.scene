@@ -1,0 +1,9 @@
+# CodeBuddy rows carry a blue CB badge; Cursor rows stay a dim CA.
+size 80 16
+meta hooks=1
+scan ww 3 /tmp/ww
+scan zab 357 /Users/ww/Documents/self/zellij-agent-board codebuddy
+
+expect screen contains CB
+expect screen contains CA
+expect status zab 357 found

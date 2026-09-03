@@ -193,21 +193,28 @@ fn protocol_line(verb: &str, args: &[&str], line: usize) -> Result<String, Scene
             Ok(out)
         }
         "scan" => {
-            if args.len() < 2 || args.len() > 3 {
+            // scan SESSION PANE [WORKSPACE] [TOOL]
+            if args.len() < 2 || args.len() > 4 {
                 return Err(SceneError {
                     line,
-                    message: "scan SESSION PANE [WORKSPACE]".into(),
+                    message: "scan SESSION PANE [WORKSPACE] [TOOL]".into(),
                 });
             }
             let session = args[0];
             let pane = args[1];
-            let workspace = args.get(2).copied().unwrap_or("");
-            let argv = if workspace.is_empty() {
-                "/Users/ww/.local/bin/agent".to_string()
-            } else {
-                format!("/Users/ww/.local/bin/agent --workspace {workspace}")
+            let rest: Vec<&str> = args[2..].to_vec();
+            let (workspace, tool) = match rest.as_slice() {
+                [] => ("", "agent"),
+                [workspace] => (*workspace, "agent"),
+                [workspace, tool] => (*workspace, *tool),
+                _ => unreachable!("len checked above"),
             };
-            Ok(format!("SCAN {session} {pane} agent {argv}"))
+            let argv = if workspace.is_empty() {
+                format!("/Users/ww/.local/bin/{tool}")
+            } else {
+                format!("/Users/ww/.local/bin/{tool} --workspace {workspace}")
+            };
+            Ok(format!("SCAN {session} {pane} {tool} {argv}"))
         }
         "hook" => {
             if args.len() < 3 {

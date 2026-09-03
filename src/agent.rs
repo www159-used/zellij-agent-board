@@ -130,6 +130,16 @@ pub fn keep_cursor_agent(argv: &[String]) -> bool {
     !argv.iter().skip(1).any(|arg| skip.contains(&arg.as_str()))
 }
 
+/// Short CLI badge for a scanned row: `CB` marks a CodeBuddy pane, `CA`
+/// every Cursor one. Unknown tools read as Cursor — the scan allowlist
+/// decides what exists, so this only ever sees allowed tools.
+pub fn tool_label(tool: &str) -> &'static str {
+    match tool {
+        "codebuddy" | "cbc" => "CB",
+        _ => "CA",
+    }
+}
+
 /// Best-effort `--workspace` from an argv list the process scan will supply.
 pub fn workspace_from_argv(argv: &[String]) -> Option<String> {
     let mut args = argv.iter();
@@ -196,6 +206,15 @@ mod tests {
         assert!(!keep_cursor_agent(&argv(&["codebuddy", "--version"])));
         assert!(!keep_cursor_agent(&argv(&["codebuddy", "update"])));
         assert!(!keep_cursor_agent(&argv(&["node", "server.js"])));
+    }
+
+    #[test]
+    fn labels_cli_families() {
+        use super::tool_label;
+        assert_eq!(tool_label("agent"), "CA");
+        assert_eq!(tool_label("cursor-agent"), "CA");
+        assert_eq!(tool_label("codebuddy"), "CB");
+        assert_eq!(tool_label("cbc"), "CB");
     }
 
     #[test]

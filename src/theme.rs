@@ -24,6 +24,7 @@ pub struct Theme {
     pub tip_fg: Color,
     pub tip_bg: Color,
     pub tip_typed: Color,
+    pub tool_codebuddy: Color,
 }
 
 pub fn theme() -> Theme {
@@ -54,6 +55,7 @@ impl Theme {
             tip_fg: try_color(vars, "tip-fg")?,
             tip_bg: try_color(vars, "tip-bg")?,
             tip_typed: try_color(vars, "tip-typed")?,
+            tool_codebuddy: try_color(vars, "tool-codebuddy")?,
         })
     }
 }

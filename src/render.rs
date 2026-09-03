@@ -493,6 +493,15 @@ fn agent_row(
         status_style,
     ));
 
+    // CA / CB tool badge — fixed 2 cols so every row stays aligned.
+    let (badge, badge_color) = tool_badge(agent);
+    let badge_style = if masked {
+        Style::default().fg(theme().mask_fg)
+    } else {
+        Style::default().fg(badge_color)
+    };
+    spans.push(Span::styled(format!(" {}", pad_right(badge, 2)), badge_style));
+
     let (when, when_color) = time_cell(agent, board);
     let when_style = Style::default().fg(if masked { theme().mask_fg } else { when_color });
     spans.push(Span::styled(
@@ -673,8 +682,18 @@ fn pad_right(text: &str, width: usize) -> String {
     }
 }
 
-fn row_icon(agent: &crate::Agent) -> &'static str {
-    if agent.unread_done() {
+/// `CA` (Cursor) / `CB` (CodeBuddy) badge and its color. CodeBuddy gets its
+/// own theme color; Cursor stays dim so the eye lands on the newcomer.
+fn tool_badge(agent: &crate::Agent) -> (&'static str, ratatui::style::Color) {
+    let label = crate::agent::tool_label(&agent.tool);
+    if label == "CB" {
+        (label, theme().tool_codebuddy)
+    } else {
+        (label, theme().mask_fg)
+    }
+}
+
+fn row_icon(agent: &crate::Agent) -> &'static str {    if agent.unread_done() {
         "!"
     } else {
         agent.status.icon()
