@@ -577,13 +577,7 @@ fn place_for_match(agent: &Agent, field: Option<HintField>, home: &str, multi: b
 }
 
 fn activity_text(agent: &Agent) -> Option<String> {
-    if !agent.detail.is_empty() {
-        Some(agent.detail.clone())
-    } else if agent.status == Status::Found {
-        Some("no report yet".to_string())
-    } else {
-        None
-    }
+    (!agent.detail.is_empty()).then(|| agent.detail.clone())
 }
 
 fn activity_line(text: &str, cols: usize, masked: bool) -> Line<'static> {
@@ -896,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn found_row_has_no_elapsed_and_says_so() {
+    fn found_row_has_no_elapsed_and_no_placeholder_activity() {
         let mut board = Board {
             hooks_installed: true,
             now: 134,
@@ -910,7 +904,8 @@ mod tests {
         let text = painted(&board, 16, 110, "");
         assert!(text.contains("found"));
         assert!(!text.contains("2m14s"));
-        assert!(text.contains("no report yet"));
+        assert!(!text.contains("no report yet"));
+        assert!(!text.contains('└'));
     }
 
     #[test]

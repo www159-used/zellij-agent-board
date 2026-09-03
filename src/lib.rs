@@ -581,7 +581,7 @@ impl Board {
     fn row_has_activity(&self, index: usize) -> bool {
         self.agents
             .get(index)
-            .is_some_and(|agent| !agent.detail.is_empty() || agent.status == Status::Found)
+            .is_some_and(|agent| !agent.detail.is_empty())
     }
 
     fn clear_motion(&mut self) {
@@ -1574,7 +1574,8 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert!(lines.iter().any(|line| line.contains("hooks 未装")));
         let joined = lines.join("\n");
         assert!(joined.contains("found"));
-        assert!(joined.contains("no report yet"));
+        assert!(!joined.contains("no report yet"));
+        assert!(!joined.contains('└'));
         assert!(!joined.contains("tab:"));
         assert!(!joined.contains("pane:"));
     }
