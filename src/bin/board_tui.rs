@@ -1,14 +1,13 @@
 //! Host TUI adapter. Scan, spool, places, keys, and ratatui live here.
 //!
 //! MVC loop: `Board` plus the host store are the model. The first frame
-//! paints the last SCAN snapshot; a live scan only patches rows.
+//! paints the last SCAN snapshot. A sibling `--reconcile` process writes
+//! the store; this process only reads.
 
 use std::fs;
 use std::io::{self, stdout, Write};
 use std::path::Path;
-use std::process::Command;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::thread;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::cursor;
@@ -27,28 +26,25 @@ use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use zellij_agent_board::{
-    focus_path, format_jump, load_places, load_scan, parse_focus, persist_places, persist_scan,
-    persist_seen, places_path, render_board, scan_host_text, scan_places_for, spool_dir, Action,
-    AgentId, Board, Key, PanePlace, PIPE_NAME,
+    focus_path, format_jump, load_places, load_scan, parse_focus, persist_seen, places_path,
+    reconcile_once, render_board, run_reconcile, scan_path, spool_dir, Action, AgentId, Board, Key,
+    PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
 
 const POLL: Duration = Duration::from_millis(200);
 const SCAN_EVERY: Duration = Duration::from_secs(2);
-const PLACES_EVERY: Duration = Duration::from_secs(10);
 const TICK_EVERY: Duration = Duration::from_secs(1);
 
 struct App {
     board: Board,
     home: String,
-    last_scan: Instant,
-    last_places: Instant,
+    last_reconcile: Instant,
     last_tick: Instant,
-    host_places_mtime: Option<SystemTime>,
+    scan_mtime: Option<SystemTime>,
+    places_mtime: Option<SystemTime>,
     spool_mtime: Option<SystemTime>,
-    places_rx: Option<Receiver<Vec<(AgentId, PanePlace)>>>,
-    scan_rx: Option<Receiver<String>>,
 }
 
 fn main() -> io::Result<()> {
@@ -60,9 +56,14 @@ fn main() -> io::Result<()> {
 board-tui — host dashboard for zellij-agent-board
 
   board-tui                         live board (needs a TTY)
+  board-tui --reconcile             write the host store once and exit
   board-tui --replay FILE.scene     run an e2e scene; no TTY
 "
             );
+            return Ok(());
+        }
+        Some("--reconcile") => {
+            let _ = run_reconcile();
             return Ok(());
         }
         Some("--replay") => {
@@ -104,30 +105,26 @@ impl App {
         Self {
             board: Board::default(),
             home: std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default(),
-            last_scan: now - SCAN_EVERY,
-            last_places: now - PLACES_EVERY,
+            last_reconcile: now - SCAN_EVERY,
             last_tick: now,
-            host_places_mtime: None,
+            scan_mtime: None,
+            places_mtime: None,
             spool_mtime: None,
-            places_rx: None,
-            scan_rx: None,
         }
     }
 
     fn bootstrap(&mut self) {
-        self.last_scan = Instant::now();
         self.load_model();
-        self.start_scan();
-        self.start_reconcile();
+        spawn_reconcile();
+        self.last_reconcile = Instant::now();
     }
 
     fn load_model(&mut self) {
+        if load_scan().is_none() {
+            let _ = reconcile_once();
+        }
         if let Some(cached) = load_scan() {
             self.board.ingest(&cached);
-        } else {
-            let live = scan_host_text();
-            persist_scan(&live);
-            self.board.ingest(&live);
         }
         self.reload_places();
         self.reload_spool();
@@ -153,14 +150,11 @@ impl App {
                     DrainKeys::Idle => {}
                 }
             }
-            dirty |= self.take_scan();
-            dirty |= self.take_host_places();
+            dirty |= self.take_store();
             let now = Instant::now();
-            if now.duration_since(self.last_scan) >= SCAN_EVERY {
-                self.start_scan();
-            }
-            if file_changed(&places_path(), &mut self.host_places_mtime) {
-                dirty |= self.reload_places();
+            if now.duration_since(self.last_reconcile) >= SCAN_EVERY {
+                spawn_reconcile();
+                self.last_reconcile = Instant::now();
             }
             if dir_changed(&spool_dir(), &mut self.spool_mtime) {
                 dirty |= self.reload_spool();
@@ -215,99 +209,21 @@ impl App {
         }
     }
 
-    fn start_scan(&mut self) {
-        if self.scan_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = tx.send(scan_host_text());
-        });
-        self.scan_rx = Some(rx);
-        self.last_scan = Instant::now();
-    }
-
-    fn take_scan(&mut self) -> bool {
-        let Some(rx) = &self.scan_rx else {
-            return false;
-        };
-        match rx.try_recv() {
-            Ok(text) => {
-                self.scan_rx = None;
-                persist_scan(&text);
-                let dirty = self.board.ingest(&text);
-                if self.places_rx.is_none() && places_due(self.last_places.elapsed()) {
-                    self.start_reconcile();
-                }
-                dirty
-            }
-            Err(TryRecvError::Empty) => false,
-            Err(TryRecvError::Disconnected) => {
-                self.scan_rx = None;
-                false
+    fn take_store(&mut self) -> bool {
+        let mut dirty = false;
+        if file_changed(&scan_path(), &mut self.scan_mtime) {
+            if let Some(text) = load_scan() {
+                dirty |= self.board.ingest(&text);
             }
         }
+        if file_changed(&places_path(), &mut self.places_mtime) {
+            dirty |= self.reload_places();
+        }
+        dirty
     }
 
     fn reload_places(&mut self) -> bool {
         self.board.apply_places(load_places())
-    }
-
-    fn start_reconcile(&mut self) {
-        if self.places_rx.is_some() {
-            return;
-        }
-        let sessions = reconcile_sessions(
-            self.board
-                .agents
-                .iter()
-                .map(|agent| agent.id.session.clone()),
-            self.board.sessions_missing_titles(),
-            &self.home,
-        );
-        if sessions.is_empty() {
-            self.last_places = Instant::now();
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            for session in sessions {
-                if tx.send(scan_places_for(&[session])).is_err() {
-                    break;
-                }
-            }
-        });
-        self.places_rx = Some(rx);
-    }
-
-    fn take_host_places(&mut self) -> bool {
-        let mut batch = Vec::new();
-        let mut done = false;
-        if let Some(rx) = &self.places_rx {
-            loop {
-                match rx.try_recv() {
-                    Ok(places) => batch.push(places),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        done = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if done {
-            self.places_rx = None;
-            self.last_places = Instant::now();
-        }
-        let mut dirty = false;
-        for places in batch {
-            persist_places(places.clone());
-            if let Ok(meta) = fs::metadata(places_path()) {
-                self.host_places_mtime = meta.modified().ok();
-            }
-            dirty |= self.board.apply_places(places);
-        }
-        dirty
     }
 
     fn reload_spool(&mut self) -> bool {
@@ -355,42 +271,16 @@ enum DrainKeys {
     Idle,
 }
 
-fn places_due(elapsed: Duration) -> bool {
-    elapsed >= PLACES_EVERY
-}
-
-fn reconcile_sessions(
-    sessions: impl IntoIterator<Item = String>,
-    missing: impl IntoIterator<Item = String>,
-    home: &str,
-) -> Vec<String> {
-    let mut rest: Vec<String> = sessions
-        .into_iter()
-        .filter(|name| !name.is_empty())
-        .collect();
-    rest.sort();
-    rest.dedup();
-    let mut missing: Vec<String> = missing
-        .into_iter()
-        .filter(|name| !name.is_empty() && name != home)
-        .collect();
-    missing.sort();
-    missing.dedup();
-    let mut out = Vec::new();
-    if !home.is_empty() && rest.iter().any(|name| name == home) {
-        out.push(home.to_string());
-    }
-    for name in missing {
-        if !out.contains(&name) {
-            out.push(name);
-        }
-    }
-    for name in rest {
-        if !out.contains(&name) {
-            out.push(name);
-        }
-    }
-    out
+fn spawn_reconcile() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let _ = Command::new(exe)
+        .arg("--reconcile")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 
 fn map_key(event: KeyEvent, hinting: bool, searching: bool) -> Option<Key> {

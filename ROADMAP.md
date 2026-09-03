@@ -20,6 +20,6 @@
 
 ## 暂时不做 / 避坑原则
 
-- **不搞 SQLite**：标题、已读、Working 起点和上次 SCAN 在 `~/.cache/zellij-agent-board`。第一帧画缓存整板，现场扫描只打行补丁。
+- **不搞 SQLite**：标题、已读、Working 起点和上次 SCAN 在 `~/.cache/zellij-agent-board`。第一帧画缓存整板；`board-tui --reconcile` 单独写盘，锁保证同时只有一个。
 - **日常 Alt+q 别加 `skip_plugin_cache`**：避免反复加载 WASM 导致内存和发热堆积（仅 overview Alt+y 需要）。
 - **保持轻量桥接**（空桥 + new-pane）：保证秒开与低开销。

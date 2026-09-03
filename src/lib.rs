@@ -6,6 +6,8 @@ mod discover;
 mod float_size;
 mod floating_state;
 mod protocol;
+#[cfg(not(target_arch = "wasm32"))]
+mod reconcile;
 mod render;
 #[cfg(not(target_arch = "wasm32"))]
 mod scan;
@@ -21,16 +23,21 @@ pub use float_size::{float_size_from_config, FloatSize};
 pub use floating_state::FloatingLayerState;
 #[cfg(not(target_arch = "wasm32"))]
 pub use protocol::persist_seen;
+pub use protocol::runtime_dir;
+#[cfg(not(target_arch = "wasm32"))]
+pub use protocol::{
+    ensure_state, host_places_path, load_places, load_scan, persist_places, persist_scan, scan_path,
+};
 pub use protocol::{
     focus_path, format_focus, format_jump, format_places, format_seen, format_started,
     merge_places, parse_focus, parse_jump, parse_places, places_path, seen_dir, spool_dir,
     started_dir, PIPE_NAME,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use protocol::{
-    ensure_state, host_places_path, load_places, load_scan, persist_places, persist_scan, scan_path,
+pub use reconcile::{
+    reconcile_lock_path, reconcile_once, run_reconcile, sessions_from_scan, try_acquire_lock,
+    ReconcileLock,
 };
-pub use protocol::runtime_dir;
 pub use render::{frame_patch, paint, paint_to_size, render_board, Frame, FramePatch, PaintCtx};
 #[cfg(not(target_arch = "wasm32"))]
 pub use scan::{

@@ -12,37 +12,6 @@ use zellij_agent_board::{
 use zellij_tile::prelude::*;
 
 const PLUGIN_NAME: &str = "zellij-agent-board";
-const PLACES_WRITER: &str = r#"
-dir="${ZAB_STATE_DIR:?}"
-mkdir -p "$dir"
-file="$dir/places"
-incoming="$dir/places.incoming"
-printf '%s' "${ZAB_PLACES}" >"$incoming"
-if [ ! -s "$incoming" ]; then
-  rm -f "$incoming"
-  exit 0
-fi
-if [ ! -f "$file" ]; then
-  mv "$incoming" "$file"
-  exit 0
-fi
-awk '
-  FNR == NR {
-    if ($0 ~ /^PLACE /) {
-      split($0, a, /[ \t]+/)
-      seen[a[2] SUBSEP a[3]] = 1
-      print
-    }
-    next
-  }
-  /^PLACE / {
-    split($0, a, /[ \t]+/)
-    if (!((a[2] SUBSEP a[3]) in seen)) print
-  }
-' "$incoming" "$file" | sort >"$file.tmp" && mv "$file.tmp" "$file"
-rm -f "$incoming"
-"#;
-
 const FOCUS_WRITER: &str = r#"
 dir="${ZAB_STATE_DIR:?}"
 mkdir -p "$dir"
@@ -520,6 +489,8 @@ impl State {
     }
 
     fn flush_places(&mut self) {
+        // The host reconciler owns the store. Writing from this pane
+        // raced the TUI and leftover boards.
         let text = format_places(self.places.iter().filter_map(|(id, place)| {
             if place.tab_name.is_empty() && place.pane_title.is_empty() {
                 None
@@ -527,24 +498,7 @@ impl State {
                 Some((id.clone(), place.clone()))
             }
         }));
-        if text == self.last_places {
-            return;
-        }
-        self.last_places = text.clone();
-        let mut env = BTreeMap::new();
-        env.insert("ZAB_PLACES".to_string(), text);
-        env.insert(
-            "ZAB_STATE_DIR".to_string(),
-            runtime_dir().to_string_lossy().into_owned(),
-        );
-        let mut context = BTreeMap::new();
-        context.insert("zellij_agent_board".to_string(), "places".to_string());
-        run_command_with_env_variables_and_cwd(
-            &["/bin/bash", "-c", PLACES_WRITER],
-            env,
-            PathBuf::from("."),
-            context,
-        );
+        self.last_places = text;
     }
 
     fn remember_launch_focus(&mut self, session: &SessionInfo) {

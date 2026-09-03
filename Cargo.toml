@@ -11,6 +11,7 @@ zellij-tile = { version = "0.44", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 crossterm = "0.28"
+fs2 = "0.4"
 serde_json = "1"
 
 [features]
