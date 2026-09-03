@@ -513,15 +513,16 @@ fn agent_row(
         .then(|| text_match_range_local(&place, board.highlight_query()))
         .flatten();
     spans.push(Span::raw(" "));
+    let place_w = place_cols(cols);
     if masked {
         spans.push(Span::styled(
-            pad_right(&truncate(&place, 12), 12),
+            pad_right(&truncate(&place, place_w), place_w),
             Style::default().fg(theme().mask_fg),
         ));
     } else if let Some(range) = place_range {
-        spans.extend(highlight_padded(&place, range, 12));
+        spans.extend(highlight_padded(&place, range, place_w));
     } else {
-        spans.push(Span::raw(pad_right(&truncate(&place, 12), 12)));
+        spans.push(Span::raw(pad_right(&truncate(&place, place_w), place_w)));
     }
 
     let used = line_width(&spans);
@@ -558,6 +559,14 @@ fn place_label(agent: &Agent, home: &str, multi: bool) -> String {
     } else {
         String::new()
     }
+}
+
+/// Place grows with the pane so branch names are not stuck at 12.
+/// Lead columns (cursor, icon, status, time) take ~24 cells; place gets
+/// about a third of the rest, clamped so short boards stay readable.
+fn place_cols(cols: usize) -> usize {
+    let rest = cols.saturating_sub(24);
+    (rest / 3).clamp(12, 28)
 }
 
 fn place_for_match(agent: &Agent, field: Option<HintField>, home: &str, multi: bool) -> String {
@@ -983,6 +992,32 @@ mod tests {
         let w = display_index(working, "api").expect("working place");
         let d = display_index(finished, "api").expect("done place");
         assert_eq!(w, d, "place column drifted:\n{working}\n{finished}");
+    }
+
+    #[test]
+    fn place_column_grows_with_the_pane() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        let mut agent = agent();
+        agent.workspace = None;
+        agent.tab_name = "optimize/better-jump".into();
+        agent.pane_title.clear();
+        board.agents.push(agent);
+        let narrow = painted(&board, 8, 50, "ww");
+        assert!(
+            narrow.contains('…') || !narrow.contains("better-jump"),
+            "narrow board still truncates:\n{narrow}"
+        );
+        let wide = painted(&board, 8, 110, "ww");
+        assert!(
+            wide.contains("optimize/better-jump"),
+            "wide board should show the full place:\n{wide}"
+        );
+        assert_eq!(super::place_cols(50), 12);
+        assert_eq!(super::place_cols(80), 18);
+        assert_eq!(super::place_cols(110), 28);
     }
 
     fn display_index(text: &str, needle: &str) -> Option<usize> {
