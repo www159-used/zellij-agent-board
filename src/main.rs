@@ -5,8 +5,9 @@ use std::path::PathBuf;
 
 use zellij_agent_board::{
     bridge_close_plan, float_size_from_config, format_focus, format_places, is_host_tui_exit,
-    looks_like_board_tui, now_ms, parse_jump, should_open_tui, should_shutdown_on_tui_close,
-    AgentId, BridgeClosePlan, FloatSize, FloatingLayerState, PanePlace,
+    jump_steps, looks_like_board_tui, now_ms, parse_jump, should_abandon_empty_bridge,
+    should_open_tui, should_shutdown_on_tui_close, AgentId, BridgeClosePlan, FloatSize,
+    FloatingLayerState, JumpStep, PanePlace,
 };
 use zellij_tile::prelude::*;
 
@@ -50,13 +51,16 @@ printf '%s' "${ZAB_FOCUS}" >"$dir/focus"
 
 /// `bash -c` (not `-l`) keeps ZAB_* env. Absolute zellij — plugin PATH
 /// has no Homebrew. Regular `new-pane`, not a command pane (those steal Esc).
+/// Session is required: without it the pane lands in the wrong session or
+/// nowhere, and this empty plugin stays up as a fake board.
 const TUI_LAUNCHER: &str = r#"
-zellij_bin="${ZAB_ZELLIJ:-/opt/homebrew/bin/zellij}"
-cmd=("$zellij_bin")
-if [ -n "${ZAB_SESSION:-}" ]; then
-  cmd+=(--session "$ZAB_SESSION")
+if [ -z "${ZAB_SESSION:-}" ]; then
+  echo "board-tui launch needs ZAB_SESSION" >&2
+  exit 2
 fi
-cmd+=(action new-pane --floating --close-on-exit --name board-tui
+zellij_bin="${ZAB_ZELLIJ:-/opt/homebrew/bin/zellij}"
+cmd=("$zellij_bin" --session "$ZAB_SESSION" action new-pane --floating
+  --close-on-exit --name board-tui
   --width "$ZAB_W" --height "$ZAB_H" --x "$ZAB_X" --y "$ZAB_Y")
 if [ -n "${ZAB_TAB:-}" ]; then
   cmd+=(--tab-id "$ZAB_TAB")
@@ -128,6 +132,7 @@ impl ZellijPlugin for State {
                     // LaunchPlugin { floating } then lands in that layer and
                     // Alt+q looks like a no-op. Do not enlarge this empty
                     // pane — it would cover the board until SessionUpdate.
+                    // Do not open the TUI until the session name is known.
                     let _ = self.show_float();
                     if !self.close_if_duplicate() {
                         self.ensure_tui(false);
@@ -139,9 +144,11 @@ impl ZellijPlugin for State {
                 false
             }
             Event::Timer(_) => {
-                if self.permissions_granted && self.tui_id.is_none() {
+                if self.permissions_granted && self.tui_id.is_none() && !self.dying {
                     self.ensure_tui(true);
-                    if self.tui_id.is_none() && self.tui_attempts < 3 {
+                    if should_abandon_empty_bridge(self.tui_up(), self.tui_attempts) {
+                        self.abandon_empty_bridge();
+                    } else if self.tui_id.is_none() {
                         set_timeout(0.4);
                     }
                 }
@@ -156,6 +163,12 @@ impl ZellijPlugin for State {
                     self.floating_layer
                         .capture(self.previous_pane_was_floating(session));
                     self.remember_launch_focus(session);
+                    if self.permissions_granted && !self.dying {
+                        self.ensure_tui(false);
+                        if self.tui_id.is_none() {
+                            set_timeout(0.4);
+                        }
+                    }
                 }
                 self.harvest_board_ids_from_sessions(&sessions);
                 self.remember_sessions(&sessions);
@@ -195,9 +208,9 @@ impl ZellijPlugin for State {
                 if is_host_tui_exit(self.tui_id, pane_id, false) {
                     self.tui_id = None;
                     self.tui_visible = false;
-                    if should_shutdown_on_tui_close(self.bridge_hidden) {
+                    if should_shutdown_on_tui_close(self.bridge_hidden, self.dying) {
                         self.shutdown_bridge();
-                    } else if self.tui_attempts < 3 {
+                    } else if !self.dying && self.tui_attempts < 3 {
                         set_timeout(0.4);
                     }
                 }
@@ -212,13 +225,22 @@ impl ZellijPlugin for State {
             return false;
         };
         if let Some((session, pane_id)) = parse_jump(payload) {
-            if self.current_session.as_deref() == Some(session.as_str()) {
-                focus_terminal_pane(pane_id, false, false);
-            } else {
-                switch_session_with_focus(&session, None, Some((pane_id, false)));
+            self.dying = true;
+            for step in jump_steps(self.current_session.as_deref(), &session, pane_id) {
+                match step {
+                    JumpStep::CloseOriginBoard => self.close_tui_here(),
+                    JumpStep::Focus { pane_id } => {
+                        focus_terminal_pane(pane_id, false, false);
+                    }
+                    JumpStep::Switch { session, pane_id } => {
+                        switch_session_with_focus(&session, None, Some((pane_id, false)));
+                    }
+                    JumpStep::CloseBridge => {
+                        let ids = self.all_board_plugin_ids();
+                        self.close_bridge(&ids);
+                    }
+                }
             }
-            let ids = self.all_board_plugin_ids();
-            self.shutdown_board(&ids);
         }
         false
     }
@@ -261,6 +283,16 @@ impl State {
         }
     }
 
+    fn tui_up(&self) -> bool {
+        self.tui_id.is_some() || self.find_tui_pane().is_some()
+    }
+
+    fn session_known(&self) -> bool {
+        self.current_session
+            .as_deref()
+            .is_some_and(|name| !name.is_empty())
+    }
+
     fn ensure_tui(&mut self, from_timer: bool) {
         self.adopt_existing_tui();
         if self.tui_id.is_some() {
@@ -270,9 +302,10 @@ impl State {
         if !should_open_tui(
             self.permissions_granted,
             self.dying,
-            self.tui_id.is_some() || self.find_tui_pane().is_some(),
+            self.tui_up(),
             self.tui_attempts,
             from_timer,
+            self.session_known(),
         ) {
             return;
         }
@@ -301,6 +334,14 @@ impl State {
     }
 
     fn open_tui(&mut self) {
+        let Some(session) = self
+            .current_session
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+        else {
+            return;
+        };
         self.tui_attempts = self.tui_attempts.saturating_add(1);
         let _ = self.show_float();
         let mut context = BTreeMap::new();
@@ -312,13 +353,7 @@ impl State {
         env.insert("ZAB_X".to_string(), self.float_size.x.clone());
         env.insert("ZAB_Y".to_string(), self.float_size.y.clone());
         env.insert("ZAB_ZELLIJ".to_string(), "/opt/homebrew/bin/zellij".into());
-        if let Some(session) = self
-            .current_session
-            .as_deref()
-            .filter(|name| !name.is_empty())
-        {
-            env.insert("ZAB_SESSION".to_string(), session.to_string());
-        }
+        env.insert("ZAB_SESSION".to_string(), session);
         if let Some(tab_id) = self.own_tab_id {
             env.insert("ZAB_TAB".to_string(), tab_id.to_string());
         }
@@ -372,8 +407,15 @@ impl State {
         close_self();
     }
 
-    fn shutdown_board(&mut self, plugin_ids: &[u32]) {
+    fn abandon_empty_bridge(&mut self) {
         self.dying = true;
+        if self.floating_layer.should_hide_on_close() {
+            let _ = hide_floating_panes(self.own_tab_id);
+        }
+        close_self();
+    }
+
+    fn close_tui_here(&mut self) {
         if let Some(id) = self.tui_id.or_else(|| self.find_tui_pane()) {
             close_pane_with_id(PaneId::Terminal(id));
         }
@@ -384,6 +426,12 @@ impl State {
                 }
             }
         }
+        self.tui_id = None;
+        self.tui_visible = false;
+    }
+
+    fn close_bridge(&mut self, plugin_ids: &[u32]) {
+        self.dying = true;
         for id in plugin_ids {
             close_pane_with_id(PaneId::Plugin(*id));
         }
@@ -391,6 +439,12 @@ impl State {
             let _ = hide_floating_panes(self.own_tab_id);
         }
         close_self();
+    }
+
+    fn shutdown_board(&mut self, plugin_ids: &[u32]) {
+        self.dying = true;
+        self.close_tui_here();
+        self.close_bridge(plugin_ids);
     }
 
     fn harvest_board_ids_from_sessions(&mut self, sessions: &[SessionInfo]) {

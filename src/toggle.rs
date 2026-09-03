@@ -155,16 +155,18 @@ pub fn is_host_tui_exit(tui_id: Option<u32>, closed_id: u32, command_pane: bool)
     !command_pane && tui_id == Some(closed_id)
 }
 
-/// First event after permissions opens once. Later `SessionUpdate`s /
-/// `PaneUpdate`s must not spawn another pane; only the Timer retries.
+/// The empty plugin is not the board. Open only after the current session
+/// is known, once. Later `SessionUpdate`s / `PaneUpdate`s must not spawn
+/// another pane; only the Timer retries a failed launch.
 pub fn should_open_tui(
     permissions: bool,
     dying: bool,
     tui_up: bool,
     attempts: u8,
     from_timer: bool,
+    session_known: bool,
 ) -> bool {
-    if !permissions || dying || tui_up {
+    if !permissions || dying || tui_up || !session_known {
         return false;
     }
     if attempts == 0 {
@@ -173,10 +175,38 @@ pub fn should_open_tui(
     from_timer && attempts < 3
 }
 
+/// Empty shell must not stay floating. After three failed launches, die.
+pub fn should_abandon_empty_bridge(tui_up: bool, attempts: u8) -> bool {
+    !tui_up && attempts >= 3
+}
+
 /// `hide_self` means the user saw the board. A pane that dies before that
-/// is a failed `NewFloatingPane`, not `q`.
-pub fn should_shutdown_on_tui_close(bridge_hidden: bool) -> bool {
-    bridge_hidden
+/// is a failed launch, not `q`. Jump sets `dying` so `PaneClosed` does not
+/// `close_self` before `switch_session`.
+pub fn should_shutdown_on_tui_close(bridge_hidden: bool, dying: bool) -> bool {
+    bridge_hidden && !dying
+}
+
+/// Tear the board down in the origin session, then move, then kill the
+/// bridge. Never switch first — pane ids are only valid here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JumpStep {
+    CloseOriginBoard,
+    Focus { pane_id: u32 },
+    Switch { session: String, pane_id: u32 },
+    CloseBridge,
+}
+
+pub fn jump_steps(current: Option<&str>, target: &str, pane_id: u32) -> Vec<JumpStep> {
+    let next = if current == Some(target) {
+        JumpStep::Focus { pane_id }
+    } else {
+        JumpStep::Switch {
+            session: target.to_string(),
+            pane_id,
+        }
+    };
+    vec![JumpStep::CloseOriginBoard, next, JumpStep::CloseBridge]
 }
 
 #[cfg(test)]
@@ -316,19 +346,61 @@ mod tests {
     #[test]
     fn first_open_is_once_and_later_updates_do_not_spawn() {
         use super::should_open_tui;
-        assert!(should_open_tui(true, false, false, 0, false));
-        assert!(!should_open_tui(true, false, false, 1, false));
-        assert!(should_open_tui(true, false, false, 1, true));
-        assert!(!should_open_tui(true, false, false, 3, true));
-        assert!(!should_open_tui(true, false, true, 0, false));
-        assert!(!should_open_tui(false, false, false, 0, false));
+        assert!(should_open_tui(true, false, false, 0, false, true));
+        assert!(!should_open_tui(true, false, false, 1, false, true));
+        assert!(should_open_tui(true, false, false, 1, true, true));
+        assert!(!should_open_tui(true, false, false, 3, true, true));
+        assert!(!should_open_tui(true, false, true, 0, false, true));
+        assert!(!should_open_tui(false, false, false, 0, false, true));
+    }
+
+    #[test]
+    fn tui_does_not_open_before_the_session_is_known() {
+        use super::should_open_tui;
+        assert!(!should_open_tui(true, false, false, 0, false, false));
+        assert!(should_open_tui(true, false, false, 0, false, true));
+    }
+
+    #[test]
+    fn empty_bridge_dies_after_three_failed_launches() {
+        use super::should_abandon_empty_bridge;
+        assert!(!should_abandon_empty_bridge(false, 0));
+        assert!(!should_abandon_empty_bridge(false, 2));
+        assert!(should_abandon_empty_bridge(false, 3));
+        assert!(!should_abandon_empty_bridge(true, 3));
     }
 
     #[test]
     fn failed_launch_does_not_quit_the_bridge() {
         use super::should_shutdown_on_tui_close;
-        assert!(!should_shutdown_on_tui_close(false));
-        assert!(should_shutdown_on_tui_close(true));
+        assert!(!should_shutdown_on_tui_close(false, false));
+        assert!(should_shutdown_on_tui_close(true, false));
+        assert!(!should_shutdown_on_tui_close(true, true));
+    }
+
+    #[test]
+    fn jump_closes_the_origin_board_before_switching() {
+        use super::{jump_steps, JumpStep};
+        assert_eq!(
+            jump_steps(Some("zab"), "lp", 8),
+            vec![
+                JumpStep::CloseOriginBoard,
+                JumpStep::Switch {
+                    session: "lp".into(),
+                    pane_id: 8,
+                },
+                JumpStep::CloseBridge,
+            ]
+        );
+        assert_eq!(
+            jump_steps(Some("zab"), "zab", 3),
+            vec![
+                JumpStep::CloseOriginBoard,
+                JumpStep::Focus { pane_id: 3 },
+                JumpStep::CloseBridge,
+            ]
+        );
+        assert_eq!(jump_steps(None, "lp", 1)[0], JumpStep::CloseOriginBoard);
     }
 
     #[test]
