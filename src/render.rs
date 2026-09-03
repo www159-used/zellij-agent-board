@@ -299,13 +299,13 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         Line::from(vec![
             Span::styled(
                 " FLASH ",
-                Style::default().fg(theme().tip_fg).bg(theme().tip_bg),
+                Style::default().fg(theme().tip_fg).bg(theme().focus),
             ),
             Span::raw(" type to search"),
             Span::styled(
                 format!("  /{}█", board.hint_query()),
                 Style::default()
-                    .fg(ratatui::style::Color::White)
+                    .fg(theme().focus)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -609,7 +609,7 @@ fn hint_badge(label: &str, prefix_len: usize) -> Vec<Span<'static>> {
     if !remaining.is_empty() {
         spans.push(Span::styled(
             remaining.to_string(),
-            Style::default().fg(theme().tip_fg).bg(theme().tip_bg),
+            Style::default().fg(theme().tip_fg).bg(theme().focus),
         ));
     }
     spans
@@ -1021,7 +1021,7 @@ mod tests {
             "browse should lead with status:\n{browse}"
         );
         assert!(
-            !browse_ansi.contains("\u{1b}[48;2;22;26;34m"),
+            !browse_ansi.contains("\u{1b}[48;2;30;24;48m"),
             "browse must not already be the flash tint:\n{browse_ansi}"
         );
 
@@ -1051,8 +1051,33 @@ mod tests {
             "footer still names the mode:\n{flash}"
         );
         assert!(
-            flash_ansi.contains("\u{1b}[48;2;22;26;34m"),
+            flash_ansi.contains("\u{1b}[48;2;30;24;48m"),
             "empty flash must still tint the pane:\n{flash_ansi}"
+        );
+        assert!(
+            flash_ansi.contains("\u{1b}[48;2;228;212;255m"),
+            "FLASH pill should use focus lilac, not tip cool:\n{flash_ansi}"
+        );
+
+        board.decide(Key::Dismiss);
+        board.decide(Key::StartSearch);
+        let search_ansi = paint(
+            &board,
+            PaintCtx {
+                rows: 16,
+                cols: 80,
+                home: "ww",
+            },
+        )
+        .lines
+        .join("\n");
+        assert!(
+            !search_ansi.contains("\u{1b}[48;2;30;24;48m"),
+            "search must not reuse the flash tint:\n{search_ansi}"
+        );
+        assert!(
+            search_ansi.contains("\u{1b}[48;2;162;197;206m"),
+            "search pill stays on cool tip-bg:\n{search_ansi}"
         );
     }
 

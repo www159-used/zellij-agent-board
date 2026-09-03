@@ -16,10 +16,12 @@
   --pin-mark: #f9a9b6;
   --pin-border: #f192a1;
 
-  /* Flash / done 状态：暖色 */
+  /* 命中高亮 / done：沙色（状态语义，不当模式铬） */
   --match: #ebbb8b;
   --match-border: #cba77d;
-  --mask: #161a22;
+
+  /* Flash 蒙层：同色相、比 focus-fill 更深，选中条还能看见 */
+  --mask: #1e1830;
   --mask-fg: #3d4454;
 
   /* 分组横线 */
