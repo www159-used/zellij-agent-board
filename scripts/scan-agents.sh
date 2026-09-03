@@ -7,8 +7,24 @@ trap 'exit 0' EXIT
 spool_dir="${TMPDIR:-/tmp}/zellij-agent-board-spool"
 
 epoch=$(date +%s)
+root="$(cd "$(dirname "$0")/.." && pwd)"
+catalog_dump=$(python3 -B "$root/scripts/lib/catalog.py" dump)
+bins=""
+hook_files=""
+while read -r kind rest; do
+  case "$kind" in
+    bin) bins="$bins $rest" ;;
+    hook) hook_files="$hook_files $rest" ;;
+  esac
+done <<<"$catalog_dump"
+
+chat_store_needle() {
+  local comm=$1
+  printf '%s\n' "$catalog_dump" | awk -v c="$comm" '$1=="chat_store" && $2==c {print $3; exit}'
+}
+
 hooks=0
-for hooks_json in "${HOME}/.cursor/hooks.json" "${HOME}/.codebuddy/settings.json"; do
+for hooks_json in $hook_files; do
   if [[ -f "$hooks_json" ]] && grep -q 'zellij-agent-board-hook' "$hooks_json"; then
     hooks=1
     break
@@ -16,16 +32,20 @@ for hooks_json in "${HOME}/.cursor/hooks.json" "${HOME}/.codebuddy/settings.json
 done
 printf 'META hooks=%s epoch=%s\n' "$hooks" "$epoch"
 
-is_cursor_agent() {
+is_catalog_bin() {
   local comm=$1
-  [[ "$comm" == "agent" || "$comm" == "cursor-agent" || "$comm" == "codebuddy" || "$comm" == "cbc" ]]
+  local bin
+  for bin in $bins; do
+    [[ "$bin" == "$comm" ]] && return 0
+  done
+  return 1
 }
 
-# `agent ls` keeps argv=`ls` after you pick a session and chat. A pure picker
-# has no chat store open; a live chat holds ~/.cursor/chats/.../store.db.
+# Cursor `agent ls` keeps argv=`ls` after you pick a session. A pure picker
+# has no chat store open; a live chat holds the adapter's store needle.
 holding_chat_store() {
-  local pid=$1
-  lsof -p "$pid" -Fn 2>/dev/null | grep -q '/.cursor/chats/.*/store\.db'
+  local pid=$1 needle=$2
+  lsof -p "$pid" -Fn 2>/dev/null | grep -q "${needle}.*/store\\.db"
 }
 
 # Enumerate via ps, not pgrep: macOS pgrep silently skips some live
@@ -33,7 +53,7 @@ holding_chat_store() {
 pids=""
 while read -r pid comm; do
   [[ -n "${pid:-}" ]] || continue
-  is_cursor_agent "${comm##*/}" || continue
+  is_catalog_bin "${comm##*/}" || continue
   if [[ -n "$pids" ]]; then
     pids="$pids,$pid"
   else
@@ -53,11 +73,12 @@ if [[ -n "$pids" ]]; then
     [[ -n "${args:-}" ]] || continue
     bin=${args%% *}
     comm=${bin##*/}
-    is_cursor_agent "$comm" || continue
+    is_catalog_bin "$comm" || continue
 
     last=${args##* }
-    if [[ "$last" == "ls" ]]; then
-      holding_chat_store "$pid" || continue
+    needle=$(chat_store_needle "$comm")
+    if [[ "$last" == "ls" && -n "$needle" ]]; then
+      holding_chat_store "$pid" "$needle" || continue
     fi
 
     blob=""

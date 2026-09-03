@@ -500,7 +500,10 @@ fn agent_row(
     } else {
         Style::default().fg(badge_color)
     };
-    spans.push(Span::styled(format!(" {}", pad_right(badge, 2)), badge_style));
+    spans.push(Span::styled(
+        format!(" {}", pad_right(&badge, 2)),
+        badge_style,
+    ));
 
     let (when, when_color) = time_cell(agent, board);
     let when_style = Style::default().fg(if masked { theme().mask_fg } else { when_color });
@@ -682,18 +685,19 @@ fn pad_right(text: &str, width: usize) -> String {
     }
 }
 
-/// `CA` (Cursor) / `CB` (CodeBuddy) badge and its color. CodeBuddy gets its
-/// own theme color; Cursor stays dim so the eye lands on the newcomer.
-fn tool_badge(agent: &crate::Agent) -> (&'static str, ratatui::style::Color) {
+/// Catalog badge (CA / CB / CC / OC) and its color. Cursor stays dim.
+fn tool_badge(agent: &crate::Agent) -> (String, ratatui::style::Color) {
     let label = crate::agent::tool_label(&agent.tool);
-    if label == "CB" {
-        (label, theme().tool_codebuddy)
-    } else {
-        (label, theme().mask_fg)
-    }
+    let hex = crate::catalog::badge_for(&agent.tool).1;
+    let color = hex
+        .as_deref()
+        .and_then(crate::theme::color_from_hex)
+        .unwrap_or_else(|| theme().mask_fg);
+    (label, color)
 }
 
-fn row_icon(agent: &crate::Agent) -> &'static str {    if agent.unread_done() {
+fn row_icon(agent: &crate::Agent) -> &'static str {
+    if agent.unread_done() {
         "!"
     } else {
         agent.status.icon()

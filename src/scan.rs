@@ -5,6 +5,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent::{keep_cursor_agent, AgentId, PanePlace};
+use crate::catalog::catalog;
 use crate::protocol::{ensure_state, seen_dir, spool_dir, started_dir};
 
 pub fn scan_host_text() -> String {
@@ -33,8 +34,15 @@ pub fn scan_host_text() -> String {
             .first()
             .map(|bin| bin.rsplit('/').next().unwrap_or(bin).to_string())
             .unwrap_or_else(|| "agent".into());
-        if argv.last().map(String::as_str) == Some("ls") && !holding_chat_store(*pid) {
-            continue;
+        if argv.last().map(String::as_str) == Some("ls") {
+            let needle = catalog()
+                .adapter_for_bin(&comm)
+                .and_then(|adapter| adapter.chat_store_needle.as_deref());
+            if let Some(needle) = needle {
+                if !holding_chat_store(*pid, needle) {
+                    continue;
+                }
+            }
         }
         let Some(blob) = env_by_pid.get(pid) else {
             continue;
@@ -190,13 +198,7 @@ fn env_value(blob: &str, key: &str) -> Option<String> {
 }
 
 fn hooks_installed() -> bool {
-    let home = home_dir();
-    let cursor = std::fs::read_to_string(home.join(".cursor/hooks.json"));
-    let codebuddy = std::fs::read_to_string(home.join(".codebuddy/settings.json"));
-    [cursor, codebuddy]
-        .into_iter()
-        .flatten()
-        .any(|text| text.contains("zellij-agent-board-hook"))
+    catalog().hook_installed(&home_dir())
 }
 
 fn home_dir() -> std::path::PathBuf {
@@ -227,15 +229,15 @@ fn agent_pids() -> Vec<u32> {
 }
 
 fn agent_pids_from_text(text: &str) -> Vec<u32> {
-    const WANTED: [&str; 4] = ["agent", "cursor-agent", "codebuddy", "cbc"];
+    let wanted = catalog();
     let mut pids = Vec::new();
     for line in text.lines() {
-        let mut parts = line.trim_start().split_whitespace();
+        let mut parts = line.split_whitespace();
         let (Some(pid), Some(comm)) = (parts.next(), parts.next()) else {
             continue;
         };
         let bin = comm.rsplit('/').next().unwrap_or(comm);
-        if !WANTED.contains(&bin) {
+        if !wanted.wants_bin(bin) {
             continue;
         }
         if let Ok(pid) = pid.parse::<u32>() {
@@ -315,7 +317,7 @@ fn split_args(args: &str) -> Vec<String> {
     args.split_whitespace().map(str::to_string).collect()
 }
 
-fn holding_chat_store(pid: u32) -> bool {
+fn holding_chat_store(pid: u32, needle: &str) -> bool {
     let Ok(output) = Command::new(lsof_bin())
         .args(["-p", &pid.to_string(), "-Fn"])
         .output()
@@ -324,7 +326,7 @@ fn holding_chat_store(pid: u32) -> bool {
     };
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .any(|line| line.contains("/.cursor/chats/") && line.contains("store.db"))
+        .any(|line| line.contains(needle) && line.contains("store.db"))
 }
 
 fn read_spool(key: &str) -> Option<String> {
@@ -403,8 +405,8 @@ mod tests {
 
     #[test]
     fn agent_pids_reads_ps_comm_text() {
-        let text = "  123 /Users/ww/.local/bin/agent\n  456 codebuddy\n  789 /usr/sbin/distnoted\n  810 vim\n   32 /bin/zsh\n";
-        assert_eq!(agent_pids_from_text(text), vec![123, 456]);
+        let text = "  123 /Users/ww/.local/bin/agent\n  456 codebuddy\n  321 claude\n  654 opencode\n  789 /usr/sbin/distnoted\n  810 vim\n   32 /bin/zsh\n";
+        assert_eq!(agent_pids_from_text(text), vec![123, 321, 456, 654]);
     }
 
     #[test]
@@ -414,7 +416,9 @@ mod tests {
             .output();
         let has_agent = dump
             .ok()
-            .map(|output| !super::agent_pids_from_text(&String::from_utf8_lossy(&output.stdout)).is_empty())
+            .map(|output| {
+                !super::agent_pids_from_text(&String::from_utf8_lossy(&output.stdout)).is_empty()
+            })
             .unwrap_or(false);
         if !has_agent {
             return;

@@ -19,7 +19,7 @@ Zellij 0.44 or newer is required.
 
 Builds the WASM bridge and the host `board-tui`, then copies both to `~/.config/zellij/plugins/`. Override the WASM path with `ZELLIJ_AGENT_BOARD_PLUGIN_PATH`. The TUI path can be overridden with `ZELLIJ_AGENT_BOARD_TUI` or a `tui` plugin config key.
 
-`install-hooks.sh` registers the agent hook for Cursor (`~/.cursor/hooks.json`) and CodeBuddy (`~/.codebuddy/settings.json`). Pass `cursor` or `codebuddy` to install for one only; the default is both.
+`install-hooks.sh` registers hooks from `adapters/catalog.toml` (Cursor, CodeBuddy, Claude Code, OpenCode). Pass an adapter id to install one only; the default is all. A new cc-family CLI is a drop-in TOML under `~/.config/zellij-agent-board/adapters/`.
 
 ## Keybinding
 

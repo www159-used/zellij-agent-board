@@ -2,6 +2,7 @@
 
 mod agent;
 mod ansi;
+mod catalog;
 mod discover;
 mod float_size;
 mod floating_state;
@@ -18,6 +19,7 @@ mod theme;
 mod toggle;
 
 pub use agent::{keep_cursor_agent, workspace_from_argv, Agent, AgentId, PanePlace};
+pub use catalog::{keep_row, Catalog};
 pub use discover::{parse_host_line, parse_scan_line, Found, HookNotice, HostLine};
 pub use float_size::{float_size_from_config, FloatSize};
 pub use floating_state::FloatingLayerState;
@@ -860,11 +862,7 @@ impl Board {
 
     /// Enter jumps the first labeled match.
     fn hint_confirm_target(&self) -> Option<usize> {
-        self.hint
-            .as_ref()?
-            .labels
-            .iter()
-            .position(Option::is_some)
+        self.hint.as_ref()?.labels.iter().position(Option::is_some)
     }
 
     fn reveal_first_hint_match(&mut self) {
@@ -1017,7 +1015,7 @@ impl Board {
             } else {
                 row.argv
             };
-            if !keep_cursor_agent(&argv) {
+            if !keep_row(&argv) {
                 continue;
             }
             let prior = previous.iter().find(|agent| agent.id == row.id);

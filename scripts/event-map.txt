@@ -1,0 +1,15 @@
+SessionStart=sessionStart
+SessionEnd=sessionEnd
+UserPromptSubmit=beforeSubmitPrompt
+PreToolUse=preToolUse
+PostToolUse=postToolUse
+PostToolUseFailure=postToolUseFailure
+Stop=stop
+PreCompact=preCompact
+session.created=sessionStart
+session.deleted=sessionEnd
+session.idle=stop
+session.compacted=preCompact
+chat.message=beforeSubmitPrompt
+tool.execute.before=preToolUse
+tool.execute.after=postToolUse

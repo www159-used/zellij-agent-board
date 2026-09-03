@@ -1,0 +1,143 @@
+# Built-in CLI catalog. User drop-ins: ~/.config/zellij-agent-board/adapters/*.toml
+# New cc-family CLI = one adapter file, no Rust change.
+
+[defaults]
+skip = [
+  "status",
+  "whoami",
+  "login",
+  "logout",
+  "update",
+  "about",
+  "--version",
+  "-V",
+  "-v",
+]
+
+[protocol.cursor]
+install = "cursor"
+events = [
+  "sessionStart",
+  "sessionEnd",
+  "beforeSubmitPrompt",
+  "preToolUse",
+  "postToolUse",
+  "postToolUseFailure",
+  "beforeShellExecution",
+  "afterShellExecution",
+  "preCompact",
+  "stop",
+  "afterAgentResponse",
+]
+
+[protocol.cc]
+install = "cc"
+# SubagentStop is skipped on purpose: it fires mid-turn and would mark the pane done.
+events = [
+  "SessionStart",
+  "SessionEnd",
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "Stop",
+  "PreCompact",
+]
+
+[protocol.cc.map]
+SessionStart = "sessionStart"
+SessionEnd = "sessionEnd"
+UserPromptSubmit = "beforeSubmitPrompt"
+PreToolUse = "preToolUse"
+PostToolUse = "postToolUse"
+PostToolUseFailure = "postToolUseFailure"
+Stop = "stop"
+PreCompact = "preCompact"
+
+[protocol.opencode]
+install = "opencode"
+plugin = "scripts/opencode-plugin.js"
+
+[protocol.opencode.map]
+"session.created" = "sessionStart"
+"session.deleted" = "sessionEnd"
+"session.idle" = "stop"
+"session.compacted" = "preCompact"
+"chat.message" = "beforeSubmitPrompt"
+"tool.execute.before" = "preToolUse"
+"tool.execute.after" = "postToolUse"
+
+[[adapter]]
+id = "cursor"
+badge = "CA"
+bins = ["agent", "cursor-agent"]
+protocol = "cursor"
+settings = "~/.cursor/hooks.json"
+hook_dir = "~/.cursor/hooks"
+ls_holds_chat_store = true
+chat_store_needle = "/.cursor/chats/"
+
+[[adapter]]
+id = "codebuddy"
+badge = "CB"
+color = "#86b6f2"
+bins = ["codebuddy", "cbc"]
+protocol = "cc"
+settings = "~/.codebuddy/settings.json"
+hook_dir = "~/.codebuddy/hooks"
+
+[[adapter]]
+id = "claude"
+badge = "CC"
+color = "#d97757"
+bins = ["claude"]
+protocol = "cc"
+settings = "~/.claude/settings.json"
+hook_dir = "~/.claude/hooks"
+skip = [
+  "--print",
+  "-p",
+  "--version",
+  "-V",
+  "-v",
+  "update",
+  "mcp",
+  "login",
+  "logout",
+  "auth",
+  "plugins",
+]
+
+[[adapter]]
+id = "opencode"
+badge = "OC"
+color = "#7dcfff"
+bins = ["opencode"]
+protocol = "opencode"
+settings = "~/.config/opencode/plugins/zellij-agent-board.js"
+hook_dir = "~/.config/opencode/plugins"
+skip = [
+  "--version",
+  "-v",
+  "completion",
+  "upgrade",
+  "uninstall",
+  "serve",
+  "web",
+  "models",
+  "stats",
+  "export",
+  "import",
+  "github",
+  "acp",
+  "mcp",
+  "debug",
+  "providers",
+  "auth",
+  "agent",
+  "session",
+  "plugin",
+  "db",
+  "run",
+  "pr",
+]

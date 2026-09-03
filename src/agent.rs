@@ -103,41 +103,16 @@ impl PanePlace {
     }
 }
 
-/// Cursor / CodeBuddy CLI wrapper argv: keep interactive sessions, drop
-/// one-shot subcommands.
-///
-/// `agent ls` is special: the session picker keeps argv=`ls` even after you
-/// resume a chat. The host scan decides whether a `ls` process is a live chat
-/// (chat store open) or a pure picker; this filter must not drop `ls` alone.
+/// Keep interactive sessions, drop one-shot subcommands. Bins and skip
+/// lists come from the catalog; `agent ls` is still kept here so the host
+/// scan can decide picker vs live chat.
 pub fn keep_cursor_agent(argv: &[String]) -> bool {
-    let bin = argv
-        .first()
-        .map(|s| s.rsplit('/').next().unwrap_or(s))
-        .unwrap_or("");
-    if !matches!(bin, "agent" | "cursor-agent" | "codebuddy" | "cbc") {
-        return false;
-    }
-    let skip = [
-        "status",
-        "whoami",
-        "login",
-        "logout",
-        "update",
-        "about",
-        "--version",
-        "-V",
-    ];
-    !argv.iter().skip(1).any(|arg| skip.contains(&arg.as_str()))
+    crate::catalog::keep_process(argv)
 }
 
-/// Short CLI badge for a scanned row: `CB` marks a CodeBuddy pane, `CA`
-/// every Cursor one. Unknown tools read as Cursor — the scan allowlist
-/// decides what exists, so this only ever sees allowed tools.
-pub fn tool_label(tool: &str) -> &'static str {
-    match tool {
-        "codebuddy" | "cbc" => "CB",
-        _ => "CA",
-    }
+/// Short CLI badge from the catalog. Unknown tools get a 2-char fallback.
+pub fn tool_label(tool: &str) -> String {
+    crate::catalog::badge_for(tool).0
 }
 
 /// Best-effort `--workspace` from an argv list the process scan will supply.
@@ -200,12 +175,18 @@ mod tests {
     #[test]
     fn keeps_codebuddy_and_drops_one_shots() {
         assert!(keep_cursor_agent(&argv(&["codebuddy"])));
-        assert!(keep_cursor_agent(&argv(&["/Users/ww/.local/bin/codebuddy"])));
+        assert!(keep_cursor_agent(&argv(&[
+            "/Users/ww/.local/bin/codebuddy"
+        ])));
         assert!(keep_cursor_agent(&argv(&["codebuddy", "-c"])));
         assert!(keep_cursor_agent(&argv(&["codebuddy", "-r"])));
         assert!(!keep_cursor_agent(&argv(&["codebuddy", "--version"])));
         assert!(!keep_cursor_agent(&argv(&["codebuddy", "update"])));
         assert!(!keep_cursor_agent(&argv(&["node", "server.js"])));
+        assert!(keep_cursor_agent(&argv(&["claude"])));
+        assert!(!keep_cursor_agent(&argv(&["claude", "-p"])));
+        assert!(keep_cursor_agent(&argv(&["opencode"])));
+        assert!(!keep_cursor_agent(&argv(&["opencode", "run"])));
     }
 
     #[test]
@@ -215,6 +196,8 @@ mod tests {
         assert_eq!(tool_label("cursor-agent"), "CA");
         assert_eq!(tool_label("codebuddy"), "CB");
         assert_eq!(tool_label("cbc"), "CB");
+        assert_eq!(tool_label("claude"), "CC");
+        assert_eq!(tool_label("opencode"), "OC");
     }
 
     #[test]

@@ -119,6 +119,10 @@ fn strip_block_comments(css: &str) -> String {
     out
 }
 
+pub(crate) fn color_from_hex(value: &str) -> Option<Color> {
+    parse_hex(value)
+}
+
 fn parse_hex(value: &str) -> Option<Color> {
     let hex = value.strip_prefix('#')?;
     let (red, green, blue) = match hex.len() {
@@ -165,5 +169,6 @@ mod tests {
         assert_eq!(theme.focus_fill, Color::Rgb(0x3a, 0x2f, 0x52));
         assert_eq!(theme.separator, theme.card_border);
         assert_eq!(theme.tip_typed, theme.focus);
+        assert_eq!(theme.tool_codebuddy, Color::Rgb(0x86, 0xb6, 0xf2));
     }
 }

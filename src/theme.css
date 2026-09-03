@@ -33,6 +33,6 @@
   --tip-bg: #a2c5ce;
   --tip-typed: var(--focus);
 
-  /* 名单里 CodeBuddy 行的 CB 徽标；Cursor 的 CA 用暗色 */
+  /* 名单里 CodeBuddy 行的 CB 徽标；其它家族颜色在 catalog 里 */
   --tool-codebuddy: #86b6f2;
 }

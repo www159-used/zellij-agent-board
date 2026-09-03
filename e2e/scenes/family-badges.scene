@@ -1,0 +1,15 @@
+# Each catalog family keeps its own 2-char badge.
+size 80 16
+meta hooks=1
+scan ww 3 /tmp/ww
+scan zab 357 /Users/ww/Documents/self/zellij-agent-board codebuddy
+scan claude 4 /tmp/claude claude
+scan oc 5 /tmp/opencode opencode
+
+expect screen contains CA
+expect screen contains CB
+expect screen contains CC
+expect screen contains OC
+expect status zab 357 found
+expect status claude 4 found
+expect status oc 5 found

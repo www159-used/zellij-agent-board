@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cursor / CodeBuddy hook → zellij-agent-board. Always exit 0. Only report inside a Zellij pane.
+# Catalog adapter hook → zellij-agent-board. Always exit 0. Only report inside a Zellij pane.
 set -u
 trap 'exit 0' EXIT
 
@@ -40,18 +40,16 @@ else
   detail=""
 fi
 
-# Normalize Claude Code / CodeBuddy (PascalCase) event names to the
-# Cursor-style names the board consumes (src/status.rs).
-case "$event" in
-  SessionStart) event=sessionStart ;;
-  SessionEnd) event=sessionEnd ;;
-  UserPromptSubmit) event=beforeSubmitPrompt ;;
-  PreToolUse) event=preToolUse ;;
-  PostToolUse) event=postToolUse ;;
-  PostToolUseFailure) event=postToolUseFailure ;;
-  Stop) event=stop ;;
-  PreCompact) event=preCompact ;;
-esac
+# Protocol-family event names → board events. Table is shipped next
+# to this script (copied from adapters/catalog.toml at install).
+map_file="$(dirname "$0")/event-map.txt"
+if [ ! -f "$map_file" ]; then
+  map_file="$(cd "$(dirname "$0")" && pwd)/event-map.txt"
+fi
+if [ -f "$map_file" ]; then
+  mapped=$(awk -F= -v e="$event" '$1==e {print $2; exit}' "$map_file")
+  [ -n "$mapped" ] && event=$mapped
+fi
 
 [ -n "$event" ] || exit 0
 
