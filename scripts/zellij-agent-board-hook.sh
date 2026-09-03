@@ -57,9 +57,21 @@ tmp="${spool_dir}/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}.tmp.$$"
 printf '%s\n' "$line" >"$tmp"
 mv -f "$tmp" "${spool_dir}/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}"
 
+# Live hook mail stays in TMPDIR. Titles / seen / started live in the
+# host cache so they survive reboot and q.
+if [ -n "${ZAB_STATE_DIR:-}" ]; then
+  state_dir="$ZAB_STATE_DIR"
+elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+  state_dir="$XDG_CACHE_HOME/zellij-agent-board"
+elif [ -n "${HOME:-}" ]; then
+  state_dir="$HOME/.cache/zellij-agent-board"
+else
+  state_dir="${TMPDIR:-/tmp}/zellij-agent-board"
+fi
+
 # Last spool line is often a tool hook. Persist the turn start separately
 # so working elapsed survives q / Alt+q.
-started="${TMPDIR:-/tmp}/zellij-agent-board/started/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}"
+started="${state_dir}/started/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}"
 case "$event" in
   beforeSubmitPrompt)
     mkdir -p "$(dirname "$started")"
@@ -74,7 +86,7 @@ esac
 # terminal. Only `stop` (not afterAgentResponse) so one done cycle rings once.
 # Skip if this finished_at is already SEEN. Never `zellij pipe --plugin`.
 if [ "$event" = "stop" ]; then
-  seen="${TMPDIR:-/tmp}/zellij-agent-board/seen/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}"
+  seen="${state_dir}/seen/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}"
   seen_at=""
   if [ -f "$seen" ]; then
     seen_at=$(awk '{print $4}' "$seen")

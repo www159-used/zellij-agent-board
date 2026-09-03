@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use zellij_agent_board::{
     bridge_close_plan, float_size_from_config, format_focus, format_places, is_host_tui_exit,
-    jump_steps, looks_like_board_tui, now_ms, parse_jump, should_abandon_empty_bridge,
+    jump_steps, looks_like_board_tui, now_ms, parse_jump, runtime_dir, should_abandon_empty_bridge,
     should_open_tui, should_shutdown_on_tui_close, AgentId, BridgeClosePlan, FloatSize,
     FloatingLayerState, JumpStep, PanePlace,
 };
@@ -13,7 +13,7 @@ use zellij_tile::prelude::*;
 
 const PLUGIN_NAME: &str = "zellij-agent-board";
 const PLACES_WRITER: &str = r#"
-dir="${TMPDIR:-/tmp}/zellij-agent-board"
+dir="${ZAB_STATE_DIR:?}"
 mkdir -p "$dir"
 file="$dir/places"
 incoming="$dir/places.incoming"
@@ -44,7 +44,7 @@ rm -f "$incoming"
 "#;
 
 const FOCUS_WRITER: &str = r#"
-dir="${TMPDIR:-/tmp}/zellij-agent-board"
+dir="${ZAB_STATE_DIR:?}"
 mkdir -p "$dir"
 printf '%s' "${ZAB_FOCUS}" >"$dir/focus"
 "#;
@@ -104,6 +104,7 @@ impl ZellijPlugin for State {
         self.float_size = float_size_from_config(&configuration);
         self.tui_path = tui_path(&configuration);
         subscribe(&[
+            EventType::ModeUpdate,
             EventType::SessionUpdate,
             EventType::PaneUpdate,
             EventType::PermissionRequestResult,
@@ -131,16 +132,19 @@ impl ZellijPlugin for State {
                     // A previous quit may have hidden the float layer.
                     // LaunchPlugin { floating } then lands in that layer and
                     // Alt+q looks like a no-op. Do not enlarge this empty
-                    // pane — it would cover the board until SessionUpdate.
-                    // Do not open the TUI until the session name is known.
+                    // pane — it would cover the board until the TUI is up.
+                    // Session name comes from ModeUpdate, not the full
+                    // SessionUpdate dump (that one is huge in a busy session).
                     let _ = self.show_float();
                     if !self.close_if_duplicate() {
-                        self.ensure_tui(false);
-                        if self.tui_id.is_none() {
-                            set_timeout(0.5);
-                        }
+                        self.try_open_tui(false);
                     }
                 }
+                false
+            }
+            Event::ModeUpdate(info) => {
+                self.take_session_name(info.session_name.as_deref());
+                self.try_open_tui(false);
                 false
             }
             Event::Timer(_) => {
@@ -156,19 +160,12 @@ impl ZellijPlugin for State {
             }
             Event::SessionUpdate(sessions, _) => {
                 if let Some(session) = sessions.iter().find(|session| session.is_current_session) {
-                    if self.current_session.as_deref() != Some(session.name.as_str()) {
-                        self.current_session = Some(session.name.clone());
-                    }
+                    self.take_session_name(Some(session.name.as_str()));
                     self.remember_own_tab(session);
                     self.floating_layer
                         .capture(self.previous_pane_was_floating(session));
                     self.remember_launch_focus(session);
-                    if self.permissions_granted && !self.dying {
-                        self.ensure_tui(false);
-                        if self.tui_id.is_none() {
-                            set_timeout(0.4);
-                        }
-                    }
+                    self.try_open_tui(false);
                 }
                 self.harvest_board_ids_from_sessions(&sessions);
                 self.remember_sessions(&sessions);
@@ -291,6 +288,25 @@ impl State {
         self.current_session
             .as_deref()
             .is_some_and(|name| !name.is_empty())
+    }
+
+    fn take_session_name(&mut self, name: Option<&str>) {
+        let Some(name) = name.filter(|name| !name.is_empty()) else {
+            return;
+        };
+        if self.current_session.as_deref() != Some(name) {
+            self.current_session = Some(name.to_string());
+        }
+    }
+
+    fn try_open_tui(&mut self, from_timer: bool) {
+        if !self.permissions_granted || self.dying {
+            return;
+        }
+        self.ensure_tui(from_timer);
+        if self.tui_id.is_none() {
+            set_timeout(0.4);
+        }
     }
 
     fn ensure_tui(&mut self, from_timer: bool) {
@@ -517,10 +533,14 @@ impl State {
         self.last_places = text.clone();
         let mut env = BTreeMap::new();
         env.insert("ZAB_PLACES".to_string(), text);
+        env.insert(
+            "ZAB_STATE_DIR".to_string(),
+            runtime_dir().to_string_lossy().into_owned(),
+        );
         let mut context = BTreeMap::new();
         context.insert("zellij_agent_board".to_string(), "places".to_string());
         run_command_with_env_variables_and_cwd(
-            &["/bin/bash", "-lc", PLACES_WRITER],
+            &["/bin/bash", "-c", PLACES_WRITER],
             env,
             PathBuf::from("."),
             context,
@@ -559,10 +579,14 @@ impl State {
     fn flush_focus(&self, session: &str, pane_id: u32) {
         let mut env = BTreeMap::new();
         env.insert("ZAB_FOCUS".to_string(), format_focus(session, pane_id));
+        env.insert(
+            "ZAB_STATE_DIR".to_string(),
+            runtime_dir().to_string_lossy().into_owned(),
+        );
         let mut context = BTreeMap::new();
         context.insert("zellij_agent_board".to_string(), "focus".to_string());
         run_command_with_env_variables_and_cwd(
-            &["/bin/bash", "-lc", FOCUS_WRITER],
+            &["/bin/bash", "-c", FOCUS_WRITER],
             env,
             PathBuf::from("."),
             context,

@@ -27,7 +27,10 @@ pub use protocol::{
     started_dir, PIPE_NAME,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use protocol::{host_places_path, load_places, persist_places};
+pub use protocol::{
+    ensure_state, host_places_path, load_places, load_scan, persist_places, persist_scan, scan_path,
+};
+pub use protocol::runtime_dir;
 pub use render::{frame_patch, paint, paint_to_size, render_board, Frame, FramePatch, PaintCtx};
 #[cfg(not(target_arch = "wasm32"))]
 pub use scan::{
@@ -1354,6 +1357,58 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
                 pane_id: 3
             }
         );
+    }
+
+    #[test]
+    fn cached_rows_then_live_scan_only_patches() {
+        let mut board = Board::default();
+        board.ingest(
+            "\
+META hooks=1
+SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww
+SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
+",
+        );
+        board.apply_places([(
+            AgentId {
+                session: "ww".into(),
+                pane_id: 3,
+            },
+            PanePlace {
+                tab_position: 1,
+                tab_name: "master".into(),
+                pane_title: "old-title".into(),
+            },
+        )]);
+        board.apply_hook(
+            &AgentId {
+                session: "ww".into(),
+                pane_id: 3,
+            },
+            Status::Working,
+            "Shell cargo test",
+            Some(1_700_000_000),
+            None,
+        );
+        board.ingest(
+            "\
+META hooks=1
+SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww
+SCAN zab 1 agent /Users/ww/.local/bin/agent --workspace /tmp/zab
+",
+        );
+        assert_eq!(board.agents.len(), 2);
+        assert!(board.agents.iter().all(|agent| agent.id.session != "lp"));
+        let ww = board
+            .agents
+            .iter()
+            .find(|agent| agent.id.session == "ww")
+            .unwrap();
+        assert_eq!(ww.tab_name, "master");
+        assert_eq!(ww.pane_title, "old-title");
+        assert_eq!(ww.status, Status::Working);
+        assert_eq!(ww.detail, "Shell cargo test");
+        assert!(board.agents.iter().any(|agent| agent.id.session == "zab"));
     }
 
     #[test]

@@ -39,6 +39,7 @@ trap cleanup EXIT
 # Do not rewrite HOME: attach --create-background then follows the wrong session.
 unset ZELLIJ ZELLIJ_SESSION_NAME
 export TMPDIR="$tmp"
+export ZAB_STATE_DIR="$tmp/zab-state"
 export ZELLIJ_SOCKET_DIR="$tmp"
 export ZELLIJ_AGENT_BOARD_TUI="$tui"
 

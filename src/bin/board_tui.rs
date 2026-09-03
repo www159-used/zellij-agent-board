@@ -1,8 +1,7 @@
 //! Host TUI adapter. Scan, spool, places, keys, and ratatui live here.
 //!
-//! MVC loop: `Board` + the places file are the model. The first frame paints
-//! that cache. A background `list-panes` pass is the controller — it only
-//! writes the cache and dirty-redraws when a title actually changed.
+//! MVC loop: `Board` plus the host store are the model. The first frame
+//! paints the last SCAN snapshot; a live scan only patches rows.
 
 use std::fs;
 use std::io::{self, stdout, Write};
@@ -28,9 +27,9 @@ use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use zellij_agent_board::{
-    focus_path, format_jump, host_places_path, load_places, parse_focus, persist_places,
-    persist_seen, render_board, scan_host_text, scan_places_for, spool_dir, Action, AgentId, Board,
-    Key, PanePlace, PIPE_NAME,
+    focus_path, format_jump, load_places, load_scan, parse_focus, persist_places, persist_scan,
+    persist_seen, places_path, render_board, scan_host_text, scan_places_for, spool_dir, Action,
+    AgentId, Board, Key, PanePlace, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -49,6 +48,7 @@ struct App {
     host_places_mtime: Option<SystemTime>,
     spool_mtime: Option<SystemTime>,
     places_rx: Option<Receiver<Vec<(AgentId, PanePlace)>>>,
+    scan_rx: Option<Receiver<String>>,
 }
 
 fn main() -> io::Result<()> {
@@ -110,17 +110,25 @@ impl App {
             host_places_mtime: None,
             spool_mtime: None,
             places_rx: None,
+            scan_rx: None,
         }
     }
 
     fn bootstrap(&mut self) {
         self.last_scan = Instant::now();
         self.load_model();
+        self.start_scan();
         self.start_reconcile();
     }
 
     fn load_model(&mut self) {
-        self.board.ingest(&scan_host_text());
+        if let Some(cached) = load_scan() {
+            self.board.ingest(&cached);
+        } else {
+            let live = scan_host_text();
+            persist_scan(&live);
+            self.board.ingest(&live);
+        }
         self.reload_places();
         self.reload_spool();
         self.mark_launch_focus();
@@ -145,12 +153,13 @@ impl App {
                     DrainKeys::Idle => {}
                 }
             }
+            dirty |= self.take_scan();
             dirty |= self.take_host_places();
             let now = Instant::now();
             if now.duration_since(self.last_scan) >= SCAN_EVERY {
-                dirty |= self.rescan();
+                self.start_scan();
             }
-            if file_changed(&host_places_path(), &mut self.host_places_mtime) {
+            if file_changed(&places_path(), &mut self.host_places_mtime) {
                 dirty |= self.reload_places();
             }
             if dir_changed(&spool_dir(), &mut self.spool_mtime) {
@@ -206,13 +215,38 @@ impl App {
         }
     }
 
-    fn rescan(&mut self) -> bool {
-        self.last_scan = Instant::now();
-        let ingest = self.board.ingest(&scan_host_text());
-        if self.places_rx.is_none() && places_due(self.last_places.elapsed()) {
-            self.start_reconcile();
+    fn start_scan(&mut self) {
+        if self.scan_rx.is_some() {
+            return;
         }
-        ingest
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(scan_host_text());
+        });
+        self.scan_rx = Some(rx);
+        self.last_scan = Instant::now();
+    }
+
+    fn take_scan(&mut self) -> bool {
+        let Some(rx) = &self.scan_rx else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(text) => {
+                self.scan_rx = None;
+                persist_scan(&text);
+                let dirty = self.board.ingest(&text);
+                if self.places_rx.is_none() && places_due(self.last_places.elapsed()) {
+                    self.start_reconcile();
+                }
+                dirty
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                self.scan_rx = None;
+                false
+            }
+        }
     }
 
     fn reload_places(&mut self) -> bool {
@@ -268,7 +302,7 @@ impl App {
         let mut dirty = false;
         for places in batch {
             persist_places(places.clone());
-            if let Ok(meta) = fs::metadata(host_places_path()) {
+            if let Ok(meta) = fs::metadata(places_path()) {
                 self.host_places_mtime = meta.modified().ok();
             }
             dirty |= self.board.apply_places(places);

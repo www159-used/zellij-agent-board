@@ -5,9 +5,10 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent::{keep_cursor_agent, AgentId, PanePlace};
-use crate::protocol::{seen_dir, spool_dir, started_dir};
+use crate::protocol::{ensure_state, seen_dir, spool_dir, started_dir};
 
 pub fn scan_host_text() -> String {
+    ensure_state();
     let epoch = unix_now();
     let mut out = format!(
         "META hooks={} epoch={epoch}\n",
