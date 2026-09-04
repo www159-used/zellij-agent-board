@@ -2855,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-agent-board"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "crossterm",
  "fs2",
