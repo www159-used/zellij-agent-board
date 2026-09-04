@@ -43,7 +43,7 @@ pub use reconcile::{
 pub use render::{frame_patch, paint, paint_to_size, render_board, Frame, FramePatch, PaintCtx};
 #[cfg(not(target_arch = "wasm32"))]
 pub use scan::{
-    places_from_list_panes_json, scan_host_text, scan_places, scan_places_for,
+    places_from_list_panes_json, scan_host_text, scan_places, scan_places_for, zellij_bin,
     zellij_ids_from_env_blob,
 };
 #[cfg(not(target_arch = "wasm32"))]

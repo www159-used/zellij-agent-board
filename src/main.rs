@@ -18,8 +18,10 @@ mkdir -p "$dir"
 printf '%s' "${ZAB_FOCUS}" >"$dir/focus"
 "#;
 
-/// `bash -c` (not `-l`) keeps ZAB_* env. Absolute zellij — plugin PATH
-/// has no Homebrew. Regular `new-pane`, not a command pane (those steal Esc).
+/// `bash -c` (not `-l`) keeps ZAB_* env. The zellij binary is probed here —
+/// the plugin env has no user PATH — mirroring zellij_candidates in
+/// src/scan.rs; keep the two lists in sync. Regular `new-pane`, not a
+/// command pane (those steal Esc).
 /// Session is required: without it the pane lands in the wrong session or
 /// nowhere, and this empty plugin stays up as a fake board.
 const TUI_LAUNCHER: &str = r#"
@@ -27,7 +29,26 @@ if [ -z "${ZAB_SESSION:-}" ]; then
   echo "board-tui launch needs ZAB_SESSION" >&2
   exit 2
 fi
-zellij_bin="${ZAB_ZELLIJ:-/opt/homebrew/bin/zellij}"
+# The plugin env has no user PATH (a cargo-installed zellij lives in
+# ~/.cargo/bin), so probe the usual homes before giving up.
+# Keep this list in sync with zellij_candidates in src/scan.rs.
+zellij_bin="${ZAB_ZELLIJ:-}"
+if [ -z "$zellij_bin" ] || [ ! -x "$zellij_bin" ]; then
+  zellij_bin=""
+  for cand in "${HOME:-}/.cargo/bin/zellij" \
+              /usr/bin/zellij \
+              /usr/local/bin/zellij \
+              /opt/homebrew/bin/zellij; do
+    if [ -x "$cand" ]; then
+      zellij_bin="$cand"
+      break
+    fi
+  done
+fi
+if [ -z "$zellij_bin" ]; then
+  echo "zellij binary not found; set ZAB_ZELLIJ" >&2
+  exit 2
+fi
 cmd=("$zellij_bin" --session "$ZAB_SESSION" action new-pane --floating
   --close-on-exit --name board-tui
   --width "$ZAB_W" --height "$ZAB_H" --x "$ZAB_X" --y "$ZAB_Y")
@@ -337,7 +358,6 @@ impl State {
         env.insert("ZAB_H".to_string(), self.float_size.height.clone());
         env.insert("ZAB_X".to_string(), self.float_size.x.clone());
         env.insert("ZAB_Y".to_string(), self.float_size.y.clone());
-        env.insert("ZAB_ZELLIJ".to_string(), "/opt/homebrew/bin/zellij".into());
         env.insert("ZAB_SESSION".to_string(), session);
         if let Some(tab_id) = self.own_tab_id {
             env.insert("ZAB_TAB".to_string(), tab_id.to_string());

@@ -174,11 +174,23 @@ fn list_sessions() -> Vec<String> {
         .collect()
 }
 
-fn zellij_bin() -> String {
-    first_bin(
-        &["/opt/homebrew/bin/zellij", "/usr/local/bin/zellij"],
-        "zellij",
-    )
+/// Candidate zellij locations, first hit wins. The plugin launcher and the
+/// host TUI run with a minimal PATH (no cargo bin), so `cargo install
+/// zellij` setups (Linux `~/.cargo/bin`) need explicit probes.
+fn zellij_candidates(home: &Path) -> Vec<String> {
+    vec![
+        home.join(".cargo/bin/zellij").display().to_string(),
+        "/usr/bin/zellij".into(),
+        "/usr/local/bin/zellij".into(),
+        "/opt/homebrew/bin/zellij".into(),
+    ]
+}
+
+pub fn zellij_bin() -> String {
+    zellij_candidates(&home_dir())
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .unwrap_or_else(|| "zellij".into())
 }
 
 pub fn zellij_ids_from_env_blob(blob: &str) -> Option<(String, u32)> {
@@ -455,5 +467,19 @@ mod tests {
         if Path::new("/usr/sbin/lsof").is_file() {
             assert_eq!(super::lsof_bin(), "/usr/sbin/lsof");
         }
+    }
+
+    #[test]
+    fn zellij_candidates_probe_cargo_bin_first() {
+        let candidates = super::zellij_candidates(Path::new("/Users/ww"));
+        assert_eq!(
+            candidates,
+            vec![
+                "/Users/ww/.cargo/bin/zellij".to_string(),
+                "/usr/bin/zellij".to_string(),
+                "/usr/local/bin/zellij".to_string(),
+                "/opt/homebrew/bin/zellij".to_string(),
+            ]
+        );
     }
 }
