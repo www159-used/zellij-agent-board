@@ -227,12 +227,18 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Candidate pids from a `ps ax -o pid=,comm=` dump. pgrep is avoided on
+/// Candidate pids from a `ps ax -o pid=,comm=,args=` dump. pgrep is avoided on
 /// purpose: macOS pgrep silently skips some live processes (observed with a
 /// Zellij-launched `codebuddy`), while `ps ax` sees everything.
+///
+/// A candidate matches by comm (fast path for native CLIs) or by argv. The argv
+/// gate is required for wrappers: the cursor CLI ends with `exec -a "$0" node
+/// index.js`, so the kernel comm is `MainThread` while argv[0] is still the
+/// agent path. `keep_process` keeps the catalog's bins and skip lists the
+/// single source of truth for both gates.
 fn agent_pids() -> Vec<u32> {
     let Ok(output) = Command::new(ps_bin())
-        .args(["ax", "-ww", "-o", "pid=", "-o", "comm="])
+        .args(["ax", "-ww", "-o", "pid=", "-o", "comm=", "-o", "args="])
         .output()
     else {
         return Vec::new();
@@ -249,7 +255,8 @@ fn agent_pids_from_text(text: &str) -> Vec<u32> {
             continue;
         };
         let bin = comm.rsplit('/').next().unwrap_or(comm);
-        if !wanted.wants_bin(bin) {
+        let argv: Vec<String> = parts.map(str::to_string).collect();
+        if !wanted.wants_bin(bin) && !wanted.keep_process(&argv) {
             continue;
         }
         if let Ok(pid) = pid.parse::<u32>() {
@@ -417,8 +424,8 @@ mod tests {
 
     #[test]
     fn agent_pids_reads_ps_comm_text() {
-        let text = "  123 /Users/ww/.local/bin/agent\n  456 codebuddy\n  321 claude\n  654 opencode\n  789 /usr/sbin/distnoted\n  810 vim\n   32 /bin/zsh\n";
-        assert_eq!(agent_pids_from_text(text), vec![123, 321, 456, 654]);
+        let text = "  123 /Users/ww/.local/bin/agent\n  456 codebuddy\n  321 claude\n  654 opencode\n  789 /usr/sbin/distnoted\n  810 vim\n   32 /bin/zsh\n  999 MainThread /home/ww/.local/bin/agent --use-system-ca /home/ww/.cursor/index.js\n";
+        assert_eq!(agent_pids_from_text(text), vec![123, 321, 456, 654, 999]);
     }
 
     #[test]
