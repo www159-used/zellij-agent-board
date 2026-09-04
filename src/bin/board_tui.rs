@@ -26,9 +26,9 @@ use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use zellij_agent_board::{
-    focus_path, format_jump, load_places, load_scan, parse_focus, persist_seen, places_path,
-    reconcile_once, render_board, run_reconcile, scan_path, spool_dir, zellij_bin, Action, AgentId,
-    Board, Key, PIPE_NAME,
+    focus_path, format_jump, load_places, load_scan, parse_focus, persist_places, persist_seen,
+    places_path, reconcile_once, render_board, run_reconcile, scan_path, scan_places_for,
+    spool_dir, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -127,8 +127,27 @@ impl App {
             self.board.ingest(&cached);
         }
         self.reload_places();
+        self.fill_home_titles();
         self.reload_spool();
         self.mark_launch_focus();
+    }
+
+    /// One `list-panes` for this session before the first paint. Remote
+    /// sessions wait for the background reconcile; home titles must not.
+    fn fill_home_titles(&mut self) {
+        if self.home.is_empty() {
+            return;
+        }
+        if !self
+            .board
+            .sessions_missing_titles()
+            .iter()
+            .any(|session| session == &self.home)
+        {
+            return;
+        }
+        persist_places(scan_places_for(std::slice::from_ref(&self.home)));
+        self.reload_places();
     }
 
     fn run(&mut self, terminal: &mut HostTerminal) -> io::Result<()> {
@@ -275,12 +294,19 @@ fn spawn_reconcile() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let _ = Command::new(exe)
-        .arg("--reconcile")
+    let mut cmd = Command::new(exe);
+    cmd.arg("--reconcile")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+        .stderr(Stdio::null());
+    // Leave the TUI process group so `q` / --close-on-exit does not SIGHUP
+    // a list-panes pass that still has to write the home session.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let _ = cmd.spawn();
 }
 
 fn map_key(event: KeyEvent, hinting: bool, searching: bool) -> Option<Key> {

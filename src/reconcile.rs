@@ -17,6 +17,22 @@ pub fn reconcile_lock_path() -> PathBuf {
     runtime_dir().join("reconcile.lock")
 }
 
+/// Home session first so the open board gets titles before remote
+/// `list-panes` (zab is last alphabetically and used to wait for everyone).
+pub fn refresh_sessions(from_scan: &[String], home: &str) -> Vec<String> {
+    let mut sessions = from_scan.to_vec();
+    sessions.sort();
+    sessions.dedup();
+    if home.is_empty() {
+        return sessions;
+    }
+    if let Some(pos) = sessions.iter().position(|session| session == home) {
+        let home = sessions.remove(pos);
+        sessions.insert(0, home);
+    }
+    sessions
+}
+
 /// Sessions that actually have a SCAN row. Empty sessions are not listed.
 pub fn sessions_from_scan(text: &str) -> Vec<String> {
     let mut sessions: Vec<String> = text
@@ -71,16 +87,29 @@ pub fn run_reconcile() -> bool {
 fn reconcile_pass() {
     let text = scan_host_text();
     persist_scan(&text);
-    for session in sessions_from_scan(&text) {
+    let home = std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default();
+    for session in refresh_sessions(&sessions_from_scan(&text), &home) {
         persist_places(scan_places_for(&[session]));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{sessions_from_scan, try_acquire_lock};
+    use super::{refresh_sessions, sessions_from_scan, try_acquire_lock};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn refresh_sessions_puts_home_first() {
+        assert_eq!(
+            refresh_sessions(&["ww".into(), "zab".into(), "lp".into()], "zab"),
+            ["zab", "lp", "ww"]
+        );
+        assert_eq!(
+            refresh_sessions(&["ww".into(), "lp".into()], ""),
+            ["lp", "ww"]
+        );
+    }
 
     #[test]
     fn sessions_from_scan_skips_empty_sessions() {

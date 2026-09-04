@@ -38,8 +38,8 @@ pub use protocol::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use reconcile::{
-    reconcile_lock_path, reconcile_once, run_reconcile, sessions_from_scan, try_acquire_lock,
-    ReconcileLock,
+    reconcile_lock_path, reconcile_once, refresh_sessions, run_reconcile, sessions_from_scan,
+    try_acquire_lock, ReconcileLock,
 };
 pub use render::{frame_patch, paint, paint_to_size, render_board, Frame, FramePatch, PaintCtx};
 #[cfg(not(target_arch = "wasm32"))]
