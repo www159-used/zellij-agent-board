@@ -27,8 +27,8 @@ use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use zellij_agent_board::{
     focus_path, format_jump, load_places, load_scan, parse_focus, persist_seen, places_path,
-    reconcile_once, render_board, run_reconcile, scan_path, spool_dir, zellij_bin, Action,
-    AgentId, Board, Key, PIPE_NAME,
+    reconcile_once, render_board, run_reconcile, scan_path, spool_dir, zellij_bin, Action, AgentId,
+    Board, Key, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;

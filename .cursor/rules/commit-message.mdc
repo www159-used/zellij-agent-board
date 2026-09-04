@@ -1,0 +1,34 @@
+---
+description: Conventional Commits: lowercase feat/fix/docs/refactor/test/chore prefix, imperative subject under 72 chars, why-first body.
+alwaysApply: true
+---
+
+# Commit messages
+
+## Subject
+
+- Start with a conventional-commit type, lowercase:
+  - `feat:` new user-facing behavior
+  - `fix:` a bug fix
+  - `docs:` docs and rules only
+  - `refactor:` no behavior change
+  - `test:`, `chore:`
+- After the prefix: English imperative, total ≤ 72 characters, no trailing
+  period.
+- State what changed, and why when it is not obvious:
+  `fix: probe zellij across homes so cargo installs can open the board`
+- No issue numbers in the subject. `chore: release vX.Y.Z` is written by
+  the release tool (`release.toml`) — never hand-write or hand-edit one.
+
+## Body
+
+- Separate subject and body with a blank line.
+- Lead with the constraint, incident, or mechanism that motivates the
+  change; mechanics after. Wrap prose at ~72 characters.
+- Use `-` bullets for multi-part changes; leave a blank line between
+  paragraphs.
+
+## Before committing
+
+- Run `cargo fmt` locally — CI runs `cargo fmt --check` and rejects any
+  diff, including import rewraps.
