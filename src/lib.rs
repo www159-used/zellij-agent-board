@@ -77,6 +77,8 @@ pub enum Key {
     Input(char),
     Digit(u8),
     GPrefix,
+    StartPicker,
+    TogglePickerFocus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +104,31 @@ struct SearchState {
     origin: usize,
 }
 
+/// Where typed keys land in the floating picker: the query or tip labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerFocus {
+    Query,
+    Tips,
+}
+
+/// Telescope-style floating search over every agent, not just the viewport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PickerState {
+    query: String,
+    /// Agent indices matching [`PickerState::query`]; empty query means all.
+    matches: Vec<usize>,
+    /// Cursor position inside `matches`.
+    selected: usize,
+    /// First match position shown in the results viewport.
+    window_start: usize,
+    /// Agent under the cursor; survives scans that reshuffle indices.
+    cursor: Option<AgentId>,
+    focus: PickerFocus,
+    /// Tip labels on agent indices while [`PickerFocus::Tips`].
+    labels: Vec<Option<String>>,
+    jump_prefix: String,
+}
+
 #[derive(Debug, Default)]
 pub struct Board {
     pub agents: Vec<Agent>,
@@ -115,6 +142,8 @@ pub struct Board {
     pub help_visible: bool,
     hint: Option<HintState>,
     search: Option<SearchState>,
+    picker: Option<PickerState>,
+    picker_page_len: usize,
     last_search: String,
     motion_count: Option<u32>,
     g_pending: bool,
@@ -328,6 +357,7 @@ impl Board {
         } else if hint_fields_changed && self.is_hinting() {
             self.recompute_hint_labels();
         }
+        self.refresh_picker();
         true
     }
 
@@ -349,6 +379,40 @@ impl Board {
             return match key {
                 Key::ToggleHelp | Key::Dismiss => {
                     self.help_visible = false;
+                    Action::None
+                }
+                _ => Action::None,
+            };
+        }
+        if self.is_picking() {
+            return match key {
+                Key::Dismiss => {
+                    self.close_picker();
+                    Action::None
+                }
+                Key::TogglePickerFocus => self.toggle_picker_focus(),
+                Key::Confirm => self.picker_confirm(),
+                Key::Backspace => {
+                    if self.picker_focus() == PickerFocus::Query {
+                        if let Some(picker) = self.picker.as_mut() {
+                            picker.query.pop();
+                        }
+                        self.refresh_picker();
+                    } else if let Some(picker) = self.picker.as_mut() {
+                        picker.jump_prefix.pop();
+                    }
+                    Action::None
+                }
+                Key::Input(ch) => {
+                    if self.picker_focus() == PickerFocus::Query {
+                        self.push_picker_query(ch);
+                        Action::None
+                    } else {
+                        self.apply_picker_tip(ch)
+                    }
+                }
+                Key::Digit(digit) if self.picker_focus() == PickerFocus::Query => {
+                    self.push_picker_query(char::from(b'0' + digit));
                     Action::None
                 }
                 _ => Action::None,
@@ -503,6 +567,12 @@ impl Board {
                 });
                 Action::None
             }
+            Key::StartPicker => {
+                self.clear_motion();
+                self.open_picker();
+                Action::None
+            }
+            Key::TogglePickerFocus => Action::None,
             Key::NextMatch => {
                 self.goto_match(1);
                 Action::None
@@ -528,6 +598,10 @@ impl Board {
         };
         let chrome = 1 + u16::from(!self.hooks_installed);
         self.list_height = content.saturating_sub(chrome);
+        // The picker renders inside the content area (pane minus footer row),
+        // so the scroll window must be derived from `content`, not `height`.
+        self.picker_page_len = crate::render::picker_result_rows(content);
+        self.ensure_picker_visible();
     }
 
     pub fn visible_range(&self) -> (usize, usize) {
@@ -668,6 +742,282 @@ impl Board {
             .unwrap_or("")
     }
 
+    pub fn is_picking(&self) -> bool {
+        self.picker.is_some()
+    }
+
+    pub fn picker_focus(&self) -> PickerFocus {
+        self.picker
+            .as_ref()
+            .map(|picker| picker.focus)
+            .unwrap_or(PickerFocus::Query)
+    }
+
+    pub fn picker_query(&self) -> &str {
+        self.picker
+            .as_ref()
+            .map(|picker| picker.query.as_str())
+            .unwrap_or("")
+    }
+
+    /// Cursor position inside the picker's match list.
+    pub fn picker_position(&self) -> usize {
+        self.picker
+            .as_ref()
+            .map(|picker| picker.selected)
+            .unwrap_or(0)
+    }
+
+    pub fn picker_matches(&self) -> &[usize] {
+        self.picker
+            .as_ref()
+            .map(|picker| picker.matches.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Visible slice of the match list: `(start, end)` positions.
+    pub fn picker_window(&self, height: usize) -> (usize, usize) {
+        let Some(picker) = self.picker.as_ref() else {
+            return (0, 0);
+        };
+        let len = picker.matches.len();
+        if len == 0 || height == 0 {
+            return (0, 0);
+        }
+        let start = picker.window_start.min(len - 1);
+        let end = (start + height).min(len);
+        (start, end)
+    }
+
+    fn open_picker(&mut self) {
+        let matches: Vec<usize> = (0..self.agents.len()).collect();
+        let selected = self.selected.min(matches.len().saturating_sub(1));
+        let cursor = matches
+            .get(selected)
+            .and_then(|&index| self.agents.get(index))
+            .map(|agent| agent.id.clone());
+        self.picker = Some(PickerState {
+            query: String::new(),
+            matches,
+            selected,
+            window_start: 0,
+            cursor,
+            focus: PickerFocus::Query,
+            labels: Vec::new(),
+            jump_prefix: String::new(),
+        });
+        self.ensure_picker_visible();
+    }
+
+    fn close_picker(&mut self) {
+        self.picker = None;
+        self.clear_motion();
+    }
+
+    fn toggle_picker_focus(&mut self) -> Action {
+        match self.picker_focus() {
+            PickerFocus::Query => self.enter_picker_tips(),
+            PickerFocus::Tips => {
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.focus = PickerFocus::Query;
+                    picker.labels.clear();
+                    picker.jump_prefix.clear();
+                }
+                Action::None
+            }
+        }
+    }
+
+    fn enter_picker_tips(&mut self) -> Action {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.window_start = 0;
+            picker.focus = PickerFocus::Tips;
+            picker.jump_prefix.clear();
+        }
+        self.assign_picker_tips();
+        let labeled: Vec<usize> = self
+            .picker
+            .as_ref()
+            .map(|picker| {
+                picker
+                    .labels
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, label)| label.as_ref().map(|_| index))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if labeled.len() == 1 {
+            return self.jump_at(labeled[0]);
+        }
+        Action::None
+    }
+
+    fn assign_picker_tips(&mut self) {
+        let height = self.picker_page().max(1);
+        let (start, end) = self.picker_window(height);
+        let Some(picker) = self.picker.as_ref() else {
+            return;
+        };
+        let visible: Vec<usize> = picker.matches.get(start..end).unwrap_or(&[]).to_vec();
+        let generated = labels_for(visible.len(), HINT_ALPHABET);
+        let mut labels = vec![None; self.agents.len()];
+        for (index, label) in visible.into_iter().zip(generated) {
+            if let Some(slot) = labels.get_mut(index) {
+                *slot = Some(label);
+            }
+        }
+        if let Some(picker) = self.picker.as_mut() {
+            picker.labels = labels;
+        }
+    }
+
+    fn apply_picker_tip(&mut self, ch: char) -> Action {
+        let ch = ch.to_ascii_lowercase();
+        let Some(picker) = self.picker.as_ref() else {
+            return Action::None;
+        };
+        let mut prefix = picker.jump_prefix.clone();
+        prefix.push(ch);
+        let hits: Vec<usize> = picker
+            .labels
+            .iter()
+            .enumerate()
+            .filter_map(|(index, label)| {
+                label
+                    .as_ref()
+                    .is_some_and(|label| label.starts_with(&prefix))
+                    .then_some(index)
+            })
+            .collect();
+        if hits.len() == 1 && picker.labels[hits[0]].as_deref() == Some(prefix.as_str()) {
+            return self.jump_at(hits[0]);
+        }
+        if !hits.is_empty() {
+            if let Some(picker) = self.picker.as_mut() {
+                picker.jump_prefix = prefix;
+            }
+        }
+        Action::None
+    }
+
+    fn picker_confirm(&mut self) -> Action {
+        if self.picker_focus() == PickerFocus::Tips {
+            if let Some(index) = self
+                .picker
+                .as_ref()
+                .and_then(|picker| picker.labels.iter().position(Option::is_some))
+            {
+                return self.jump_at(index);
+            }
+        }
+        // Nothing under the cursor: keep the picker up, like flash Enter.
+        let Some(index) = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.matches.get(picker.selected).copied())
+        else {
+            return Action::None;
+        };
+        self.close_picker();
+        self.selected = index.min(self.agents.len().saturating_sub(1));
+        self.jump_at(index)
+    }
+
+    fn push_picker_query(&mut self, ch: char) {
+        let ch = ch.to_ascii_lowercase();
+        let Some(query) = self
+            .picker
+            .as_ref()
+            .map(|picker| {
+                let mut query = picker.query.clone();
+                query.push(ch);
+                query
+            })
+            .filter(|query| self.agents.iter().any(|agent| agent_matches(agent, query)))
+        else {
+            return;
+        };
+        if let Some(picker) = self.picker.as_mut() {
+            picker.query = query;
+        }
+        self.refresh_picker();
+    }
+
+    fn refresh_picker(&mut self) {
+        let Some(old) = self.picker.as_ref() else {
+            return;
+        };
+        let query = old.query.clone();
+        let cursor = old.cursor.clone();
+        let fallback = old.selected;
+        let matches: Vec<usize> = self
+            .agents
+            .iter()
+            .enumerate()
+            // Empty query matches everything, like open_picker.
+            .filter(|(_, agent)| query.is_empty() || agent_matches(agent, &query))
+            .map(|(index, _)| index)
+            .collect();
+        let selected = cursor
+            .as_ref()
+            .and_then(|id| {
+                matches
+                    .iter()
+                    .position(|&index| self.agents.get(index).is_some_and(|agent| &agent.id == id))
+            })
+            .unwrap_or_else(|| fallback.min(matches.len().saturating_sub(1)));
+        if let Some(picker) = self.picker.as_mut() {
+            picker.matches = matches;
+            picker.selected = selected;
+        }
+        self.touch_picker_cursor();
+        self.ensure_picker_visible();
+        if self.picker_focus() == PickerFocus::Tips {
+            self.assign_picker_tips();
+        }
+    }
+
+    fn touch_picker_cursor(&mut self) {
+        let id = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.matches.get(picker.selected))
+            .and_then(|&index| self.agents.get(index))
+            .map(|agent| agent.id.clone());
+        if let Some(picker) = self.picker.as_mut() {
+            picker.cursor = id;
+        }
+    }
+
+    fn picker_page(&self) -> usize {
+        if self.picker_page_len == 0 {
+            10
+        } else {
+            self.picker_page_len
+        }
+    }
+
+    /// Scroll the picker viewport so the cursor row stays on screen.
+    fn ensure_picker_visible(&mut self) {
+        let height = self.picker_page().max(1);
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        let len = picker.matches.len();
+        if len == 0 {
+            picker.window_start = 0;
+            return;
+        }
+        picker.selected = picker.selected.min(len - 1);
+        if picker.selected < picker.window_start {
+            picker.window_start = picker.selected;
+        } else if picker.selected >= picker.window_start.saturating_add(height) {
+            picker.window_start = picker.selected + 1 - height;
+        }
+        picker.window_start = picker.window_start.min(len - 1);
+    }
+
     pub fn highlight_query(&self) -> &str {
         if self.is_searching() {
             self.search_query()
@@ -697,6 +1047,22 @@ impl Board {
             .and_then(Option::as_deref)
     }
 
+    pub fn picker_jump_prefix(&self) -> &str {
+        self.picker
+            .as_ref()
+            .filter(|picker| picker.focus == PickerFocus::Tips)
+            .map(|picker| picker.jump_prefix.as_str())
+            .unwrap_or("")
+    }
+
+    pub fn picker_label(&self, index: usize) -> Option<&str> {
+        self.picker
+            .as_ref()
+            .filter(|picker| picker.focus == PickerFocus::Tips)
+            .and_then(|picker| picker.labels.get(index))
+            .and_then(Option::as_deref)
+    }
+
     pub fn agent_matches(&self, index: usize) -> bool {
         let query = self.highlight_query();
         if query.is_empty() {
@@ -705,30 +1071,6 @@ impl Board {
         self.agents
             .get(index)
             .is_some_and(|agent| agent_matches(agent, query))
-    }
-
-    /// Which searchable field hit, for paint highlight.
-    /// Prefer session → project → tab.
-    pub fn hint_match_field(&self, index: usize) -> Option<HintField> {
-        let query = self.highlight_query();
-        if query.is_empty() {
-            return None;
-        }
-        let agent = self.agents.get(index)?;
-        match_targets(agent)
-            .into_iter()
-            .find_map(|(field, text)| text_match_range(text, query).map(|_| field))
-    }
-
-    pub fn hint_match_range(&self, index: usize) -> Option<(usize, usize)> {
-        let query = self.highlight_query();
-        if query.is_empty() {
-            return None;
-        }
-        let agent = self.agents.get(index)?;
-        match_targets(agent)
-            .into_iter()
-            .find_map(|(_, text)| text_match_range(text, query))
     }
 
     fn apply_hint_input(&mut self, ch: char) -> Action {
@@ -981,6 +1323,7 @@ impl Board {
             self.hint = None;
         }
         self.search = None;
+        self.picker = None;
         let Some(agent) = self.agents.get_mut(index) else {
             return Action::None;
         };
@@ -1046,6 +1389,7 @@ impl Board {
         }
         self.agents = next;
         self.restore_selection(selected_id);
+        self.refresh_picker();
         true
     }
 
@@ -1104,6 +1448,17 @@ fn agent_matches(agent: &Agent, query: &str) -> bool {
         .any(|(_, text)| text_match_range(text, query).is_some())
 }
 
+/// Which searchable field hit, for paint highlight.
+/// Prefer session → project → tab.
+pub fn match_field(agent: &Agent, query: &str) -> Option<HintField> {
+    if query.is_empty() {
+        return None;
+    }
+    match_targets(agent)
+        .into_iter()
+        .find_map(|(field, text)| text_match_range(text, query).map(|_| field))
+}
+
 fn match_targets(agent: &Agent) -> Vec<(HintField, &str)> {
     let mut out = vec![(HintField::Session, agent.id.session.as_str())];
     let project = agent.project();
@@ -1152,7 +1507,9 @@ fn labels_for(count: usize, alphabet: &[u8]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{persist_seen, seen_dir, Action, Agent, AgentId, Board, Key, PanePlace, Status};
+    use super::{
+        persist_seen, seen_dir, Action, Agent, AgentId, Board, Key, PanePlace, PickerFocus, Status,
+    };
 
     fn ingest_two(board: &mut Board) {
         board.ingest(
@@ -2022,5 +2379,173 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(board.decide(Key::Dismiss), Action::None);
         assert!(!board.is_hinting());
         assert_eq!(board.decide(Key::Dismiss), Action::Dismiss);
+    }
+
+    #[test]
+    fn p_opens_the_picker_over_every_row() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 20);
+        board.set_list_geometry(80, 8);
+        board.selected = 15;
+        assert_eq!(board.decide(Key::StartPicker), Action::None);
+        assert!(board.is_picking());
+        assert_eq!(board.picker_focus(), PickerFocus::Query);
+        assert_eq!(board.picker_matches().len(), 20);
+        assert_eq!(board.picker_position(), 15);
+    }
+
+    #[test]
+    fn picker_query_filters_every_row_not_just_the_viewport() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 20);
+        board.set_list_geometry(80, 8);
+        board.decide(Key::StartPicker);
+        board.decide(Key::Input('1'));
+        assert_eq!(board.picker_query(), "1");
+        // Projects "1", "10".."19" — rows the 8-line viewport never showed.
+        assert_eq!(board.picker_matches().len(), 11);
+        board.decide(Key::Backspace);
+        assert_eq!(board.picker_matches().len(), 20);
+    }
+
+    #[test]
+    fn picker_rejects_a_query_with_no_matches() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 5);
+        board.decide(Key::StartPicker);
+        assert_eq!(board.decide(Key::Input('z')), Action::None);
+        assert_eq!(board.picker_query(), "");
+        assert_eq!(board.picker_matches().len(), 5);
+    }
+
+    #[test]
+    fn picker_tab_shows_tips_and_a_tip_jumps() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 4);
+        board.decide(Key::StartPicker);
+        assert_eq!(board.decide(Key::TogglePickerFocus), Action::None);
+        assert_eq!(board.picker_focus(), PickerFocus::Tips);
+        assert_eq!(board.picker_label(0), Some("a"));
+        assert_eq!(board.picker_label(1), Some("s"));
+        assert_eq!(board.hint_label(0), None);
+        assert_eq!(board.decide(Key::Input('x')), Action::None);
+        assert_eq!(board.picker_query(), "");
+        assert_eq!(board.picker_position(), 0);
+        assert_eq!(
+            board.decide(Key::Input('s')),
+            Action::Jump {
+                session: "ww".into(),
+                pane_id: 2,
+            }
+        );
+        assert!(!board.is_picking());
+    }
+
+    #[test]
+    fn picker_tab_on_a_sole_match_jumps() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 2);
+        board.decide(Key::StartPicker);
+        board.decide(Key::Input('2'));
+        assert_eq!(board.picker_matches().len(), 1);
+        assert_eq!(
+            board.decide(Key::TogglePickerFocus),
+            Action::Jump {
+                session: "ww".into(),
+                pane_id: 2,
+            }
+        );
+        assert!(!board.is_picking());
+    }
+
+    #[test]
+    fn picker_tab_back_clears_tips_and_returns_to_query() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 3);
+        board.decide(Key::StartPicker);
+        board.decide(Key::TogglePickerFocus);
+        assert_eq!(board.picker_label(0), Some("a"));
+        board.decide(Key::TogglePickerFocus);
+        assert_eq!(board.picker_focus(), PickerFocus::Query);
+        assert_eq!(board.picker_label(0), None);
+        assert_eq!(board.decide(Key::Input('w')), Action::None);
+        assert_eq!(board.picker_query(), "w");
+        assert_eq!(board.decide(Key::Down), Action::None);
+        assert_eq!(board.picker_position(), 0);
+    }
+
+    #[test]
+    fn picker_enter_jumps_the_first_tip() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 4);
+        board.decide(Key::StartPicker);
+        board.decide(Key::TogglePickerFocus);
+        assert_eq!(
+            board.decide(Key::Confirm),
+            Action::Jump {
+                session: "ww".into(),
+                pane_id: 1,
+            }
+        );
+        assert!(!board.is_picking());
+        assert_eq!(board.selected, 0);
+    }
+
+    #[test]
+    fn picker_enter_without_matches_stays_put() {
+        let mut board = Board::default();
+        assert_eq!(board.decide(Key::StartPicker), Action::None);
+        assert_eq!(board.decide(Key::Confirm), Action::None);
+        assert!(board.is_picking());
+    }
+
+    #[test]
+    fn picker_esc_leaves_the_board_selection_alone() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 5);
+        board.selected = 2;
+        board.decide(Key::StartPicker);
+        board.decide(Key::TogglePickerFocus);
+        assert_eq!(board.decide(Key::Dismiss), Action::None);
+        assert!(!board.is_picking());
+        assert_eq!(board.selected, 2);
+        // Esc then q still quits the board itself.
+        assert_eq!(board.decide(Key::Dismiss), Action::Dismiss);
+    }
+
+    #[test]
+    fn picker_keeps_the_cursor_row_across_a_rescan() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 3);
+        board.selected = 1;
+        board.decide(Key::StartPicker);
+        assert_eq!(board.picker_position(), 1);
+        board.ingest(
+            "SCAN ww 2 agent /Users/ww/.local/bin/agent --workspace /tmp/2\n\
+             SCAN ww 9 agent /Users/ww/.local/bin/agent --workspace /tmp/9\n\
+             SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/3\n",
+        );
+        assert_eq!(board.picker_matches().len(), 3);
+        // Pane 2 is still under the cursor even though rows reordered
+        // (it is now the first row).
+        assert_eq!(board.picker_position(), 0);
+        let cursor = board
+            .picker_matches()
+            .get(board.picker_position())
+            .and_then(|&index| board.agents.get(index));
+        assert_eq!(cursor.map(|agent| agent.id.pane_id), Some(2));
+    }
+
+    #[test]
+    fn picker_tips_label_only_the_visible_window() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 10);
+        board.picker_page_len = 3;
+        board.decide(Key::StartPicker);
+        board.decide(Key::TogglePickerFocus);
+        assert_eq!(board.picker_window(3), (0, 3));
+        assert_eq!(board.picker_label(0), Some("a"));
+        assert_eq!(board.picker_label(2), Some("d"));
+        assert_eq!(board.picker_label(3), None);
     }
 }

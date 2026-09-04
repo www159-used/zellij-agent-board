@@ -1,0 +1,26 @@
+# Floating picker: p opens it over every row, typing filters all matches,
+# Tab shows tip labels, a tip letter jumps.
+size 100 24
+scan ww 3 /tmp/api
+scan ww 9 /tmp/web
+scan lp 8 /tmp/learn
+scan ww 5 /tmp/api-tooling
+
+key p
+expect picking yes
+expect focus query
+expect screen contains search
+expect screen contains 4
+expect screen contains learn
+
+# Typing filters every row, including ones the board viewport never showed.
+key input w
+expect screen contains 3
+expect screen excludes learn
+
+# Tab labels the matches; third tip is ww 9 (pane order 3, 5, 9).
+key tab
+expect focus tips
+key input d
+expect picking no
+expect action jump ww 9

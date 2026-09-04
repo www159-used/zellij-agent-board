@@ -1,7 +1,7 @@
 //! Host-side board scenes. Each input paints a real frame; checkpoints read it.
 
 use crate::render::paint_to_size;
-use crate::{Action, AgentId, Board, Key, PanePlace};
+use crate::{Action, AgentId, Board, Key, PanePlace, PickerFocus};
 
 #[derive(Debug)]
 pub struct SceneError {
@@ -164,6 +164,25 @@ impl Runner {
                 exact(rest, 1, line, "expect searching yes|no")?;
                 expect_flag(self.board.is_searching(), rest.first(), line, "searching")
             }
+            "picking" => {
+                exact(rest, 1, line, "expect picking yes|no")?;
+                expect_flag(self.board.is_picking(), rest.first(), line, "picking")
+            }
+            "focus" => {
+                exact(rest, 1, line, "expect focus query|tips")?;
+                let want = rest.first().copied().unwrap_or_default();
+                let actual = match self.board.picker_focus() {
+                    PickerFocus::Query => "query",
+                    PickerFocus::Tips => "tips",
+                };
+                if actual != want {
+                    return Err(SceneError {
+                        line,
+                        message: format!("focus {actual} != {want}"),
+                    });
+                }
+                Ok(())
+            }
             other => Err(SceneError {
                 line,
                 message: format!("unknown expect {other}"),
@@ -275,6 +294,14 @@ fn parse_key(args: &[&str], line: usize) -> Result<Key, SceneError> {
         Some("s") => {
             exact(args, 1, line, "key s")?;
             Ok(Key::StartHint)
+        }
+        Some("p") => {
+            exact(args, 1, line, "key p")?;
+            Ok(Key::StartPicker)
+        }
+        Some("tab") => {
+            exact(args, 1, line, "key tab")?;
+            Ok(Key::TogglePickerFocus)
         }
         Some("/") => {
             exact(args, 1, line, "key /")?;

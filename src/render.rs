@@ -5,10 +5,10 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 
-use crate::{theme::theme, Agent, Board, HintField, Status};
+use crate::{theme::theme, Agent, Board, HintField, PickerFocus, Status};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PaintCtx<'a> {
@@ -113,6 +113,9 @@ pub fn render_board(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) 
         render_help(content, buffer);
     } else {
         render_list(board, home, content, buffer);
+        if board.is_picking() {
+            render_picker(board, home, content, buffer);
+        }
     }
     if let Some(footer) = footer {
         render_footer(board, home, footer, buffer);
@@ -158,6 +161,7 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
         Line::from(vec![key("e  Enter"), Span::raw("go")]),
         Line::from(vec![key("s"), Span::raw("search")]),
         Line::from(vec![key("/  n  N"), Span::raw("find / next / prev")]),
+        Line::from(vec![key("p  Tab"), Span::raw("picker / tip jump")]),
         Line::from(vec![key("q  Esc"), Span::raw("close")]),
         Line::from(vec![key("Alt+q"), Span::raw("toggle board")]),
         Line::from(vec![key("!"), Span::raw("done, not opened yet")]),
@@ -248,7 +252,17 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
             body,
             buffer,
             y,
-            agent_row(board, index, selected, cols, home, multi, masked),
+            agent_row(
+                board,
+                index,
+                selected,
+                cols,
+                home,
+                multi,
+                masked,
+                board.highlight_query(),
+                false,
+            ),
         );
         if let Some(text) = activity {
             y = draw_line(body, buffer, y, activity_line(&text, cols, masked));
@@ -275,9 +289,156 @@ fn render_scroll_arrows(area: Rect, start: usize, end: usize, total: usize, buff
     }
 }
 
+/// Floating picker geometry: the list pane minus a small inset.
+/// A hard 88×24 cap clipped branch names the board could show, and hid
+/// matches after j/k left the picker.
+pub fn picker_box(area: Rect) -> Rect {
+    let width = if area.width <= 26 {
+        area.width
+    } else {
+        area.width.saturating_sub(2)
+    };
+    let height = if area.height <= 8 {
+        area.height
+    } else {
+        area.height.saturating_sub(1)
+    };
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width, height)
+}
+
+/// Result rows inside the picker for a pane of `rows` lines.
+/// Box minus top/bottom border minus the query line.
+pub fn picker_result_rows(rows: u16) -> usize {
+    let box_area = picker_box(Rect::new(0, 0, 120, rows));
+    usize::from(box_area.height).saturating_sub(3)
+}
+
+fn render_picker(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let focus = board.picker_focus();
+    let box_area = picker_box(area);
+    Clear.render(box_area, buffer);
+    let block = Block::default()
+        .title(" search ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme().focus));
+    let inner = block.inner(box_area);
+    block.render(box_area, buffer);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let [prompt, results] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+    render_picker_prompt(board, focus, prompt, buffer);
+    render_picker_results(board, home, results, buffer);
+}
+
+fn render_picker_prompt(board: &Board, focus: PickerFocus, area: Rect, buffer: &mut Buffer) {
+    let total = board.picker_matches().len();
+    let query = board.picker_query();
+    let mut spans = vec![Span::styled(
+        " / ",
+        Style::default().fg(theme().tip_fg).bg(theme().tip_bg),
+    )];
+    if focus == PickerFocus::Query {
+        spans.push(Span::styled(
+            format!("{query}█"),
+            Style::default()
+                .fg(ratatui::style::Color::White)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        spans.push(Span::styled(
+            query.to_string(),
+            Style::default().fg(theme().mask_fg),
+        ));
+    }
+    // Match count only. Cursor index used to be `1/N` for j/k; tips
+    // made that look like a single hit.
+    let count = total.to_string();
+    let used = spans.iter().map(Span::width).sum::<usize>();
+    let width = usize::from(area.width);
+    let count_width = count.chars().count();
+    if used + count_width < width {
+        spans.push(Span::raw(" ".repeat(width - used - count_width)));
+        spans.push(Span::styled(count, Style::default().fg(theme().mask_fg)));
+    }
+    Paragraph::new(Line::from(spans)).render(area, buffer);
+}
+
+fn render_picker_results(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let matches = board.picker_matches();
+    let (start, end) = board.picker_window(usize::from(area.height));
+    if start >= end {
+        Paragraph::new(Line::from(Span::styled(
+            "no matches",
+            Style::default().fg(theme().mask_fg),
+        )))
+        .render(area, buffer);
+        return;
+    }
+    let query = board.picker_query();
+    let cursor = board.picker_position();
+    let mut y = area.y;
+    for position in start..end {
+        let Some(&index) = matches.get(position) else {
+            break;
+        };
+        let selected = position == cursor;
+        if selected {
+            buffer.set_style(
+                Rect::new(area.x, y, area.width, 1),
+                Style::default().bg(theme().focus_fill),
+            );
+        }
+        // Same `agent_row` / `place_for_match` as the board. `multi` here
+        // means "session is not the place column": picker has no ◆ heads
+        // but still lists every session, so it must not fall through to
+        // the single-session-away substitution (place = session name).
+        let line = agent_row(
+            board,
+            index,
+            selected,
+            usize::from(area.width),
+            home,
+            true,
+            false,
+            query,
+            true,
+        );
+        y = draw_line(area, buffer, y, line);
+        if y >= area.bottom() {
+            break;
+        }
+    }
+    render_scroll_arrows(area, start, end, matches.len(), buffer);
+}
+
 fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
     let line = if board.help_visible {
         footer_hints(area.width, None, &[("q", "close"), ("?", "close")])
+    } else if board.is_picking() {
+        Line::from(vec![
+            Span::styled(
+                " PICK ",
+                Style::default().fg(theme().tip_fg).bg(theme().focus),
+            ),
+            Span::styled(
+                if board.picker_focus() == PickerFocus::Tips {
+                    "  Tab query  Esc close"
+                } else {
+                    "  Tab  Enter go  Esc close"
+                },
+                Style::default().fg(theme().mask_fg),
+            ),
+        ])
     } else if board.is_searching() {
         Line::from(vec![
             Span::styled(
@@ -457,6 +618,7 @@ fn session_head(board: &Board, name: &str, flash: bool) -> Line<'static> {
     Line::from(spans)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn agent_row(
     board: &Board,
     index: usize,
@@ -465,6 +627,8 @@ fn agent_row(
     home: &str,
     multi: bool,
     masked: bool,
+    query: &str,
+    picker: bool,
 ) -> Line<'static> {
     let agent = &board.agents[index];
     let status_style = if masked {
@@ -483,8 +647,13 @@ fn agent_row(
     } else {
         spans.push(Span::raw("  "));
     }
-    if let Some(label) = board.hint_label(index) {
-        spans.extend(hint_badge(label, board.hint_jump_prefix().len()));
+    let (label, prefix_len) = if picker && board.picker_focus() == PickerFocus::Tips {
+        (board.picker_label(index), board.picker_jump_prefix().len())
+    } else {
+        (board.hint_label(index), board.hint_jump_prefix().len())
+    };
+    if let Some(label) = label {
+        spans.extend(hint_badge(label, prefix_len));
         spans.push(Span::raw(" "));
     }
     spans.push(Span::styled(format!("{} ", row_icon(agent)), status_style));
@@ -512,17 +681,17 @@ fn agent_row(
         when_style,
     ));
 
-    let field = board.hint_match_field(index);
-    // Flash highlights the matched field. The normal place column may show
-    // project while the hit was tab/session — swap in the hit text so the
-    // match (and tip row) always has a visible highlight.
-    let place = if !masked && !board.highlight_query().is_empty() {
+    let field = crate::match_field(agent, query);
+    // Same flash rule on the board and in the picker: tab/project hits
+    // swap the place column so the highlight is visible; a session hit
+    // keeps project/tab (session lives on ◆ heads, or in the query).
+    let place = if !masked && !query.is_empty() {
         place_for_match(agent, field, home, multi)
     } else {
         place_label(agent, home, multi)
     };
-    let place_range = (!masked && !board.highlight_query().is_empty())
-        .then(|| text_match_range_local(&place, board.highlight_query()))
+    let place_range = (!masked && !query.is_empty())
+        .then(|| text_match_range_local(&place, query))
         .flatten();
     spans.push(Span::raw(" "));
     let place_w = place_cols(cols);
@@ -583,7 +752,7 @@ fn place_cols(cols: usize) -> usize {
 
 fn place_for_match(agent: &Agent, field: Option<HintField>, home: &str, multi: bool) -> String {
     match field {
-        Some(HintField::Session) => agent.id.session.clone(),
+        Some(HintField::Session) => place_label(agent, home, multi),
         Some(HintField::Project) => {
             let project = agent.project();
             if project != "-" {
@@ -843,8 +1012,11 @@ fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_ago, fmt_elapsed, frame_patch, paint, paint_to_size, strip_ansi, PaintCtx};
-    use crate::{Action, Agent, AgentId, Board, Key, Status};
+    use super::{
+        fmt_ago, fmt_elapsed, frame_patch, paint, paint_to_size, picker_box, strip_ansi, PaintCtx,
+    };
+    use crate::{Action, Agent, AgentId, Board, HintField, Key, Status};
+    use ratatui::layout::Rect;
 
     fn agent() -> Agent {
         Agent {
@@ -1135,6 +1307,54 @@ mod tests {
     }
 
     #[test]
+    fn session_match_keeps_the_project_in_place() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        board.agents.push(agent());
+        let mut other = agent();
+        other.id.pane_id = 9;
+        board.agents.push(other);
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Input('w')), Action::None);
+        assert_eq!(
+            crate::match_field(&board.agents[0], "w"),
+            Some(HintField::Session)
+        );
+        let text = painted(&board, 16, 110, "ww");
+        assert!(
+            text.contains("api"),
+            "session search must not replace project:\n{text}"
+        );
+
+        board.decide(Key::Dismiss);
+        board.decide(Key::StartPicker);
+        board.decide(Key::Input('w'));
+        let picker = painted(&board, 16, 110, "ww");
+        assert!(
+            picker.contains("api"),
+            "picker session query must not replace project:\n{picker}"
+        );
+
+        let mut foreign = agent();
+        foreign.id.session = "lp".into();
+        foreign.id.pane_id = 8;
+        foreign.workspace = Some("/tmp/learn".into());
+        foreign.tab_name = "notes".into();
+        board.agents.push(foreign);
+        board.decide(Key::Dismiss);
+        board.decide(Key::StartPicker);
+        board.decide(Key::Input('l'));
+        board.decide(Key::Input('p'));
+        let away = painted(&board, 16, 110, "ww");
+        assert!(
+            away.contains("learn"),
+            "picker must keep the project when the query is a foreign session:\n{away}"
+        );
+    }
+
+    #[test]
     fn flash_shows_place_for_tab_and_project_hits() {
         let mut board = Board {
             hooks_installed: true,
@@ -1367,6 +1587,140 @@ mod tests {
                 .lines()
                 .any(|line| line.starts_with('›') && line.contains("/1")),
             "viewport should scroll past the first row:\n{text}"
+        );
+    }
+
+    #[test]
+    fn picker_overlays_a_centered_search_box() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        board.agents.push(agent());
+        board.decide(Key::StartPicker);
+        let text = painted(&board, 16, 80, "ww");
+        assert!(text.contains("search"), "box title:\n{text}");
+        assert!(
+            !text.contains("1/1"),
+            "count is the match total, not cursor/total:\n{text}"
+        );
+        assert!(
+            text.contains("working"),
+            "agent rows render inside:\n{text}"
+        );
+    }
+
+    #[test]
+    fn picker_focus_moves_between_query_and_tips() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        board.agents.push(agent());
+        let mut other = agent();
+        other.id.pane_id = 9;
+        board.agents.push(other);
+        board.decide(Key::StartPicker);
+        let query_focus = painted(&board, 16, 80, "ww");
+        assert!(query_focus.contains('█'), "query cursor:\n{query_focus}");
+        board.decide(Key::TogglePickerFocus);
+        let list_focus = painted(&board, 16, 80, "ww");
+        assert!(
+            !list_focus.contains('█'),
+            "cursor belongs to the query only:\n{list_focus}"
+        );
+        assert!(list_focus.contains(" PICK "));
+        assert!(
+            !list_focus.contains(" tips "),
+            "tips stay on rows, not the footer:\n{list_focus}"
+        );
+        assert!(
+            !list_focus.contains("tip:"),
+            "footer must not repeat tip letters:\n{list_focus}"
+        );
+    }
+
+    #[test]
+    fn picker_shows_an_empty_state_when_nothing_matches() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        board.decide(Key::StartPicker);
+        let text = painted(&board, 12, 60, "ww");
+        assert!(text.contains("no matches"), "{text}");
+    }
+
+    #[test]
+    fn picker_scrolls_a_window_when_rows_overflow() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        for pane in 1..=15 {
+            let mut row = agent();
+            row.id.pane_id = pane;
+            row.workspace = Some(format!("/tmp/ws{pane}"));
+            board.agents.push(row);
+        }
+        board.decide(Key::StartPicker);
+        board.decide(Key::TogglePickerFocus);
+        let text = painted(&board, 16, 80, "ww");
+        assert!(text.contains("15"), "match count:\n{text}");
+        assert!(text.contains("ws1"), "first row visible:\n{text}");
+        assert!(
+            !text.contains("ws15"),
+            "tips stay on the first window:\n{text}"
+        );
+    }
+
+    #[test]
+    fn picker_box_follows_the_pane_instead_of_a_small_cap() {
+        let area = Rect::new(0, 0, 110, 23);
+        let box_area = picker_box(area);
+        assert_eq!(box_area.width, 108);
+        assert_eq!(box_area.height, 22);
+        assert!(box_area.width > 88);
+    }
+
+    #[test]
+    fn picker_shows_the_full_place_the_board_would() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        let mut row = agent();
+        row.workspace = None;
+        row.tab_name = "feature/better-search".into();
+        row.pane_title.clear();
+        board.agents.push(row);
+        let list = painted(&board, 16, 110, "ww");
+        assert!(list.contains("feature/better-search"), "board:\n{list}");
+        board.decide(Key::StartPicker);
+        let picker = painted(&board, 16, 110, "ww");
+        assert!(
+            picker.contains("feature/better-search"),
+            "picker must not clip the place the board shows:\n{picker}"
+        );
+    }
+
+    #[test]
+    fn picker_uses_pane_height_so_matches_are_not_capped() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        for pane in 1..=25 {
+            let mut row = agent();
+            row.id.pane_id = pane;
+            row.workspace = Some(format!("/tmp/ws{pane}"));
+            board.agents.push(row);
+        }
+        board.decide(Key::StartPicker);
+        let text = painted(&board, 32, 80, "ww");
+        assert!(
+            text.contains("ws25"),
+            "a tall pane should list every match:\n{text}"
         );
     }
 }

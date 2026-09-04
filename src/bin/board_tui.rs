@@ -214,7 +214,12 @@ impl App {
     }
 
     fn handle_key(&mut self, event: KeyEvent) -> Loop {
-        let Some(key) = map_key(event, self.board.is_hinting(), self.board.is_searching()) else {
+        let mapped = if self.board.is_picking() {
+            map_picker_key(event)
+        } else {
+            map_key(event, self.board.is_hinting(), self.board.is_searching())
+        };
+        let Some(key) = mapped else {
             return Loop::Ignored;
         };
         match self.board.decide(key) {
@@ -329,6 +334,7 @@ fn map_key(event: KeyEvent, hinting: bool, searching: bool) -> Option<Key> {
         KeyCode::Backspace if typing => Some(Key::Backspace),
         KeyCode::Char('s') if !typing => Some(Key::StartHint),
         KeyCode::Char('/') if !typing => Some(Key::StartSearch),
+        KeyCode::Char('p') if !typing => Some(Key::StartPicker),
         KeyCode::Char('n') if !typing => Some(Key::NextMatch),
         KeyCode::Char('N') if !typing => Some(Key::PrevMatch),
         KeyCode::Char(ch) if typing => Some(Key::Input(ch)),
@@ -346,6 +352,23 @@ fn map_key(event: KeyEvent, hinting: bool, searching: bool) -> Option<Key> {
             Some(Key::Down)
         }
         KeyCode::Enter | KeyCode::Char('e') => Some(Key::Confirm),
+        _ => None,
+    }
+}
+
+/// Keys while the floating picker is up. Printable chars go to the query
+/// or to tip labels; `decide` splits them by focus. Esc closes, Tab flips.
+fn map_picker_key(event: KeyEvent) -> Option<Key> {
+    if event.modifiers != KeyModifiers::NONE && event.modifiers != KeyModifiers::SHIFT {
+        return None;
+    }
+    match event.code {
+        KeyCode::Esc => Some(Key::Dismiss),
+        KeyCode::Tab => Some(Key::TogglePickerFocus),
+        KeyCode::Enter => Some(Key::Confirm),
+        KeyCode::Backspace => Some(Key::Backspace),
+        // Query and tips both need `q` as a typed char; Esc still closes.
+        KeyCode::Char(ch) => Some(Key::Input(ch)),
         _ => None,
     }
 }
