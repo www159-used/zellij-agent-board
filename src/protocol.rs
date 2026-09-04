@@ -156,6 +156,27 @@ pub fn merge_places(
     map.into_iter().collect()
 }
 
+/// A successful `list-panes` for a session replaces that session's rows.
+/// Stale pane ids (leftover `board-tui` floats) would never match SCAN and
+/// would keep titles from attaching. Other sessions stay put. Empty
+/// `incoming` is a no-op so a failed list does not wipe.
+pub fn replace_session_places(
+    existing: impl IntoIterator<Item = (AgentId, PanePlace)>,
+    incoming: impl IntoIterator<Item = (AgentId, PanePlace)>,
+) -> Vec<(AgentId, PanePlace)> {
+    let incoming: Vec<(AgentId, PanePlace)> = incoming.into_iter().collect();
+    if incoming.is_empty() {
+        return existing.into_iter().collect();
+    }
+    let sessions: std::collections::BTreeSet<String> =
+        incoming.iter().map(|(id, _)| id.session.clone()).collect();
+    let kept: Vec<(AgentId, PanePlace)> = existing
+        .into_iter()
+        .filter(|(id, _)| !sessions.contains(&id.session))
+        .collect();
+    merge_places(kept, incoming)
+}
+
 pub fn format_jump(session: &str, pane_id: u32) -> String {
     format!("JUMP {session} {pane_id}")
 }
@@ -258,7 +279,7 @@ pub fn persist_places(incoming: impl IntoIterator<Item = (AgentId, PanePlace)>) 
     let path = places_path();
     let existing = parse_places(&std::fs::read_to_string(&path).unwrap_or_default());
     let leftover = parse_places(&std::fs::read_to_string(host_places_path()).unwrap_or_default());
-    let merged = merge_places(merge_places(existing, leftover), incoming);
+    let merged = replace_session_places(merge_places(existing, leftover), incoming);
     let _ = std::fs::write(&path, format_places(merged));
     let _ = std::fs::remove_file(host_places_path());
 }
@@ -417,6 +438,34 @@ mod tests {
         assert_eq!(ww3.1.tab_name, "geo db");
         assert_eq!(ww3.1.pane_title, "agent");
         assert_eq!(ww4.1.tab_name, "new-tab");
+    }
+
+    #[test]
+    fn replace_session_places_drops_stale_ids_for_that_session() {
+        let existing = parse_places(
+            "PLACE lp 0 0\tmaster\tlog_parser2\n\
+             PLACE zab 553 3\tfeature/better-search\tboard-tui\n\
+             PLACE zab 11 3\told-title\tSearch First Design\n",
+        );
+        let incoming = parse_places("PLACE zab 11 3\tfeature/better-search\tSearch First Design\n");
+        let replaced = super::replace_session_places(existing, incoming);
+        assert!(replaced.iter().any(|(id, _)| id.session == "lp"));
+        assert!(replaced.iter().any(|(id, place)| id.session == "zab"
+            && id.pane_id == 11
+            && !place.tab_name.is_empty()));
+        assert!(
+            !replaced
+                .iter()
+                .any(|(id, _)| id.session == "zab" && id.pane_id == 553),
+            "stale zab pane must not linger:\n{replaced:?}"
+        );
+    }
+
+    #[test]
+    fn replace_session_places_empty_incoming_keeps_existing() {
+        let existing = parse_places("PLACE zab 11 3\tfeature/better-search\tagent\n");
+        let replaced = super::replace_session_places(existing.clone(), Vec::new());
+        assert_eq!(replaced, existing);
     }
 
     #[test]
