@@ -1,5 +1,6 @@
 //! Native process scan. The host TUI calls this; WASM never does.
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,6 +23,7 @@ pub fn scan_host_text() -> String {
     let args_by_pid = ps_args(&pids);
     let env_by_pid = ps_env(&pids);
     let mut live_keys = Vec::new();
+    let mut panes_by_session: BTreeMap<String, Option<HashSet<u32>>> = BTreeMap::new();
     for pid in &pids {
         let Some(args) = args_by_pid.get(pid) else {
             continue;
@@ -50,6 +52,12 @@ pub fn scan_host_text() -> String {
         let Some((session, pane)) = zellij_ids_from_env_blob(blob) else {
             continue;
         };
+        let listed = panes_by_session
+            .entry(session.clone())
+            .or_insert_with(|| list_terminal_pane_ids(&session));
+        if !pane_still_open(pane, listed.as_ref()) {
+            continue;
+        }
         out.push_str(&format!("SCAN {session} {pane} {comm} {args}\n"));
         let key = format!("{session}-{pane}");
         if let Some(hook) = read_spool(&key) {
@@ -156,6 +164,37 @@ pub fn places_from_list_panes_json(session: &str, json: &str) -> Vec<(AgentId, P
             ))
         })
         .collect()
+}
+
+/// `None` means list-panes failed — keep the row (fail open) so a
+/// probe glitch cannot empty the board. `Some` is the live terminal
+/// pane ids; a process whose `ZELLIJ_PANE_ID` is missing is an orphan
+/// left behind after the pane closed.
+fn list_terminal_pane_ids(session: &str) -> Option<HashSet<u32>> {
+    let output = Command::new(zellij_bin())
+        .args([
+            "--session",
+            session,
+            "action",
+            "list-panes",
+            "--all",
+            "--json",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        places_from_list_panes_json(session, &String::from_utf8_lossy(&output.stdout))
+            .into_iter()
+            .map(|(id, _)| id.pane_id)
+            .collect(),
+    )
+}
+
+fn pane_still_open(pane: u32, listed: Option<&HashSet<u32>>) -> bool {
+    listed.is_none_or(|ids| ids.contains(&pane))
 }
 
 fn list_sessions() -> Vec<String> {
@@ -386,10 +425,20 @@ fn prune_dir(dir: &Path, live_keys: &[String]) {
 mod tests {
     use std::path::Path;
 
+    use std::collections::HashSet;
+
     use super::{
-        agent_pids_from_text, places_from_list_panes_json, ps_command_args, scan_places_for,
-        zellij_ids_from_env_blob,
+        agent_pids_from_text, pane_still_open, places_from_list_panes_json, ps_command_args,
+        scan_places_for, zellij_ids_from_env_blob,
     };
+
+    #[test]
+    fn drops_orphan_pane_ids_once_list_panes_is_known() {
+        let listed = HashSet::from([0, 1]);
+        assert!(pane_still_open(0, Some(&listed)));
+        assert!(!pane_still_open(10, Some(&listed)));
+        assert!(pane_still_open(10, None));
+    }
 
     #[test]
     fn macos_ps_eww_comes_before_dash_p() {

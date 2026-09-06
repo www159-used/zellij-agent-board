@@ -95,6 +95,34 @@ if [[ -n "$pids" ]]; then
     session=${session%%[[:space:]]*}
     [[ -n "$pane" && -n "$session" ]] || continue
 
+    # Drop processes whose pane is gone. list-panes failure keeps the
+    # row so a probe glitch cannot empty the board.
+    if ! printf '%s\n' "${listed_cache:-}" | grep -q "^${session} "; then
+      json=$(zellij --session "$session" action list-panes --all --json 2>/dev/null || true)
+      if [[ -n "$json" ]]; then
+        ids=$(printf '%s' "$json" | python3 -B -c '
+import json, sys
+items = json.load(sys.stdin)
+print(" ".join(str(i["id"]) for i in items if i.get("is_plugin") is False))
+' 2>/dev/null || true)
+        listed_cache="${listed_cache:-}${session} ok ${ids}
+"
+      else
+        listed_cache="${listed_cache:-}${session} fail
+"
+      fi
+    fi
+    listed_line=$(printf '%s\n' "${listed_cache:-}" | awk -v s="$session" '$1==s {print; exit}')
+    listed_kind=${listed_line#* }
+    listed_kind=${listed_kind%% *}
+    if [[ "$listed_kind" == "ok" ]]; then
+      keep_pane=0
+      for id in ${listed_line#* ok }; do
+        [[ "$id" == "$pane" ]] && keep_pane=1 && break
+      done
+      [[ "$keep_pane" -eq 1 ]] || continue
+    fi
+
     printf 'SCAN %s %s %s %s\n' "$session" "$pane" "$comm" "$args"
     live_keys+=("${session}-${pane}")
 
