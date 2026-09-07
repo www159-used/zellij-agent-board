@@ -29,9 +29,13 @@
   --separator: var(--card-border);
 
   /* 底栏药丸；名单里时间列默认 gutter；done 未读/陈旧再叠色 */
-  --tip-fg: #161a22;
+  --tip-fg: #0d1117;
   --tip-bg: #a2c5ce;
   --tip-typed: var(--focus);
+
+  /* jump tip / 底栏按键：加宽药丸，深色字压亮砂，flash 蒙层上也够跳 */
+  --tip-mark-fg: #161a22;
+  --tip-mark-bg: #f6d56b;
 
   /* 名单里 CodeBuddy 行的 CB 徽标；其它家族颜色在 catalog 里 */
   --tool-codebuddy: #86b6f2;

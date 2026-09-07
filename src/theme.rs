@@ -24,6 +24,8 @@ pub struct Theme {
     pub tip_fg: Color,
     pub tip_bg: Color,
     pub tip_typed: Color,
+    pub tip_mark_fg: Color,
+    pub tip_mark_bg: Color,
     pub tool_codebuddy: Color,
 }
 
@@ -55,6 +57,8 @@ impl Theme {
             tip_fg: try_color(vars, "tip-fg")?,
             tip_bg: try_color(vars, "tip-bg")?,
             tip_typed: try_color(vars, "tip-typed")?,
+            tip_mark_fg: try_color(vars, "tip-mark-fg")?,
+            tip_mark_bg: try_color(vars, "tip-mark-bg")?,
             tool_codebuddy: try_color(vars, "tool-codebuddy")?,
         })
     }
@@ -169,6 +173,8 @@ mod tests {
         assert_eq!(theme.focus_fill, Color::Rgb(0x3a, 0x2f, 0x52));
         assert_eq!(theme.separator, theme.card_border);
         assert_eq!(theme.tip_typed, theme.focus);
+        assert_eq!(theme.tip_mark_fg, Color::Rgb(0x16, 0x1a, 0x22));
+        assert_eq!(theme.tip_mark_bg, Color::Rgb(0xf6, 0xd5, 0x6b));
         assert_eq!(theme.tool_codebuddy, Color::Rgb(0x86, 0xb6, 0xf2));
     }
 }

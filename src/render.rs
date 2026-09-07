@@ -470,9 +470,10 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("  tip:{}", board.hint_jump_prefix()),
+                format!(" tip:{} ", board.hint_jump_prefix()),
                 Style::default()
-                    .fg(theme().tip_typed)
+                    .fg(theme().tip_mark_fg)
+                    .bg(theme().tip_mark_bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -517,25 +518,23 @@ fn footer_hints(width: u16, home: Option<&str>, pairs: &[(&str, &str)]) -> Line<
     for (index, (key, action)) in pairs.iter().enumerate() {
         let labeled = key.chars().count() + action.chars().count() + 4;
         let bare = key.chars().count() + 2;
+        let key_style = Style::default()
+            .fg(theme().tip_mark_fg)
+            .bg(theme().tip_mark_bg)
+            .add_modifier(Modifier::BOLD);
+        let action_style = Style::default()
+            .fg(ratatui::style::Color::White)
+            .add_modifier(Modifier::BOLD);
         let (chunk, extra) = if used + labeled <= budget {
             (
                 vec![
-                    Span::styled(
-                        format!(" {key} "),
-                        Style::default().fg(theme().tip_fg).bg(theme().tip_bg),
-                    ),
-                    Span::raw(format!(" {action} ")),
+                    Span::styled(format!(" {key} "), key_style),
+                    Span::styled(format!(" {action} "), action_style),
                 ],
                 labeled,
             )
         } else if used + bare <= budget {
-            (
-                vec![Span::styled(
-                    format!(" {key} "),
-                    Style::default().fg(theme().tip_fg).bg(theme().tip_bg),
-                )],
-                bare,
-            )
+            (vec![Span::styled(format!(" {key} "), key_style)], bare)
         } else {
             break;
         };
@@ -781,21 +780,22 @@ fn activity_line(text: &str, cols: usize, masked: bool) -> Line<'static> {
 fn hint_badge(label: &str, prefix_len: usize) -> Vec<Span<'static>> {
     let prefix_len = prefix_len.min(label.len());
     let (typed, remaining) = label.split_at(prefix_len);
-    let mut spans = Vec::new();
+    let mark = Style::default()
+        .fg(theme().tip_mark_fg)
+        .bg(theme().tip_mark_bg)
+        .add_modifier(Modifier::BOLD);
+    let typed_style = Style::default()
+        .fg(theme().tip_typed)
+        .bg(theme().tip_mark_bg)
+        .add_modifier(Modifier::BOLD);
+    let mut spans = vec![Span::styled(" ", mark)];
     if !typed.is_empty() {
-        spans.push(Span::styled(
-            typed.to_string(),
-            Style::default()
-                .fg(theme().tip_typed)
-                .add_modifier(Modifier::BOLD),
-        ));
+        spans.push(Span::styled(typed.to_string(), typed_style));
     }
     if !remaining.is_empty() {
-        spans.push(Span::styled(
-            remaining.to_string(),
-            Style::default().fg(theme().tip_fg).bg(theme().focus),
-        ));
+        spans.push(Span::styled(remaining.to_string(), mark));
     }
+    spans.push(Span::styled(" ", mark));
     spans
 }
 
@@ -1139,6 +1139,58 @@ mod tests {
         assert!(text.contains(" more "));
         assert!(!text.contains("hjkl"));
         assert!(!text.contains("^d"));
+        let ansi = paint(
+            &board,
+            PaintCtx {
+                rows: 12,
+                cols: 80,
+                home: "ww",
+            },
+        )
+        .lines
+        .join("\n");
+        assert!(
+            ansi.contains("\u{1b}[48;2;246;213;107m"),
+            "footer keys should sit on the bright tip-mark sand:\n{ansi}"
+        );
+    }
+
+    #[test]
+    fn hint_tips_are_padded_high_contrast_pills() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        board.agents.push(agent());
+        let mut other = agent();
+        other.id.pane_id = 9;
+        board.agents.push(other);
+        board.decide(Key::StartPicker);
+        board.decide(Key::TogglePickerFocus);
+        let label = board.picker_label(0).expect("picker tip").to_string();
+        let ansi = paint(
+            &board,
+            PaintCtx {
+                rows: 16,
+                cols: 80,
+                home: "ww",
+            },
+        )
+        .lines
+        .join("\n");
+        let text = strip_ansi(&ansi);
+        assert!(
+            text.contains(&format!(" {label} ")),
+            "tip should gain padding so it reads larger:\n{text}"
+        );
+        assert!(
+            ansi.contains("\u{1b}[48;2;246;213;107m"),
+            "tip pill needs the high-contrast sand background:\n{ansi}"
+        );
+        assert!(
+            ansi.contains("\u{1b}[38;2;22;26;34m"),
+            "tip letter should stay near-black on sand:\n{ansi}"
+        );
     }
 
     #[test]
