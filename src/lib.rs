@@ -88,6 +88,32 @@ pub enum Action {
     Jump { session: String, pane_id: u32 },
 }
 
+/// One painted line of the list. The painter, hit test and scrollbar slice a
+/// single [`Board::all_lines`] vector, so an index means the same thing in
+/// every place that reads the frame. Chrome is attributed to the agent that
+/// follows it, which keeps [`Board::lines_before`] aligned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyLine {
+    /// Session head above the first row of that session.
+    Session(usize),
+    /// Divider between two session groups.
+    Gap(usize),
+    /// Title line of the agent at this index.
+    Agent(usize),
+    /// Activity line under the title of the agent at this index.
+    Activity(usize),
+}
+
+impl BodyLine {
+    /// Agent owning this line, or `None` for chrome.
+    pub(crate) fn agent(self) -> Option<usize> {
+        match self {
+            BodyLine::Agent(i) | BodyLine::Activity(i) => Some(i),
+            BodyLine::Session(_) | BodyLine::Gap(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HintState {
     labels: Vec<Option<String>>,
@@ -133,6 +159,9 @@ struct PickerState {
 pub struct Board {
     pub agents: Vec<Agent>,
     pub selected: usize,
+    /// Pointer preview. Keyboard and the wheel own [`selected`]; hover
+    /// never moves it. A click still jumps the row under the pointer.
+    pub hovered: Option<usize>,
     pub hooks_installed: bool,
     pub now: u64,
     /// Host unix epoch; advanced by Timer so working elapsed keeps moving.
@@ -147,9 +176,20 @@ pub struct Board {
     last_search: String,
     motion_count: Option<u32>,
     g_pending: bool,
-    page_len: usize,
     list_height: u16,
     wide_list: bool,
+    /// Painted line at the top of the body. Independent of the cursor, like
+    /// nvim's topline: scrolling moves this, and the cursor is clamped to
+    /// stay fully on it. This is what keeps the cursor's screen line stable
+    /// while the list flows under it.
+    topline: u32,
+    /// Document line the wheel keeps under the spotlight. Scrolling moves this
+    /// by the same `moved` as `topline`; selection is derived from it. Storing
+    /// it matters when an agent paints more than one line: re-deriving from
+    /// `lines_before(selected)` every tick would snap mid-block back to the
+    /// block start, so ±delta would stop inverting and the cursor would creep
+    /// toward the top.
+    scroll_anchor: u32,
 }
 
 #[derive(Default)]
@@ -352,8 +392,10 @@ impl Board {
         }
         if order_changed {
             let selected_id = self.agents.get(self.selected).map(|agent| agent.id.clone());
+            let hovered_id = self.hovered_id();
             self.sort_agents();
             self.restore_selection(selected_id);
+            self.restore_hover(hovered_id);
         } else if hint_fields_changed && self.is_hinting() {
             self.recompute_hint_labels();
         }
@@ -374,7 +416,17 @@ impl Board {
         sessions
     }
 
+    /// A key moves the cursor; the view follows only as far as it must.
     pub fn decide(&mut self, key: Key) -> Action {
+        let before = self.selected;
+        let action = self.decide_key(key);
+        if self.selected != before {
+            self.clamp_view();
+        }
+        action
+    }
+
+    fn decide_key(&mut self, key: Key) -> Action {
         if self.help_visible {
             return match key {
                 Key::ToggleHelp | Key::Dismiss => {
@@ -535,13 +587,13 @@ impl Board {
             }
             Key::PageDown => {
                 self.g_pending = false;
-                let steps = self.page_span() * self.take_count();
+                let steps = self.page_step() * self.take_count();
                 self.move_by(steps as isize);
                 Action::None
             }
             Key::PageUp => {
                 self.g_pending = false;
-                let steps = self.page_span() * self.take_count();
+                let steps = self.page_step() * self.take_count();
                 self.move_by(-(steps as isize));
                 Action::None
             }
@@ -585,10 +637,6 @@ impl Board {
         }
     }
 
-    pub fn set_page_len(&mut self, len: usize) {
-        self.page_len = len;
-    }
-
     pub fn set_list_geometry(&mut self, width: u16, height: u16) {
         self.wide_list = width >= 50;
         let content = if height >= 3 {
@@ -602,63 +650,264 @@ impl Board {
         // so the scroll window must be derived from `content`, not `height`.
         self.picker_page_len = crate::render::picker_result_rows(content);
         self.ensure_picker_visible();
+        // A resize may leave the cursor outside the now-smaller window.
+        self.clamp_view();
     }
 
+    /// Agent indices with any line in view, `[start, end)`. Used for hint
+    /// scope and paging; the painter slices [`Board::all_lines`] instead.
     pub fn visible_range(&self) -> (usize, usize) {
-        if self.list_height == 0 {
-            return (0, self.agents.len());
-        }
-        self.list_viewport(self.list_height, self.wide_list)
-    }
-
-    pub fn list_viewport(&self, body_height: u16, wide: bool) -> (usize, usize) {
         let len = self.agents.len();
-        if len == 0 || body_height == 0 {
+        if len == 0 {
             return (0, 0);
         }
-        let selected = self.selected.min(len - 1);
-        let multi = self
-            .agents
-            .windows(2)
-            .any(|pair| pair[0].id.session != pair[1].id.session);
-        let mut start = selected;
-        while start > 0
-            && self.measure_agent_block(start - 1, selected + 1, wide, multi) <= body_height
-        {
-            start -= 1;
+        if self.list_height == 0 {
+            return (0, len);
         }
-        let mut end = selected + 1;
-        while end < len && self.measure_agent_block(start, end + 1, wide, multi) <= body_height {
-            end += 1;
-        }
-        (start, end)
+        let body = u32::from(self.list_height);
+        let wide = self.wide_list;
+        let start = self.agent_for_line(self.topline, wide);
+        let end = self.agent_for_line(self.topline + body - 1, wide) + 1;
+        (start, end.min(len))
     }
 
-    fn measure_agent_block(&self, start: usize, end: usize, wide: bool, multi: bool) -> u16 {
-        let mut lines = 0u16;
-        // Same as paint: a viewport that starts mid-session still draws a header.
-        let mut last_session = None;
-        for index in start..end {
-            let session = self.agents[index].id.session.as_str();
-            if multi && last_session != Some(session) {
-                if last_session.is_some() {
-                    lines = lines.saturating_add(1);
-                }
-                lines = lines.saturating_add(1);
-            }
-            last_session = Some(session);
-            lines = lines.saturating_add(1);
-            if wide && self.row_has_activity(index) {
-                lines = lines.saturating_add(1);
-            }
+    /// Painted line at the top of the body. The painter starts here.
+    pub fn topline(&self) -> u32 {
+        self.topline
+    }
+
+    /// Scroll the view, keeping the cursor's screen line where it is: the
+    /// highlight is a spotlight the list flows under. (This is nvim's C-d/C-u
+    /// move-together, not C-e/C-y leave-behind.) Positive reveals later rows.
+    /// Returns whether the frame changed.
+    pub fn scroll_view(&mut self, delta: i32) -> bool {
+        let len = self.agents.len();
+        if len == 0 || self.list_height == 0 || delta == 0 {
+            return false;
         }
-        lines
+        let wide = self.wide_list;
+        let body = u32::from(self.list_height);
+        let max_top = self.list_lines_total(wide).saturating_sub(body);
+        let before = (self.selected, self.topline);
+        // Key/click paths (and tests) may move `selected` without touching the
+        // anchor. Snap back onto the selected block only when we have drifted
+        // off it — never while the anchor still sits inside, or mid-block
+        // scroll would collapse and ±delta would stop inverting.
+        let top = self.lines_before(self.selected, wide);
+        let bottom = self
+            .lines_before(self.selected + 1, wide)
+            .max(top.saturating_add(1));
+        if self.scroll_anchor < top || self.scroll_anchor >= bottom {
+            self.scroll_anchor = top;
+        }
+        let cursor_line = self.scroll_anchor;
+        if delta > 0 {
+            if self.topline >= max_top {
+                return false;
+            }
+            let step = delta as u32;
+            let next = self.topline.saturating_add(step).min(max_top);
+            let moved = next - self.topline;
+            self.topline = next;
+            self.scroll_anchor = cursor_line.saturating_add(moved);
+        } else {
+            if self.topline == 0 {
+                return false;
+            }
+            let step = (-delta) as u32;
+            let next = self.topline.saturating_sub(step);
+            let moved = self.topline - next;
+            self.topline = next;
+            self.scroll_anchor = cursor_line.saturating_sub(moved);
+        }
+        self.selected = self.agent_for_line(self.scroll_anchor, wide);
+        // `clamp_view` may nudge topline so a tall row fits. Mirror that nudge
+        // onto the anchor; otherwise the reverse scroll sees a smaller `moved`
+        // (hit max_top sooner) and selection creeps toward the top.
+        let pre_clamp = self.topline;
+        self.clamp_view();
+        if self.topline > pre_clamp {
+            self.scroll_anchor = self.scroll_anchor.saturating_add(self.topline - pre_clamp);
+            self.selected = self.agent_for_line(self.scroll_anchor, wide);
+        } else if self.topline < pre_clamp {
+            self.scroll_anchor = self.scroll_anchor.saturating_sub(pre_clamp - self.topline);
+            self.selected = self.agent_for_line(self.scroll_anchor, wide);
+        }
+        (self.selected, self.topline) != before
+    }
+
+    /// Keep `topline` inside the list and the selected row fully visible. The
+    /// cursor moves, then this scrolls only as far as it must — nvim's
+    /// minimal adjust at `scrolloff=0`.
+    fn clamp_view(&mut self) {
+        if self.list_height == 0 || self.agents.is_empty() {
+            return;
+        }
+        let wide = self.wide_list;
+        let body = u32::from(self.list_height);
+        let max_top = self.list_lines_total(wide).saturating_sub(body);
+        let top = self.lines_before(self.selected, wide);
+        let bottom = self.lines_before(self.selected + 1, wide);
+        let lower = bottom.saturating_sub(body);
+        let upper = top.min(max_top);
+        self.topline = self.topline.clamp(lower, upper);
+    }
+
+    pub(crate) fn has_multiple_sessions(&self) -> bool {
+        self.agents
+            .windows(2)
+            .any(|pair| pair[0].id.session != pair[1].id.session)
     }
 
     fn row_has_activity(&self, index: usize) -> bool {
         self.agents
             .get(index)
             .is_some_and(|agent| !agent.detail.is_empty())
+    }
+
+    /// Every painted line of the list, in order. The painter, the hit test
+    /// and the scrollbar all slice this, so a line index means the same thing
+    /// everywhere and the count always matches the frame.
+    pub(crate) fn all_lines(&self, wide: bool) -> Vec<BodyLine> {
+        let multi = self.has_multiple_sessions();
+        let mut lines = Vec::new();
+        let mut last_session = None;
+        for index in 0..self.agents.len() {
+            let session = self.agents[index].id.session.as_str();
+            if multi && last_session != Some(session) {
+                if last_session.is_some() {
+                    lines.push(BodyLine::Gap(index));
+                }
+                lines.push(BodyLine::Session(index));
+                last_session = Some(session);
+            }
+            lines.push(BodyLine::Agent(index));
+            if wide && self.row_has_activity(index) {
+                lines.push(BodyLine::Activity(index));
+            }
+        }
+        lines
+    }
+
+    /// Painted height of the whole list, session heads included.
+    pub(crate) fn list_lines_total(&self, wide: bool) -> u32 {
+        self.lines_before(self.agents.len(), wide)
+    }
+
+    /// Painted height above agent `until`.
+    fn lines_before(&self, until: usize, wide: bool) -> u32 {
+        let until = until.min(self.agents.len());
+        let multi = self.has_multiple_sessions();
+        let mut count = 0u32;
+        let mut last_session = None;
+        for index in 0..until {
+            let session = self.agents[index].id.session.as_str();
+            if multi && last_session != Some(session) {
+                if last_session.is_some() {
+                    count += 1;
+                }
+                count += 1;
+                last_session = Some(session);
+            }
+            count += 1;
+            if wide && self.row_has_activity(index) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Agent whose painted block contains `line`, counted from the list top.
+    /// A gutter click maps its track position to this.
+    pub(crate) fn agent_for_line(&self, line: u32, wide: bool) -> usize {
+        let len = self.agents.len();
+        if len == 0 {
+            return 0;
+        }
+        let multi = self.has_multiple_sessions();
+        let mut count = 0u32;
+        let mut last_session = None;
+        for index in 0..len {
+            let session = self.agents[index].id.session.as_str();
+            if multi && last_session != Some(session) {
+                if last_session.is_some() {
+                    count += 1;
+                }
+                count += 1;
+                last_session = Some(session);
+            }
+            count += 1;
+            if wide && self.row_has_activity(index) {
+                count += 1;
+            }
+            if line < count {
+                return index;
+            }
+        }
+        len - 1
+    }
+
+    /// Agent under a click at zero-based `column`,`row` in the list pane.
+    /// See [`render::agent_at`].
+    pub fn agent_at(&self, rows: u16, cols: u16, column: u16, row: u16) -> Option<usize> {
+        render::agent_at(self, rows, cols, column, row)
+    }
+
+    /// Row the pointer previews, or `None` when an overlay owns the frame.
+    /// The painter reads this; the raw field may still hold a row from before
+    /// the overlay opened.
+    pub fn hovered_row(&self) -> Option<usize> {
+        if self.help_visible || self.is_picking() {
+            return None;
+        }
+        self.hovered
+    }
+
+    /// Preview the row under the pointer. Chrome, the gutter, and overlays
+    /// clear it. Returns whether the preview changed.
+    pub fn hover(&mut self, rows: u16, cols: u16, column: u16, row: u16) -> bool {
+        if self.help_visible || self.is_picking() {
+            return self.set_hovered(None);
+        }
+        if render::scrollbar_at(self, rows, cols, column, row).is_some() {
+            return self.set_hovered(None);
+        }
+        self.set_hovered(self.agent_at(rows, cols, column, row))
+    }
+
+    fn set_hovered(&mut self, next: Option<usize>) -> bool {
+        if self.hovered == next {
+            false
+        } else {
+            self.hovered = next;
+            true
+        }
+    }
+
+    fn hovered_id(&self) -> Option<AgentId> {
+        self.hovered
+            .and_then(|index| self.agents.get(index).map(|agent| agent.id.clone()))
+    }
+
+    /// A click jumps straight there. The row under the pointer wins over any
+    /// pending flash / search target, so the pointer is never second-guessed.
+    /// A click on the scrollbar gutter scrolls there; chrome does nothing.
+    pub fn click(&mut self, rows: u16, cols: u16, column: u16, row: u16) -> Action {
+        // An overlay owns the frame; rows behind it must not take the click.
+        if self.help_visible || self.is_picking() {
+            return Action::None;
+        }
+        if let Some(top) = render::scrollbar_at(self, rows, cols, column, row) {
+            let delta = i64::from(top) - i64::from(self.topline);
+            self.scroll_view(delta as i32);
+            return Action::None;
+        }
+        let Some(index) = self.agent_at(rows, cols, column, row) else {
+            return Action::None;
+        };
+        self.selected = index;
+        self.clamp_view();
+        self.jump_at(index)
     }
 
     fn clear_motion(&mut self) {
@@ -683,16 +932,27 @@ impl Board {
         self.motion_count.take().unwrap_or(1).max(1) as usize
     }
 
+    /// A screenful: how many rows the viewport really shows. nvim derives
+    /// both 'scroll' (C-d/C-u) and a page (C-f/C-b) from the live window
+    /// height, so this reads the painted range instead of guessing from the
+    /// pane size. Falls back to 10 before the first geometry is known.
     fn page_span(&self) -> usize {
-        if self.page_len == 0 {
-            10
-        } else {
-            self.page_len
+        if self.list_height == 0 {
+            return 10;
         }
+        let (start, end) = self.visible_range();
+        (end.saturating_sub(start)).max(1)
     }
 
     fn half_page(&self) -> usize {
         (self.page_span() / 2).max(1)
+    }
+
+    /// C-f / C-b keep one row of overlap so two pages never lose the seam.
+    /// nvim keeps two (`get_scroll_overlap()`, move.c:2373); our window is a
+    /// handful of rows, so one is enough.
+    fn page_step(&self) -> usize {
+        self.page_span().saturating_sub(1).max(1)
     }
 
     fn move_by(&mut self, delta: isize) {
@@ -1351,6 +1611,7 @@ impl Board {
 
     fn replace_from_scan(&mut self, found: Vec<Found>) -> bool {
         let selected_id = self.agents.get(self.selected).map(|agent| agent.id.clone());
+        let hovered_id = self.hovered_id();
         let previous: Vec<Agent> = std::mem::take(&mut self.agents);
         let mut next = Vec::new();
         for row in found {
@@ -1389,6 +1650,7 @@ impl Board {
         }
         self.agents = next;
         self.restore_selection(selected_id);
+        self.restore_hover(hovered_id);
         self.refresh_picker();
         true
     }
@@ -1402,9 +1664,15 @@ impl Board {
             .and_then(|id| self.agents.iter().position(|agent| agent.id == id))
             .unwrap_or(0)
             .min(self.agents.len().saturating_sub(1));
+        self.clamp_view();
         if self.is_hinting() {
             self.recompute_hint_labels();
         }
+    }
+
+    fn restore_hover(&mut self, hovered_id: Option<AgentId>) {
+        self.hovered =
+            hovered_id.and_then(|id| self.agents.iter().position(|agent| agent.id == id));
     }
 }
 
@@ -2003,6 +2271,7 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         }
         board.ingest(&scan);
         board.selected = 7;
+        board.topline = 6; // keep pane 8 on screen in a two-line body
         let lines = board.lines_for(4);
         assert!(lines.first().is_some_and(|line| line.contains("found")));
         assert!(lines
@@ -2062,16 +2331,186 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
     }
 
     #[test]
-    fn ctrl_d_moves_half_the_page() {
+    fn ctrl_d_moves_half_the_window() {
         let mut board = Board::default();
         ingest_panes(&mut board, 20);
-        board.set_page_len(10);
+        // 80x16 shows 14 rows: half a window is 7, a page keeps one back
+        board.set_list_geometry(80, 16);
         board.decide(Key::HalfPageDown);
-        assert_eq!(board.selected, 5);
+        assert_eq!(board.selected, 7);
         board.decide(Key::HalfPageUp);
         assert_eq!(board.selected, 0);
         board.decide(Key::PageDown);
-        assert_eq!(board.selected, 10);
+        assert_eq!(board.selected, 13);
+    }
+
+    #[test]
+    fn paging_follows_the_window_not_a_guess() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 20);
+        // 80x8 shows 6 rows, so a page is 5 — not the old flat estimate
+        board.set_list_geometry(80, 8);
+        board.decide(Key::PageDown);
+        assert_eq!(board.selected, 5);
+        board.set_list_geometry(80, 16);
+        board.decide(Key::PageDown);
+        assert_eq!(board.selected, 18);
+    }
+
+    #[test]
+    fn wheel_keeps_the_cursor_screen_line() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 20);
+        board.set_list_geometry(80, 8); // 6 lines, one agent per line
+        board.selected = 9;
+        board.topline = 4; // cursor on the bottom line
+        assert_eq!(board.visible_range(), (4, 10));
+
+        // scrolling down slides the view AND the cursor together, so the
+        // cursor's screen line never moves (this is nvim C-d/C-u, not C-e/C-y)
+        for _ in 0..5 {
+            board.scroll_view(1);
+        }
+        assert_eq!(board.selected, 14);
+        assert_eq!(board.topline(), 9);
+        assert_eq!(board.visible_range(), (9, 15));
+        assert_eq!(
+            board.lines_before(board.selected, true) - board.topline(),
+            5
+        );
+    }
+
+    #[test]
+    fn wheel_clamps_at_the_ends_without_dropping_the_cursor() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 20);
+        board.set_list_geometry(80, 8);
+        board.selected = 9;
+        board.topline = 4;
+        for _ in 0..20 {
+            board.scroll_view(1);
+        }
+        assert_eq!(board.topline(), 14);
+        assert_eq!(board.selected, 19);
+        assert!(!board.scroll_view(1), "already at the bottom");
+        for _ in 0..20 {
+            board.scroll_view(-1);
+        }
+        assert_eq!(board.topline(), 0);
+        // the cursor kept its screen line (the bottom), so it lands five rows
+        // in — not on the first row
+        assert_eq!(board.selected, 5);
+        assert!(!board.scroll_view(-1), "already at the top");
+    }
+
+    #[test]
+    fn a_keystroke_keeps_a_scrolled_view_in_place() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 20);
+        board.set_list_geometry(80, 8);
+        board.selected = 9;
+        board.topline = 6; // cursor three lines down, not at an edge
+        board.scroll_view(3);
+        assert_eq!(
+            board.lines_before(board.selected, true) - board.topline(),
+            3
+        );
+        let top = board.topline();
+        board.decide(Key::Down);
+        // the cursor moves within the window; the view does not snap back
+        assert_eq!(board.selected, 13);
+        assert_eq!(board.topline(), top);
+    }
+
+    #[test]
+    fn the_cursor_stays_fully_visible_while_scrolling() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 20);
+        board.set_list_geometry(80, 8);
+        board.topline = 4;
+        for step in 0..40 {
+            board.scroll_view(if step % 2 == 0 { 1 } else { -1 });
+            let top = board.lines_before(board.selected, true);
+            let bottom = board.lines_before(board.selected + 1, true);
+            assert!(
+                top >= board.topline() && bottom <= board.topline() + 6,
+                "cursor outside the frame: top {top} bottom {bottom} topline {}",
+                board.topline()
+            );
+        }
+    }
+
+    #[test]
+    fn wheel_up_down_does_not_drift_with_activity_lines() {
+        // Each agent paints two lines (title + activity). Re-deriving the
+        // spotlight from lines_before(selected) every tick collapses mid-block
+        // back to the block start, so ±delta stops inverting and selection
+        // creeps toward the top — the "G then scroll up/down" drift.
+        let mut board = Board::default();
+        ingest_panes(&mut board, 20);
+        board.set_list_geometry(80, 16);
+        for agent in &mut board.agents {
+            agent.detail = "Shell cargo test".into();
+        }
+        board.decide(Key::Last);
+        let start = board.selected;
+        assert_eq!(start, 19);
+        for _ in 0..40 {
+            board.scroll_view(-3);
+            board.scroll_view(3);
+        }
+        assert_eq!(
+            board.selected, start,
+            "selection drifted from {start} to {}",
+            board.selected
+        );
+    }
+
+    #[test]
+    fn wheel_round_trips_under_mixed_heights_and_sessions() {
+        // Trackpad-like ±3 from G, across session heads + sparse activity.
+        let mut board = Board::default();
+        let mut scan = String::from("META hooks=1\n");
+        for pane in 1..=12 {
+            scan.push_str(&format!(
+                "SCAN ww {pane} agent /tmp/a --workspace /tmp/a{pane}\n"
+            ));
+        }
+        for pane in 1..=12 {
+            scan.push_str(&format!(
+                "SCAN lp {pane} agent /tmp/b --workspace /tmp/b{pane}\n"
+            ));
+        }
+        board.ingest(&scan);
+        board.set_list_geometry(80, 14);
+        for (i, agent) in board.agents.iter_mut().enumerate() {
+            if i % 3 == 0 {
+                agent.detail = "Shell cargo test".into();
+            }
+        }
+        board.decide(Key::Last);
+        let start = board.selected;
+        for _ in 0..80 {
+            board.scroll_view(-3);
+            board.scroll_view(3);
+        }
+        assert_eq!(
+            board.selected, start,
+            "selection drifted from {start} to {}",
+            board.selected
+        );
+        // Bounce against the bottom the way a trackpad does: downs no-op at
+        // the end, then an up/down pair must still restore.
+        for _ in 0..10 {
+            let _ = board.scroll_view(3);
+            board.scroll_view(-3);
+            board.scroll_view(3);
+        }
+        assert_eq!(
+            board.selected, start,
+            "bottom bounce drifted from {start} to {}",
+            board.selected
+        );
     }
 
     #[test]
@@ -2233,11 +2672,111 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
     }
 
     #[test]
+    fn click_jumps_to_the_row_under_the_pointer() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.set_list_geometry(80, 8);
+        // 80x8: header line 0, body lines 1..6, footer line 7
+        assert_eq!(board.agent_at(8, 80, 4, 0), None, "header");
+        assert_eq!(board.agent_at(8, 80, 4, 7), None, "footer");
+        assert_eq!(board.agent_at(8, 80, 4, 1), Some(0));
+        assert_eq!(
+            board.click(8, 80, 4, 2),
+            Action::Jump {
+                session: "ww".into(),
+                pane_id: 2,
+            }
+        );
+        assert_eq!(board.selected, 1);
+        // chrome clicks neither jump nor move the selection
+        assert_eq!(board.click(8, 80, 4, 0), Action::None);
+        assert_eq!(board.selected, 1);
+        // rows behind an overlay take nothing: the pointer is not the frame
+        board.help_visible = true;
+        assert_eq!(board.click(8, 80, 4, 2), Action::None);
+        assert_eq!(board.selected, 1);
+    }
+
+    #[test]
+    fn hover_previews_without_moving_selected() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.set_list_geometry(80, 8);
+        board.selected = 0;
+        assert!(board.hover(8, 80, 4, 2));
+        assert_eq!(board.hovered, Some(1));
+        assert_eq!(board.selected, 0);
+        assert!(!board.hover(8, 80, 4, 2));
+        assert!(board.hover(8, 80, 4, 0), "chrome clears the preview");
+        assert_eq!(board.hovered, None);
+        assert_eq!(board.selected, 0);
+    }
+
+    #[test]
+    fn hover_clears_under_an_overlay() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.set_list_geometry(80, 8);
+        assert!(board.hover(8, 80, 4, 2));
+        board.help_visible = true;
+        assert!(board.hover(8, 80, 4, 2));
+        assert_eq!(board.hovered, None);
+        assert_eq!(board.selected, 0);
+    }
+
+    #[test]
+    fn hover_follows_the_agent_across_a_reshuffle() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.set_list_geometry(80, 8);
+        assert!(board.hover(8, 80, 4, 2));
+        let id = board.agents[1].id.clone();
+        let mut scan = String::from("META hooks=1\n");
+        for pane in 2..=8 {
+            scan.push_str(&format!(
+                "SCAN ww {pane} agent /Users/ww/.local/bin/agent --workspace /tmp/{pane}\n"
+            ));
+        }
+        board.ingest(&scan);
+        assert_eq!(board.hovered, Some(0));
+        assert_eq!(board.agents[0].id, id);
+    }
+
+    #[test]
+    fn click_wins_over_a_pending_flash_target() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.set_list_geometry(80, 8);
+        board.decide(Key::StartHint);
+        board.decide(Key::Input('n'));
+        // row 2 is pane 2, not whatever the flash would label
+        assert_eq!(
+            board.click(8, 80, 4, 2),
+            Action::Jump {
+                session: "ww".into(),
+                pane_id: 2,
+            }
+        );
+        assert!(!board.is_hinting());
+    }
+
+    #[test]
+    fn clicking_the_scrollbar_gutter_scrolls_without_jumping() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.set_list_geometry(80, 8);
+        // bottom of the track: scroll the view to the end, cursor rides along
+        assert_eq!(board.click(8, 80, 79, 6), Action::None);
+        assert_eq!(board.topline(), 2);
+        assert_eq!(board.selected, 2);
+    }
+
+    #[test]
     fn flash_ignores_a_unique_match_outside_the_viewport() {
         let mut board = Board::default();
         ingest_panes(&mut board, 8);
         board.set_list_geometry(80, 8);
-        board.selected = 7;
+        board.decide(Key::Last);
         let (start, end) = board.visible_range();
         assert!(start > 0);
         board.agents[0].tab_name = "Geo-DB".into();
@@ -2255,7 +2794,7 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         let mut board = Board::default();
         ingest_panes(&mut board, 8);
         board.set_list_geometry(80, 8);
-        board.selected = 7;
+        board.decide(Key::Last);
         let (start, end) = board.visible_range();
         assert!(start > 0);
         board.agents[0].tab_name = "Geo-DB".into();
@@ -2276,7 +2815,7 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         let mut board = Board::default();
         ingest_panes(&mut board, 8);
         board.set_list_geometry(80, 8);
-        board.selected = 7;
+        board.decide(Key::Last);
         let (start, end) = board.visible_range();
         assert!(start > 0);
         for agent in &mut board.agents {

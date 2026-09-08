@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 
-use crate::{theme::theme, Agent, Board, HintField, PickerFocus, Status};
+use crate::{theme::theme, Agent, Board, BodyLine, HintField, PickerFocus, Status};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PaintCtx<'a> {
@@ -101,13 +101,7 @@ pub fn render_board(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) 
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let (content, footer) = if area.height >= 3 {
-        let [content, footer] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
-        (content, Some(footer))
-    } else {
-        (area, None)
-    };
+    let (content, footer) = content_and_footer(area);
 
     if board.help_visible {
         render_help(content, buffer);
@@ -119,6 +113,18 @@ pub fn render_board(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) 
     }
     if let Some(footer) = footer {
         render_footer(board, home, footer, buffer);
+    }
+}
+
+/// Pane minus the footer row. Click coordinates are resolved against the same
+/// split the painter uses.
+fn content_and_footer(area: Rect) -> (Rect, Option<Rect>) {
+    if area.height >= 3 {
+        let [content, footer] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+        (content, Some(footer))
+    } else {
+        (area, None)
     }
 }
 
@@ -158,7 +164,11 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
             key("C-d  C-u  C-f  C-b"),
             Span::raw("half page / page"),
         ]),
-        Line::from(vec![key("e  Enter"), Span::raw("go")]),
+        Line::from(vec![key("e  Enter  click"), Span::raw("go")]),
+        Line::from(vec![
+            key("wheel  C-e  C-y"),
+            Span::raw("scroll, cursor stays"),
+        ]),
         Line::from(vec![key("s"), Span::raw("search")]),
         Line::from(vec![key("/  n  N"), Span::raw("find / next / prev")]),
         Line::from(vec![key("p  Tab"), Span::raw("picker / tip jump")]),
@@ -183,10 +193,7 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
 
     let cols = usize::from(area.width);
     let wide = cols >= 50;
-    let multi = board
-        .agents
-        .windows(2)
-        .any(|pair| pair[0].id.session != pair[1].id.session);
+    let multi = board.has_multiple_sessions();
     let hinting = board.is_hinting();
     let flash = (hinting && !board.hint_query().is_empty())
         || (board.is_searching() && !board.search_query().is_empty());
@@ -213,66 +220,204 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         return;
     }
 
-    let (start, end) = board.list_viewport(body.height, wide);
+    let lines = board.all_lines(wide);
+    let top = usize::try_from(board.topline())
+        .unwrap_or(0)
+        .min(lines.len());
+    let visible = &lines[top..(top + usize::from(body.height)).min(lines.len())];
 
-    let mut y = body.y;
-    let mut last_session = None;
-    for index in start..end {
-        let agent = &board.agents[index];
-        if multi && last_session != Some(agent.id.session.as_str()) {
-            if last_session.is_some() {
-                y = draw_separator(body, buffer, y);
+    // Backgrounds first, so a clipped row fills only its visible lines.
+    let sel = board.selected.min(board.agents.len().saturating_sub(1));
+    if let Some((first, last)) = agent_span(visible, sel) {
+        if !flash || board.agent_matches(sel) {
+            fill_span(body, first, last, theme().focus_fill, buffer);
+        }
+    }
+    if let Some(hovered) = board.hovered_row().filter(|h| *h != sel) {
+        if let Some((first, last)) = agent_span(visible, hovered) {
+            if !flash || board.agent_matches(hovered) {
+                fill_span(body, first, last, theme().hover_fill, buffer);
             }
-            y = draw_line(
-                body,
-                buffer,
-                y,
-                session_head(board, &agent.id.session, flash),
-            );
-            last_session = Some(agent.id.session.as_str());
-        }
-
-        let candidate = board.agent_matches(index);
-        let masked = flash && !candidate;
-        let activity = wide.then(|| activity_text(agent)).flatten();
-        let selected = index == board.selected;
-        if selected && !masked {
-            let height = if activity.is_some() { 2 } else { 1 };
-            let fill = Rect::new(
-                body.x,
-                y,
-                body.width,
-                height.min(body.bottom().saturating_sub(y)),
-            );
-            if fill.height > 0 {
-                buffer.set_style(fill, Style::default().bg(theme().focus_fill));
-            }
-        }
-        y = draw_line(
-            body,
-            buffer,
-            y,
-            agent_row(
-                board,
-                index,
-                selected,
-                cols,
-                home,
-                multi,
-                masked,
-                board.highlight_query(),
-                false,
-            ),
-        );
-        if let Some(text) = activity {
-            y = draw_line(body, buffer, y, activity_line(&text, cols, masked));
-        }
-        if y >= body.bottom() {
-            break;
         }
     }
 
-    render_scroll_arrows(body, start, end, board.agents.len(), buffer);
+    for (offset, line) in visible.iter().enumerate() {
+        let y = body.y + offset as u16;
+        match *line {
+            BodyLine::Gap(_) => {
+                draw_separator(body, buffer, y);
+            }
+            BodyLine::Session(index) => {
+                draw_line(
+                    body,
+                    buffer,
+                    y,
+                    session_head(board, &board.agents[index].id.session, flash),
+                );
+            }
+            BodyLine::Agent(index) => {
+                let candidate = board.agent_matches(index);
+                let masked = flash && !candidate;
+                draw_line(
+                    body,
+                    buffer,
+                    y,
+                    agent_row(
+                        board,
+                        index,
+                        index == sel,
+                        cols,
+                        home,
+                        multi,
+                        masked,
+                        board.highlight_query(),
+                        false,
+                    ),
+                );
+            }
+            BodyLine::Activity(index) => {
+                let Some(text) = activity_text(&board.agents[index]) else {
+                    continue;
+                };
+                let masked = flash && !board.agent_matches(index);
+                draw_line(body, buffer, y, activity_line(&text, cols, masked));
+            }
+        }
+    }
+
+    render_scrollbar(
+        body,
+        visible.len(),
+        board.list_lines_total(wide),
+        board.topline(),
+        buffer,
+    );
+}
+
+/// Body-relative line span an agent's own lines occupy in `visible`.
+fn agent_span(visible: &[BodyLine], index: usize) -> Option<(usize, usize)> {
+    let mut first = None;
+    let mut last = None;
+    for (offset, line) in visible.iter().enumerate() {
+        if line.agent() == Some(index) {
+            first.get_or_insert(offset);
+            last = Some(offset);
+        }
+    }
+    first.zip(last)
+}
+
+/// Fill `first..=last` body rows with `bg`, clipped to the body.
+fn fill_span(
+    area: Rect,
+    first: usize,
+    last: usize,
+    bg: ratatui::style::Color,
+    buffer: &mut Buffer,
+) {
+    let y = area.y.saturating_add(first as u16);
+    let height = (last - first + 1) as u16;
+    let fill = Rect::new(
+        area.x,
+        y,
+        area.width,
+        height.min(area.bottom().saturating_sub(y)),
+    );
+    if fill.height > 0 {
+        buffer.set_style(fill, Style::default().bg(bg));
+    }
+}
+
+const SCROLL_TRACK: &str = "│";
+const SCROLL_THUMB: &str = "█";
+
+/// Vertical scrollbar in the rightmost body column. `used` lines are painted
+/// out of `total`, and the first one sits `offset` lines into the list, so the
+/// thumb length and travel follow the real content, not the row count.
+fn render_scrollbar(area: Rect, used: usize, total: u32, offset: u32, buffer: &mut Buffer) {
+    if area.width == 0 || used == 0 {
+        return;
+    }
+    let used32 = u32::try_from(used).unwrap_or(u32::MAX);
+    if total <= used32 {
+        return;
+    }
+    let used16 = u16::try_from(used).unwrap_or(u16::MAX);
+    let thumb = u16::try_from((used32 * used32).div_ceil(total))
+        .unwrap_or(u16::MAX)
+        .clamp(1, used16);
+    let before = offset.min(total - used32);
+    let travel = used32.saturating_sub(u32::from(thumb));
+    let top = u16::try_from((u64::from(before) * u64::from(travel)) / u64::from(total - used32))
+        .unwrap_or(u16::MAX);
+    let x = area.right().saturating_sub(1);
+    let track = Style::default().fg(theme().separator);
+    let moving = Style::default().fg(theme().tip_bg);
+    for step in 0..used16 {
+        buffer.set_string(x, area.y.saturating_add(step), SCROLL_TRACK, track);
+    }
+    for step in 0..thumb {
+        buffer.set_string(
+            x,
+            area.y.saturating_add(top.saturating_add(step)),
+            SCROLL_THUMB,
+            moving,
+        );
+    }
+}
+
+/// List row under a click at zero-based `column`,`row` inside a `cols`×`rows`
+/// pane. Chrome — footer, header, session heads, dividers, help, picker —
+/// returns `None` so a stray click never jumps.
+pub fn agent_at(board: &Board, rows: u16, cols: u16, column: u16, row: u16) -> Option<usize> {
+    let body = list_body(board, rows, cols);
+    if column < body.x || column >= body.right() || row < body.y || row >= body.bottom() {
+        return None;
+    }
+    let wide = usize::from(body.width) >= 50;
+    let lines = board.all_lines(wide);
+    let top = usize::try_from(board.topline())
+        .unwrap_or(0)
+        .min(lines.len());
+    lines
+        .get(top.saturating_add(usize::from(row - body.y)))?
+        .agent()
+}
+
+/// A click on the scrollbar gutter scrolls the view: return the target
+/// topline. `None` when the bar is not up or the click is outside it.
+pub fn scrollbar_at(board: &Board, rows: u16, cols: u16, column: u16, row: u16) -> Option<u32> {
+    let body = list_body(board, rows, cols);
+    let gutter = body.right().checked_sub(1)?;
+    if column != gutter || row < body.y || row >= body.bottom() {
+        return None;
+    }
+    let wide = usize::from(body.width) >= 50;
+    let total = board.list_lines_total(wide);
+    let body_lines = u32::from(body.height);
+    if total <= body_lines || body_lines < 2 {
+        return None;
+    }
+    let pos = u32::from(row - body.y).min(body_lines - 1);
+    let max_top = total - body_lines;
+    Some(pos * max_top / (body_lines - 1))
+}
+
+/// List body inside a `cols`×`rows` pane: below the header and the hooks
+/// warning, above the footer. Both the painter and the pointer code come
+/// here, so clicks land on the frame the eye saw.
+fn list_body(board: &Board, rows: u16, cols: u16) -> Rect {
+    let (content, _) = content_and_footer(Rect::new(0, 0, cols, rows));
+    let mut y = content.y.saturating_add(1);
+    if !board.hooks_installed {
+        y = y.saturating_add(1);
+    }
+    Rect::new(
+        content.x,
+        y,
+        content.width,
+        content.bottom().saturating_sub(y),
+    )
 }
 
 fn render_scroll_arrows(area: Rect, start: usize, end: usize, total: usize, buffer: &mut Buffer) {
@@ -643,6 +788,9 @@ fn agent_row(
                 .fg(theme().focus)
                 .add_modifier(Modifier::BOLD),
         ));
+    } else if !masked && board.hovered_row() == Some(index) {
+        // Same mark as the cursor, dim: a preview, not the selection.
+        spans.push(Span::styled("› ", Style::default().fg(theme().separator)));
     } else {
         spans.push(Span::raw("  "));
     }
@@ -1013,7 +1161,8 @@ fn strip_ansi(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        fmt_ago, fmt_elapsed, frame_patch, paint, paint_to_size, picker_box, strip_ansi, PaintCtx,
+        agent_at, fmt_ago, fmt_elapsed, frame_patch, paint, paint_to_size, picker_box, strip_ansi,
+        PaintCtx,
     };
     use crate::{Action, Agent, AgentId, Board, HintField, Key, Status};
     use ratatui::layout::Rect;
@@ -1038,10 +1187,163 @@ mod tests {
         }
     }
 
+    /// An agent without an activity line, so body geometry stays one row.
+    fn plain_agent(session: &str, pane_id: u32) -> Agent {
+        let mut agent = agent();
+        agent.id = AgentId {
+            session: session.into(),
+            pane_id,
+        };
+        agent.detail.clear();
+        agent
+    }
+
     fn painted(board: &Board, rows: usize, cols: usize, home: &str) -> String {
         paint(board, PaintCtx { rows, cols, home })
             .texts()
             .join("\n")
+    }
+
+    #[test]
+    fn scrollbar_appears_only_when_the_list_overflows() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        board.agents = (1..=3).map(|pane| plain_agent("ww", pane)).collect();
+        let text = painted(&board, 8, 80, "");
+        assert!(!text.contains('│'), "fits, no track:\n{text}");
+        assert!(!text.contains('█'), "fits, no thumb:\n{text}");
+
+        board.agents = (1..=8).map(|pane| plain_agent("ww", pane)).collect();
+        let text = painted(&board, 8, 80, "");
+        // 6 body lines out of 8: a 5-cell thumb inside a 6-cell track
+        assert_eq!(text.matches('█').count(), 5, "thumb:\n{text}");
+        assert_eq!(text.matches('│').count(), 1, "track:\n{text}");
+    }
+
+    #[test]
+    fn scrollbar_thumb_travels_with_the_view() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        board.agents = (1..=8).map(|pane| plain_agent("ww", pane)).collect();
+        board.topline = 2; // scrolled two lines down
+        let text = painted(&board, 8, 80, "");
+        let lines: Vec<&str> = text.lines().collect();
+        // body rows are lines 1..6; the thumb starts one row down
+        assert!(lines[1].ends_with('│'), "top track:\n{text}");
+        assert!(lines[2].ends_with('█'), "thumb start:\n{text}");
+    }
+
+    #[test]
+    fn hover_mark_hides_behind_an_overlay() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        board.agents = (1..=3).map(|pane| plain_agent("ww", pane)).collect();
+        board.hovered = Some(1);
+        board.help_visible = true;
+        let text = painted(&board, 8, 80, "");
+        assert_eq!(board.hovered_row(), None);
+        assert!(!text.contains('›'), "overlay owns the frame:\n{text}");
+    }
+
+    #[test]
+    fn a_window_may_start_inside_a_two_line_row() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        let mut wide_row = agent(); // detail "Shell cargo test --lib"
+        wide_row.id.pane_id = 2;
+        board.agents = vec![plain_agent("ww", 1), wide_row, plain_agent("ww", 3)];
+        // start on the second line of the wide row: its title is scrolled off
+        board.topline = 2;
+        let text = painted(&board, 6, 80, "");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines[1].contains('└'),
+            "the top body line is the activity line, not the title:\n{text}"
+        );
+        assert!(
+            !lines[1].contains("Add retry"),
+            "the clipped title must not leak into the activity line:\n{text}"
+        );
+    }
+
+    #[test]
+    fn agent_at_hits_rows_but_not_chrome() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        let mut working = agent();
+        working.id = AgentId {
+            session: "ww".into(),
+            pane_id: 3,
+        };
+        board.agents = vec![plain_agent("lp", 8), working, plain_agent("ww", 4)];
+        // 80x8: header line 0, body lines 1..6 =
+        // lp head, lp row, gap, ww head, ww 3, ww 3 activity
+        let hit = |row: u16| agent_at(&board, 8, 80, 4, row);
+        assert_eq!(hit(0), None, "header");
+        assert_eq!(hit(1), None, "session head");
+        assert_eq!(hit(2), Some(0), "lp row");
+        assert_eq!(hit(3), None, "gap");
+        assert_eq!(hit(4), None, "ww head");
+        assert_eq!(hit(5), Some(1), "agent row");
+        assert_eq!(hit(6), Some(1), "activity line of the same agent");
+        assert_eq!(hit(7), None, "footer");
+        assert_eq!(agent_at(&board, 8, 80, 80, 5), None, "past the edge");
+    }
+
+    #[test]
+    fn hover_does_not_steal_the_select_mark() {
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        board.agents = (1..=8).map(|pane| plain_agent("ww", pane)).collect();
+        board.selected = 0;
+        board.hovered = Some(1);
+        let frame = paint(
+            &board,
+            PaintCtx {
+                rows: 8,
+                cols: 80,
+                home: "",
+            },
+        );
+        let text = frame.texts().join("\n");
+        let raw = frame.lines.join("\n");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines[1].starts_with('›'),
+            "selected keeps the mark:\n{text}"
+        );
+        assert!(
+            lines[2].starts_with('›'),
+            "hover previews with the same mark:\n{text}"
+        );
+        assert!(lines[3].starts_with("  "), "other rows stay bare:\n{text}");
+        // same glyph, dim colour and no bold: the preview is not the cursor
+        let cursor = raw.lines().nth(1).unwrap_or_default();
+        let preview = raw.lines().nth(2).unwrap_or_default();
+        assert!(
+            cursor.starts_with("\u{1b}[0m\u{1b}[38;2;228;212;255m"),
+            "cursor is focus:\n{raw}"
+        );
+        assert!(
+            preview.starts_with("\u{1b}[0m\u{1b}[38;2;97;104;124m"),
+            "preview is separator-dim:\n{raw}"
+        );
+        assert!(
+            !preview.contains("\u{1b}[1m›"),
+            "preview is not bold:\n{raw}"
+        );
     }
 
     #[test]
@@ -1619,7 +1921,7 @@ mod tests {
     }
 
     #[test]
-    fn list_viewport_keeps_selected_row_visible_with_session_heads() {
+    fn paint_keeps_selected_row_visible_with_session_heads() {
         let mut board = Board::default();
         let mut scan = String::from("META hooks=1\n");
         for pane in 1..=6 {
@@ -1629,6 +1931,7 @@ mod tests {
         }
         board.ingest(&scan);
         board.selected = 5;
+        board.topline = 2; // keep pane 6 on screen in a four-line body
         let text = painted(&board, 6, 80, "ww");
         assert!(
             text.lines().any(|line| line.starts_with('›')),

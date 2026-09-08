@@ -6,6 +6,9 @@
   --focus: #e4d4ff;
   --focus-fill: #3a2f52;
 
+  /* hover：比 focus-fill 浅一档，和选中条叠上时被盖住 */
+  --hover-fill: #2a2540;
+
   /* session：◆ 组头、底栏 session 药丸 */
   --session: #69d0c4;
 

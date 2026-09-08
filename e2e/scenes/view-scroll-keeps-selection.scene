@@ -1,0 +1,54 @@
+# Scrolling keeps the cursor's screen line: the view moves and the cursor
+# rides along at the same offset (nvim C-d/C-u, not C-e/C-y).
+size 80 8
+meta hooks=1
+scan ww 1 /tmp/1
+scan ww 2 /tmp/2
+scan ww 3 /tmp/3
+scan ww 4 /tmp/4
+scan ww 5 /tmp/5
+scan ww 6 /tmp/6
+scan ww 7 /tmp/7
+scan ww 8 /tmp/8
+scan ww 9 /tmp/9
+scan ww 10 /tmp/10
+scan ww 11 /tmp/11
+scan ww 12 /tmp/12
+place ww 1 0 notes row1
+place ww 2 0 notes row2
+place ww 3 0 notes row3
+place ww 4 0 notes row4
+place ww 5 0 notes row5
+place ww 6 0 notes row6
+place ww 7 0 notes row7
+place ww 8 0 notes row8
+place ww 9 0 notes row9
+place ww 10 0 notes row10
+place ww 11 0 notes row11
+place ww 12 0 notes row12
+
+# six of twelve rows fit in a 80x8 body
+expect screen contains row1
+expect screen excludes row7
+
+# cursor to the last row: the window shows the last six (rows 7..12)
+key G
+expect selected ww 12
+expect screen contains row12
+expect screen excludes row6
+
+# scroll up: the view rises and the cursor keeps its screen line (the bottom)
+scroll -2
+expect selected ww 10
+expect screen contains row6
+expect screen excludes row12
+
+# scroll up more, to the very top
+scroll -4
+expect selected ww 6
+expect screen contains row1
+expect screen excludes row7
+
+# nothing further up to reveal
+scroll -1
+expect selected ww 6

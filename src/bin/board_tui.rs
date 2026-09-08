@@ -11,7 +11,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::cursor;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::queue;
 use crossterm::style::{Attribute, Colors, Print, SetAttribute, SetColors};
@@ -40,6 +43,11 @@ const TICK_EVERY: Duration = Duration::from_secs(1);
 struct App {
     board: Board,
     home: String,
+    /// Last pane size, so clicks can be resolved against the painted frame.
+    view: Size,
+    /// Last pointer position. Scrolling slides rows under a still pointer,
+    /// so the hover preview has to be resolved again.
+    pointer: Option<(u16, u16)>,
     last_reconcile: Instant,
     last_tick: Instant,
     scan_mtime: Option<SystemTime>,
@@ -105,6 +113,8 @@ impl App {
         Self {
             board: Board::default(),
             home: std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default(),
+            view: Size::new(0, 0),
+            pointer: None,
             last_reconcile: now - SCAN_EVERY,
             last_tick: now,
             scan_mtime: None,
@@ -153,20 +163,21 @@ impl App {
     fn run(&mut self, terminal: &mut HostTerminal) -> io::Result<()> {
         let mut dirty = true;
         loop {
+            if let Ok(size) = terminal.size() {
+                dirty |= size != self.view;
+                self.view = size;
+            }
             if dirty {
-                if let Ok(size) = terminal.size() {
-                    self.board
-                        .set_page_len(visible_page(size.width, size.height));
-                    self.board.set_list_geometry(size.width, size.height);
-                }
+                self.board
+                    .set_list_geometry(self.view.width, self.view.height);
                 draw(terminal, &self.board, &self.home)?;
                 dirty = false;
             }
             if event::poll(POLL)? {
-                match self.drain_keys()? {
-                    DrainKeys::Quit => return Ok(()),
-                    DrainKeys::Dirty => dirty = true,
-                    DrainKeys::Idle => {}
+                match self.drain_input()? {
+                    DrainInput::Quit => return Ok(()),
+                    DrainInput::Dirty => dirty = true,
+                    DrainInput::Idle => {}
                 }
             }
             dirty |= self.take_store();
@@ -186,7 +197,7 @@ impl App {
         }
     }
 
-    fn drain_keys(&mut self) -> io::Result<DrainKeys> {
+    fn drain_input(&mut self) -> io::Result<DrainInput> {
         let mut dirty = false;
         loop {
             match event::read()? {
@@ -195,10 +206,15 @@ impl App {
                 {
                     match self.handle_key(key) {
                         Loop::Changed => dirty = true,
-                        Loop::Quit => return Ok(DrainKeys::Quit),
+                        Loop::Quit => return Ok(DrainInput::Quit),
                         Loop::Ignored => {}
                     }
                 }
+                Event::Mouse(mouse) => match self.handle_mouse(mouse) {
+                    Loop::Changed => dirty = true,
+                    Loop::Quit => return Ok(DrainInput::Quit),
+                    Loop::Ignored => {}
+                },
                 Event::Resize(_, _) => dirty = true,
                 _ => {}
             }
@@ -207,13 +223,24 @@ impl App {
             }
         }
         Ok(if dirty {
-            DrainKeys::Dirty
+            DrainInput::Dirty
         } else {
-            DrainKeys::Idle
+            DrainInput::Idle
         })
     }
 
     fn handle_key(&mut self, event: KeyEvent) -> Loop {
+        // C-e / C-y: same move-together scroll as the wheel (spotlight holds
+        // its screen line; the list flows under it).
+        if let Some(delta) = view_scroll_delta(event) {
+            let moved = self.board.scroll_view(delta);
+            let preview = self.refresh_hover();
+            return if moved || preview {
+                Loop::Changed
+            } else {
+                Loop::Ignored
+            };
+        }
         let mapped = if self.board.is_picking() {
             map_picker_key(event)
         } else {
@@ -231,6 +258,67 @@ impl App {
             }
             Action::None => Loop::Changed,
         }
+    }
+
+    /// Pointer input: a click jumps to the row under it, motion previews
+    /// that row, the wheel scrolls the view. Hover never steals `selected`.
+    /// Right button is ignored.
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> Loop {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                match self
+                    .board
+                    .click(self.view.height, self.view.width, mouse.column, mouse.row)
+                {
+                    Action::Jump { session, pane_id } => {
+                        persist_done_seen(&self.board, &session, pane_id);
+                        send_jump(&session, pane_id);
+                        Loop::Changed
+                    }
+                    Action::None => Loop::Changed,
+                    Action::Dismiss => Loop::Quit,
+                }
+            }
+            MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                self.pointer = Some((mouse.column, mouse.row));
+                if self
+                    .board
+                    .hover(self.view.height, self.view.width, mouse.column, mouse.row)
+                {
+                    Loop::Changed
+                } else {
+                    Loop::Ignored
+                }
+            }
+            // The wheel scrolls the view. Three lines per notch matches nvim's
+            // `mousescroll=ver:3` — a trackpad quantizes smooth swipes into
+            // discrete wheel ticks, and one line a tick is easy to miss.
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                    -3
+                } else {
+                    3
+                };
+                let moved = self.board.scroll_view(delta);
+                let preview = self.refresh_hover();
+                if moved || preview {
+                    Loop::Changed
+                } else {
+                    Loop::Ignored
+                }
+            }
+            _ => Loop::Ignored,
+        }
+    }
+
+    /// Rows slid under a still pointer: re-resolve the hover so the preview
+    /// keeps sitting under the cursor instead of riding the old row away.
+    fn refresh_hover(&mut self) -> bool {
+        let Some((column, row)) = self.pointer else {
+            return false;
+        };
+        self.board
+            .hover(self.view.height, self.view.width, column, row)
     }
 
     fn take_store(&mut self) -> bool {
@@ -289,7 +377,7 @@ enum Loop {
     Ignored,
 }
 
-enum DrainKeys {
+enum DrainInput {
     Quit,
     Dirty,
     Idle,
@@ -312,6 +400,18 @@ fn spawn_reconcile() {
         cmd.process_group(0);
     }
     let _ = cmd.spawn();
+}
+
+/// C-e / C-y: the view-scroll pair. Positive reveals later rows.
+fn view_scroll_delta(event: KeyEvent) -> Option<i32> {
+    if event.modifiers != KeyModifiers::CONTROL {
+        return None;
+    }
+    match event.code {
+        KeyCode::Char('e') => Some(1),
+        KeyCode::Char('y') => Some(-1),
+        _ => None,
+    }
 }
 
 fn map_key(event: KeyEvent, hinting: bool, searching: bool) -> Option<Key> {
@@ -403,12 +503,6 @@ fn send_jump(session: &str, pane_id: u32) {
 /// Draw through ratatui's cell diff. The PTY is still the only pipe out of
 /// a Zellij pane — there is no direct Metal/iTerm2 handle — but we no longer
 /// stitch ANSI lines ourselves.
-fn visible_page(width: u16, height: u16) -> usize {
-    let per = if width >= 50 { 2 } else { 1 };
-    let budget = usize::from(height.saturating_sub(4));
-    (budget / per).max(1)
-}
-
 fn draw(terminal: &mut HostTerminal, board: &Board, home: &str) -> io::Result<()> {
     terminal.draw(|frame| {
         let area = frame.area();
@@ -448,12 +542,22 @@ fn dir_changed(path: &Path, seen: &mut Option<SystemTime>) -> bool {
 fn setup() -> io::Result<HostTerminal> {
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, cursor::Hide)?;
+    // Mouse mode is what lets a click jump; 1003 adds motion so hover
+    // can paint without a button down. Restore must undo both or the
+    // shell keeps eating clicks after the board closes.
+    execute!(out, EnterAlternateScreen, cursor::Hide, EnableMouseCapture)?;
+    write!(out, "\x1b[?1003h")?;
     Terminal::new(PtyBackend { out })
 }
 
 fn restore(terminal: &mut HostTerminal) -> io::Result<()> {
-    execute!(terminal.backend_mut(), cursor::Show, LeaveAlternateScreen)?;
+    write!(terminal.backend_mut().out, "\x1b[?1003l")?;
+    execute!(
+        terminal.backend_mut(),
+        cursor::Show,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     disable_raw_mode()
 }
 
