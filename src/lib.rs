@@ -1646,6 +1646,11 @@ impl Board {
             if !keep_row(&argv) {
                 continue;
             }
+            // Identity is (session, pane): a second SCAN line for a pane
+            // already built this pass must not become a second row.
+            if next.iter().any(|agent: &Agent| agent.id == row.id) {
+                continue;
+            }
             let prior = previous.iter().find(|agent| agent.id == row.id);
             next.push(Agent {
                 id: row.id,
@@ -1816,6 +1821,29 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
     fn dismiss_closes_the_board() {
         let mut board = Board::default();
         assert_eq!(board.decide(Key::Dismiss), Action::Dismiss);
+    }
+
+    #[test]
+    fn one_pane_never_renders_twice() {
+        let mut board = Board::default();
+        board.ingest(
+            "META hooks=1\n\
+             SCAN ww 0 agent /Users/ww/.local/bin/agent --workspace /tmp/first\n\
+             SCAN ww 0 agent /Users/ww/.local/bin/agent --workspace /tmp/second\n\
+             SCAN ww 2 codebuddy codebuddy\n\
+             SCAN ww 2 opencode /opt/homebrew/bin/opencode\n",
+        );
+        assert_eq!(board.agents.len(), 2, "{:?}", board.agents);
+        assert_eq!(
+            board.agents[0].id,
+            AgentId {
+                session: "ww".into(),
+                pane_id: 0
+            }
+        );
+        // The first SCAN line for a pane wins; later ones drop.
+        assert_eq!(board.agents[0].workspace.as_deref(), Some("/tmp/first"));
+        assert_eq!(board.agents[1].tool, "codebuddy");
     }
 
     #[test]

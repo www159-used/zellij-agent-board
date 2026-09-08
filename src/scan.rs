@@ -22,7 +22,7 @@ pub fn scan_host_text() -> String {
     }
     let args_by_pid = ps_args(&pids);
     let env_by_pid = ps_env(&pids);
-    let mut live_keys = Vec::new();
+    let mut live_keys: HashSet<String> = HashSet::new();
     let mut panes_by_session: BTreeMap<String, Option<HashSet<u32>>> = BTreeMap::new();
     for pid in &pids {
         let Some(args) = args_by_pid.get(pid) else {
@@ -58,8 +58,14 @@ pub fn scan_host_text() -> String {
         if !pane_still_open(pane, listed.as_ref()) {
             continue;
         }
-        out.push_str(&format!("SCAN {session} {pane} {comm} {args}\n"));
+        // One Agent is one pane: a wrapper and its re-exec'd child, or a
+        // second CLI spawned inside the same pane, share the key. Pids
+        // ascend, so the process the pane launched wins.
         let key = format!("{session}-{pane}");
+        if !live_keys.insert(key.clone()) {
+            continue;
+        }
+        out.push_str(&format!("SCAN {session} {pane} {comm} {args}\n"));
         if let Some(hook) = read_spool(&key) {
             out.push_str(&hook);
             if !hook.ends_with('\n') {
@@ -78,7 +84,6 @@ pub fn scan_host_text() -> String {
                 out.push('\n');
             }
         }
-        live_keys.push(key);
     }
     // A failed match (0 live keys) must not wipe hook history.
     if !live_keys.is_empty() {
@@ -399,11 +404,11 @@ fn read_started(key: &str) -> Option<String> {
     std::fs::read_to_string(started_dir().join(key)).ok()
 }
 
-fn prune_spool(live_keys: &[String]) {
+fn prune_spool(live_keys: &HashSet<String>) {
     prune_dir(&spool_dir(), live_keys);
 }
 
-fn prune_dir(dir: &Path, live_keys: &[String]) {
+fn prune_dir(dir: &Path, live_keys: &HashSet<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -415,7 +420,7 @@ fn prune_dir(dir: &Path, live_keys: &[String]) {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !live_keys.iter().any(|key| key == name) {
+        if !live_keys.contains(name) {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -493,6 +498,18 @@ mod tests {
         }
         let text = super::scan_host_text();
         assert!(text.lines().any(|line| line.starts_with("SCAN ")), "{text}");
+        let mut panes = std::collections::HashSet::new();
+        for line in text.lines().filter(|line| line.starts_with("SCAN ")) {
+            let key = line
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                panes.insert(key),
+                "two SCAN rows for one pane: {line}\n{text}"
+            );
+        }
     }
 
     #[test]
