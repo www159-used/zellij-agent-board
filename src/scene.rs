@@ -37,6 +37,8 @@ pub fn run_scene(source: &str) -> Result<(), SceneError> {
             }
             "place" => run.place(&args, line_no)?,
             "key" => run.key(&args, line_no)?,
+            "click" => run.click(&args, line_no)?,
+            "scroll" => run.scroll(&args, line_no)?,
             "tick" => run.tick(&args, line_no)?,
             "expect" => run.expect(&args, line_no)?,
             other => {
@@ -74,7 +76,6 @@ impl Runner {
 
     fn paint(&mut self) {
         self.board.set_list_geometry(self.cols, self.rows);
-        self.board.set_page_len(visible_page(self.cols, self.rows));
         self.frame = paint_to_size(&self.board, "", self.rows, self.cols).texts();
     }
 
@@ -124,6 +125,27 @@ impl Runner {
         self.flush();
         let key = parse_key(args, line)?;
         self.last = self.board.decide(key);
+        self.paint();
+        Ok(())
+    }
+
+    fn click(&mut self, args: &[&str], line: usize) -> Result<(), SceneError> {
+        exact(args, 2, line, "click ROW COL")?;
+        let row: u16 = parse_num(args.first(), line, "row")?;
+        let column: u16 = parse_num(args.get(1), line, "col")?;
+        self.flush();
+        self.last = self.board.click(self.rows, self.cols, column, row);
+        self.paint();
+        Ok(())
+    }
+
+    /// Scroll the view the way the wheel does: negative reveals earlier rows.
+    fn scroll(&mut self, args: &[&str], line: usize) -> Result<(), SceneError> {
+        exact(args, 1, line, "scroll ROWS")?;
+        let delta: i32 = parse_num(args.first(), line, "rows")?;
+        self.flush();
+        self.board.scroll_view(delta);
+        self.last = Action::None;
         self.paint();
         Ok(())
     }
@@ -189,12 +211,6 @@ impl Runner {
             }),
         }
     }
-}
-
-fn visible_page(width: u16, height: u16) -> usize {
-    let per = if width >= 50 { 2 } else { 1 };
-    let budget = usize::from(height.saturating_sub(4));
-    (budget / per).max(1)
 }
 
 fn protocol_line(verb: &str, args: &[&str], line: usize) -> Result<String, SceneError> {

@@ -11,6 +11,7 @@ static CURRENT: Mutex<Option<Theme>> = Mutex::new(None);
 pub struct Theme {
     pub focus: Color,
     pub focus_fill: Color,
+    pub hover_fill: Color,
     pub session: Color,
     pub task: Color,
     pub pin_mark: Color,
@@ -44,6 +45,7 @@ impl Theme {
         Some(Self {
             focus: try_color(vars, "focus")?,
             focus_fill: try_color(vars, "focus-fill")?,
+            hover_fill: try_color(vars, "hover-fill")?,
             session: try_color(vars, "session")?,
             task: try_color(vars, "task")?,
             pin_mark: try_color(vars, "pin-mark")?,
@@ -171,6 +173,7 @@ mod tests {
         assert_eq!(theme.session, Color::Rgb(105, 208, 196));
         assert_eq!(theme.task, Color::Rgb(0xe4, 0xd4, 0xff));
         assert_eq!(theme.focus_fill, Color::Rgb(0x3a, 0x2f, 0x52));
+        assert_eq!(theme.hover_fill, Color::Rgb(0x2a, 0x25, 0x40));
         assert_eq!(theme.separator, theme.card_border);
         assert_eq!(theme.tip_typed, theme.focus);
         assert_eq!(theme.tip_mark_fg, Color::Rgb(0x16, 0x1a, 0x22));

@@ -1,0 +1,8 @@
+version 1
+nonce 1788761540934
+origin_session zab
+portal_tab pc_tail
+ssh_target pc_tail
+remote_session ww
+origin_tab 0
+remote_tab agent

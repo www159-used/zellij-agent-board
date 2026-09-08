@@ -1,0 +1,47 @@
+# Homepage scrollbar and click-to-jump. At 80x8 the list body owns rows 1..6,
+# so eight rows cannot all fit: the rightmost column grows a track with a short
+# thumb, and clicking a row jumps there with no Enter.
+size 80 16
+meta hooks=1
+scan ww 1 /tmp/1
+scan ww 2 /tmp/2
+scan ww 3 /tmp/3
+scan ww 4 /tmp/4
+scan ww 5 /tmp/5
+scan ww 6 /tmp/6
+scan ww 7 /tmp/7
+scan ww 8 /tmp/8
+place ww 1 0 notes notes
+place ww 2 0 notes notes
+place ww 3 0 notes notes
+place ww 4 0 notes notes
+place ww 5 0 notes notes
+place ww 6 0 notes notes
+place ww 7 0 notes notes
+place ww 8 0 notes notes
+
+# eight rows still fit here, so nothing scrolls and no bar is painted
+expect screen excludes │
+expect screen excludes █
+
+size 80 8
+expect selected ww 1
+expect screen contains │
+expect screen contains █
+
+# chrome never jumps: header line and footer line
+click 0 4
+expect action none
+click 7 4
+expect action none
+
+# body row 2 is the second agent; the click targets it without Enter
+click 2 4
+expect selected ww 2
+expect action jump ww 2
+
+# the gutter itself scrolls the view: the click rides the cursor to the end
+# of the list without jumping
+click 6 79
+expect action none
+expect selected ww 4
