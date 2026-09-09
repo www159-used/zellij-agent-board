@@ -1,4 +1,4 @@
-# Each catalog family keeps its own 2-char badge.
+# Catalog family badges (CA / CB / CC / OC). CodeBuddy is CB; Cursor stays CA.
 size 80 16
 meta hooks=1
 scan ww 3 /tmp/ww

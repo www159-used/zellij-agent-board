@@ -421,6 +421,7 @@ impl Board {
         let before = self.selected;
         let action = self.decide_key(key);
         if self.selected != before {
+            self.scroll_anchor = self.agent_title_line(self.selected, self.wide_list);
             self.clamp_view();
         }
         action
@@ -743,9 +744,10 @@ impl Board {
         (self.selected, self.topline) != before
     }
 
-    /// Keep `topline` inside the list and the selected row fully visible. The
-    /// cursor moves, then this scrolls only as far as it must — nvim's
-    /// minimal adjust at `scrolloff=0`.
+    /// Keep `topline` so the spotlight line stays on screen. The spotlight is
+    /// `scroll_anchor` when it still sits inside the selected agent; otherwise
+    /// the agent's title row. Pinning the whole Gap/◆/activity block used to
+    /// freeze the wheel on the first multi-session row (`upper == 0`).
     fn clamp_view(&mut self) {
         if self.list_height == 0 || self.agents.is_empty() {
             return;
@@ -753,11 +755,37 @@ impl Board {
         let wide = self.wide_list;
         let body = u32::from(self.list_height);
         let max_top = self.list_lines_total(wide).saturating_sub(body);
-        let top = self.lines_before(self.selected, wide);
-        let bottom = self.lines_before(self.selected + 1, wide);
-        let lower = bottom.saturating_sub(body);
-        let upper = top.min(max_top);
+        let block_top = self.lines_before(self.selected, wide);
+        let block_end = self
+            .lines_before(self.selected + 1, wide)
+            .max(block_top.saturating_add(1));
+        let cursor = if self.scroll_anchor >= block_top && self.scroll_anchor < block_end {
+            self.scroll_anchor
+        } else {
+            self.agent_title_line(self.selected, wide)
+        };
+        // Cursor visible ⟺ topline ≤ cursor < topline + body.
+        let lower = cursor.saturating_add(1).saturating_sub(body);
+        let upper = cursor.min(max_top);
         self.topline = self.topline.clamp(lower, upper);
+    }
+
+    /// Document line of the agent's title row (after any Gap / session head).
+    fn agent_title_line(&self, index: usize, wide: bool) -> u32 {
+        let index = index.min(self.agents.len().saturating_sub(1));
+        let mut line = self.lines_before(index, wide);
+        if self.has_multiple_sessions() {
+            let new_session =
+                index == 0 || self.agents[index].id.session != self.agents[index - 1].id.session;
+            if new_session {
+                if index > 0 {
+                    line = line.saturating_add(1); // Gap
+                }
+                line = line.saturating_add(1); // Session
+            }
+        }
+        let _ = wide;
+        line
     }
 
     pub(crate) fn has_multiple_sessions(&self) -> bool {
@@ -928,16 +956,15 @@ impl Board {
         let max_top = self.list_lines_total(wide).saturating_sub(body);
         self.topline = top.min(max_top);
         let view_end = self.topline.saturating_add(body);
-        let row_top = self.lines_before(self.selected, wide);
-        let row_end = self
-            .lines_before(self.selected + 1, wide)
-            .max(row_top.saturating_add(1));
-        if row_top < self.topline {
+        let title = self.agent_title_line(self.selected, wide);
+        // Snap by title line, not the whole Gap/◆ block. Picking the bottom
+        // of the window for a selection that sat below used to land on a
+        // later session head whose title still sat past `view_end`, so the
+        // following `clamp_view` (resize/paint) shoved topline back down.
+        if title < self.topline || title >= view_end {
             self.selected = self.agent_for_line(self.topline, wide);
-        } else if row_end > view_end {
-            self.selected = self.agent_for_line(view_end.saturating_sub(1), wide);
         }
-        self.scroll_anchor = self.lines_before(self.selected, wide);
+        self.scroll_anchor = self.agent_title_line(self.selected, wide);
     }
 
     fn clear_motion(&mut self) {
@@ -2870,6 +2897,61 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
     }
 
     #[test]
+
+    fn multisession_wheel_from_top_reaches_max_top() {
+        // Opening the board in a foreign session paints Gap/◆ chrome. clamp_view
+        // used to pin topline to lines_before(selected)==0 on the first row, so
+        // the wheel could not leave the top (and never reached the bottom).
+        let mut board = Board::default();
+        let mut scan = String::from("META hooks=1\n");
+        for pane in 1..=12 {
+            scan.push_str(&format!(
+                "SCAN ww {pane} agent /tmp/a --workspace /tmp/a{pane}\n"
+            ));
+        }
+        for pane in 1..=12 {
+            scan.push_str(&format!(
+                "SCAN lp {pane} agent /tmp/b --workspace /tmp/b{pane}\n"
+            ));
+        }
+        board.ingest(&scan);
+        for agent in &mut board.agents {
+            if agent.id.pane_id % 2 == 0 {
+                agent.detail = "Shell x".into();
+            }
+        }
+        board.set_list_geometry(80, 8);
+        board.selected = 0;
+        board.topline = 0;
+        board.scroll_anchor = board.lines_before(0, true);
+        let max_top = board
+            .list_lines_total(true)
+            .saturating_sub(u32::from(board.list_height));
+        assert!(max_top > 5, "max_top={max_top}");
+        let mut stuck = 0u32;
+        let mut last = board.topline();
+        for step in 0..500 {
+            let moved = board.scroll_view(1);
+            if board.topline() >= max_top {
+                return;
+            }
+            if !moved || board.topline() == last {
+                stuck += 1;
+                assert!(
+                    stuck <= 5,
+                    "stuck at topline={top} max_top={max_top} selected={sel} step={step}",
+                    top = board.topline(),
+                    sel = board.selected,
+                );
+            } else {
+                stuck = 0;
+            }
+            last = board.topline();
+        }
+        panic!("never reached max_top={max_top}");
+    }
+
+    #[test]
     fn gutter_track_is_not_a_dead_zone_near_the_top() {
         // Slight overflow → fat thumb. A click one cell below the top must
         // place the thumb top there and jump to max_top, not stay on 0.
@@ -3216,5 +3298,4 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(board.picker_label(2), Some("d"));
         assert_eq!(board.picker_label(3), None);
     }
-
 }

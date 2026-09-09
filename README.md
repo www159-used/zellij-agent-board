@@ -48,7 +48,7 @@ cargo fmt --check
 cargo lint
 cargo test --lib
 cargo e2e
-cargo run --bin board-tui -- --replay e2e/scenes/jump-first-row.scene
+cargo run --bin board-tui -- --replay e2e/scenes/slash-search-moves.scene
 ./scripts/e2e-zellij.sh
 cargo wasm
 cargo build --release --bin board-tui

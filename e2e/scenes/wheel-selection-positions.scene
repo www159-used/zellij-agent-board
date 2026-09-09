@@ -1,7 +1,10 @@
-# Gutter clicks on a dense multi-session board (tabs + activity), the shape
-# seen when opening the board from another session. Bottom track must reach
-# max topline; returning to the top must not leave clamp fighting the jump.
-size 80 40
+# Wheel (`scroll` → scroll_view): move-together, not gutter jump. Host notches
+# are ±3. Dense multi-session board (tabs + activity) matches opening the
+# board from another session.
+#
+# Covers: top/mid/bottom spotlight × notch size, ±1 screen-line hold, edges,
+# G then scroll, and top→max in one burst (merged former view-scroll scene).
+size 80 8
 meta hooks=1
 scan daily 1 /tmp/daily
 scan daily 2 /tmp/daily2
@@ -43,44 +46,66 @@ hook lp 1 preToolUse Shell pytest
 hook mysql_syncer 1 preToolUse Shell mysql
 hook zab 1 preToolUse Shell cargo test --lib
 
-# tall pane fits the whole board — no gutter
-expect scrollbar none
-expect topline 0
-expect screen contains daily-review
-expect screen contains zab-notes
-
-size 80 8
-# 31 lines / 6 body → max topline 25; short thumb at the top
+# --- top + one notch ---
 expect selected daily 1
 expect topline 0
 expect scrollbar thumb 0 1
-expect screen contains daily-review
+scroll 3
+expect topline 3
+expect selected lp 1
+expect screen contains log_parser2
+expect screen excludes daily-review
+
+# --- mid-list + one notch (activity keeps spotlight on lp 1 a beat) ---
+scroll 3
+expect topline 6
+expect selected lp 1
+expect screen contains lp-old
+
+# --- mid-window ±1 keeps the screen line ---
+scroll 1
+expect topline 7
+expect selected lp 2
+scroll -1
+expect topline 6
+expect selected lp 1
+
+# --- G at bottom + one notch up ---
+key G
+expect selected zab 3
+expect topline 25
+expect scrollbar thumb 4 5
+scroll -3
+expect topline 22
+expect selected zab 1
+expect screen contains zab-board
 expect screen excludes zab-notes
 
-# chrome never jumps
-click 0 4
-expect action none
-click 7 4
-expect action none
-
-# first agent sits under the daily ◆ head
-click 2 4
+# --- edges sticky ---
+key g
+key g
 expect selected daily 1
-expect action jump daily 1
+expect topline 1
+scroll -5
 expect topline 0
+expect selected daily 1
+scroll -1
+expect topline 0
+expect selected daily 1
 
-# bottom gutter reaches max topline; no pane jump
-click 6 79
-expect action none
+key G
+expect topline 25
+scroll 5
+expect topline 25
+expect selected zab 3
+
+# --- many notches from the top still hit max ---
+key g
+key g
+scroll -1
+expect topline 0
+scroll 40
 expect topline 25
 expect scrollbar thumb 4 5
 expect screen contains zab-notes
 expect screen excludes daily-review
-
-# top track cell must restore topline 0 (not a clamp mid-list)
-click 1 79
-expect action none
-expect topline 0
-expect scrollbar thumb 0 1
-expect screen contains daily-review
-expect screen excludes zab-notes

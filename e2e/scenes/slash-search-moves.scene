@@ -1,4 +1,5 @@
-# / search moves the selection. Enter stays on the board; n walks matches.
+# Selection starts on the first session (lp). Enter jumps; / search then
+# moves the selection, Enter accepts without jumping, n walks matches.
 size 80 16
 meta hooks=1
 scan lp 8 /tmp/lp
@@ -6,6 +7,10 @@ scan ww 3 /tmp/a
 scan ww 4 /tmp/b
 
 expect selected lp 8
+expect screen contains lp
+key enter
+expect action jump lp 8
+
 key /
 expect searching yes
 key input w
