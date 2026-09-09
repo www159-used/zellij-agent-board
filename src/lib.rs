@@ -700,10 +700,15 @@ impl Board {
         if self.scroll_anchor < top || self.scroll_anchor >= bottom {
             self.scroll_anchor = top;
         }
+        // The wheel never strands the cursor. Whatever left the frame
+        // elsewhere (a key jump, a resize, a stale state), bring the
+        // frame back onto the cursor before moving — the move-together
+        // step below assumes a consistent base.
+        self.clamp_view();
         let cursor_line = self.scroll_anchor;
         if delta > 0 {
             if self.topline >= max_top {
-                return false;
+                return (self.selected, self.topline) != before;
             }
             let step = delta as u32;
             let next = self.topline.saturating_add(step).min(max_top);
@@ -712,7 +717,7 @@ impl Board {
             self.scroll_anchor = cursor_line.saturating_add(moved);
         } else {
             if self.topline == 0 {
-                return false;
+                return (self.selected, self.topline) != before;
             }
             let step = (-delta) as u32;
             let next = self.topline.saturating_sub(step);
@@ -723,7 +728,9 @@ impl Board {
         self.selected = self.agent_for_line(self.scroll_anchor, wide);
         // `clamp_view` may nudge topline so a tall row fits. Mirror that nudge
         // onto the anchor; otherwise the reverse scroll sees a smaller `moved`
-        // (hit max_top sooner) and selection creeps toward the top.
+        // (hit max_top sooner) and selection creeps toward the top. The base
+        // was just reconciled, so the nudge is at most a block tall and the
+        // mirrored anchor stays inside the frame the clamp established.
         let pre_clamp = self.topline;
         self.clamp_view();
         if self.topline > pre_clamp {
@@ -3209,4 +3216,5 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(board.picker_label(2), Some("d"));
         assert_eq!(board.picker_label(3), None);
     }
+
 }
