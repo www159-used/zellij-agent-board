@@ -12,6 +12,7 @@ use crate::protocol::{ensure_state, seen_dir, spool_dir, started_dir};
 pub fn scan_host_text() -> String {
     ensure_state();
     let epoch = unix_now();
+    let session_prefix = std::env::var("ZAB_SCAN_SESSION_PREFIX").ok();
     let mut out = format!(
         "META hooks={} epoch={epoch}\n",
         if hooks_installed() { 1 } else { 0 }
@@ -52,6 +53,9 @@ pub fn scan_host_text() -> String {
         let Some((session, pane)) = zellij_ids_from_env_blob(blob) else {
             continue;
         };
+        if !session_is_in_scope(&session, session_prefix.as_deref()) {
+            continue;
+        }
         let listed = panes_by_session
             .entry(session.clone())
             .or_insert_with(|| list_terminal_pane_ids(&session));
@@ -92,6 +96,12 @@ pub fn scan_host_text() -> String {
         prune_dir(&started_dir(), &live_keys);
     }
     out
+}
+
+fn session_is_in_scope(session: &str, prefix: Option<&str>) -> bool {
+    prefix
+        .filter(|prefix| !prefix.is_empty())
+        .is_none_or(|prefix| session.starts_with(prefix))
 }
 
 /// Titles from every session's `list-panes`. The WASM bridge only sees
@@ -230,11 +240,19 @@ fn zellij_candidates(home: &Path) -> Vec<String> {
     ]
 }
 
-pub fn zellij_bin() -> String {
-    zellij_candidates(&home_dir())
+fn zellij_bin_from(explicit: Option<&str>, home: &Path) -> String {
+    if let Some(path) = explicit.filter(|path| !path.is_empty()) {
+        return path.to_string();
+    }
+    zellij_candidates(home)
         .into_iter()
         .find(|path| Path::new(path).is_file())
         .unwrap_or_else(|| "zellij".into())
+}
+
+pub fn zellij_bin() -> String {
+    let explicit = std::env::var("ZAB_ZELLIJ").ok();
+    zellij_bin_from(explicit.as_deref(), &home_dir())
 }
 
 pub fn zellij_ids_from_env_blob(blob: &str) -> Option<(String, u32)> {
@@ -434,7 +452,7 @@ mod tests {
 
     use super::{
         agent_pids_from_text, pane_still_open, places_from_list_panes_json, ps_command_args,
-        scan_places_for, zellij_ids_from_env_blob,
+        scan_places_for, session_is_in_scope, zellij_bin_from, zellij_ids_from_env_blob,
     };
 
     #[test]
@@ -474,6 +492,22 @@ mod tests {
     #[test]
     fn ignores_a_blob_without_zellij() {
         assert_eq!(zellij_ids_from_env_blob("HOME=/tmp PATH=/bin"), None);
+    }
+
+    #[test]
+    fn explicit_zellij_binary_wins_over_home_probes() {
+        assert_eq!(
+            zellij_bin_from(Some("/tmp/zellij-0.45.0"), Path::new("/home/ww")),
+            "/tmp/zellij-0.45.0"
+        );
+    }
+
+    #[test]
+    fn scan_scope_keeps_only_harness_sessions() {
+        assert!(session_is_in_scope("zabf-a-origin", Some("zabf-a-")));
+        assert!(!session_is_in_scope("lp-bench", Some("zabf-a-")));
+        assert!(session_is_in_scope("lp-bench", None));
+        assert!(session_is_in_scope("lp-bench", Some("")));
     }
 
     #[test]

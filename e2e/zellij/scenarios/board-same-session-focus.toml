@@ -1,0 +1,8 @@
+[[case]]
+name = "board-same-session-focus"
+description = "Focus an Agent pane from the board in the same session."
+repeat = 5
+given = { attached = "home", board = "home" }
+target = { ref = "home.target", agent = "cursor", shows = "ZAB-SENTINEL-HOME" }
+when = { go = "home.target" }
+then = { attached = "home", sees = "home.target" }

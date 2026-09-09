@@ -50,8 +50,15 @@ cargo test --lib
 cargo e2e
 cargo run --bin board-tui -- --replay e2e/scenes/slash-search-moves.scene
 ./scripts/e2e-zellij.sh
+./scripts/zab-fault.sh board-cross-session-jump 20
 cargo wasm
 cargo build --release --bin board-tui
 ```
 
 `e2e/scenes/` are host scenes: each input paints a frame at the declared size; `expect` checkpoints read that frame. `board-tui --replay` runs them without a TTY. `./scripts/e2e-zellij.sh` loads the WASM in a throwaway Zellij session, dumps the board footer chrome, and checks that `q` closes `board-tui`. A headless session cannot grant plugin permissions, so the TUI pane is started from the layout. Skip that script if `zellij` is not installed; set `ZAB_E2E_ZELLIJ_REQUIRED=1` to fail instead.
+
+`./scripts/zab-fault.sh` runs repository-local lifecycle experiments through
+a real PTY-attached client. It covers native switching, same-session board
+focus, and the production cross-session jump path. See
+[`e2e/zellij/README.md`](e2e/zellij/README.md) for scenarios, Holds, exact
+Zellij version selection, and failure artifacts.

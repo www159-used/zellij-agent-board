@@ -1,0 +1,8 @@
+[[case]]
+name = "board-cross-session-jump"
+description = "Jump from the board to an Agent in another session."
+repeat = 100
+given = { attached = "origin", board = "origin" }
+target = { ref = "dest.target", agent = "cursor", shows = "ZAB-SENTINEL-DEST" }
+when = { go = "dest.target" }
+then = { attached = "dest", sees = "dest.target" }
