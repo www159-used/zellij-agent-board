@@ -1,0 +1,27 @@
+# Two processes in one pane (a wrapper and its re-exec'd child, or a second
+# CLI spawned inside the same pane) share the same (session, pane). Agent
+# identity is the pane, so only the first SCAN line may render a row; the
+# second must be dropped — never a duplicate row.
+size 80 8
+meta hooks=1
+
+# pane 1 is scanned twice with different workspaces: the wrapper wins.
+scan ww 1 /tmp/first
+scan ww 1 /tmp/second
+scan ww 2 /tmp/two
+
+place ww 1 0 notes row1
+place ww 2 0 notes row2
+
+# the surviving pane-1 row carries the first workspace's project
+expect screen contains row1
+expect screen excludes second
+# pane 2 still renders its own row
+expect screen contains row2
+
+# exactly two rows: the cursor rides the only pane-1 row, and the list has
+# no phantom third entry to scroll to
+expect selected ww 1
+key G
+expect selected ww 2
+expect topline 0
