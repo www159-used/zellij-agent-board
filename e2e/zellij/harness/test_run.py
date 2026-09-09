@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -104,6 +105,16 @@ class RunSetup(unittest.TestCase):
 
         self.assertEqual(_pane_id_or("terminal_0\n", fallback), 0)
         self.assertFalse(fallback_called)
+
+    def test_decoy_marker_is_not_a_coreutils_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            world = LiveWorld.__new__(LiveWorld)
+            world.decoy = Path(tmp) / "agent"
+
+            world._write_decoy()
+
+            self.assertTrue(world.decoy.is_file())
+            self.assertFalse(world.decoy.is_symlink())
 
     def test_only_focused_pane_sentinel_is_visible(self) -> None:
         panes = [

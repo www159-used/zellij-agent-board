@@ -13,6 +13,7 @@ import shlex
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import termios
 import threading
@@ -663,8 +664,9 @@ class LiveWorld:
         self.config.write_text("\n".join(lines))
 
     def _write_decoy(self) -> None:
-        tail = shutil.which("tail") or "/usr/bin/tail"
-        self.decoy.symlink_to(tail)
+        # This path is an argv marker for Scan. A symlink named `agent` to a
+        # coreutils binary fails on Linux because coreutils dispatches by argv[0].
+        self.decoy.touch()
 
     def _plant(self, session: str, role: str, sentinel: str) -> int | None:
         real = self.real_names[session]
@@ -676,7 +678,9 @@ class LiveWorld:
             f"printf '%s\\n' {shlex.quote(sentinel)}; "
             f"while [ ! -s {shlex.quote(str(identity))} ]; do sleep 0.01; done; "
             f"set -- $(cat {shlex.quote(str(identity))}); "
-            f"exec {shlex.quote(str(self.decoy))} -f /dev/null "
+            f"exec -a agent {shlex.quote(sys.executable)} "
+            f"-c {shlex.quote('import time; time.sleep(2147483647)')} "
+            f"{shlex.quote(str(self.decoy))} "
             '"ZELLIJ_PANE_ID=$1" "ZELLIJ_SESSION_NAME=$2"'
         )
         result = self._zj(
