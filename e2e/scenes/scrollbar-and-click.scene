@@ -1,6 +1,5 @@
-# Homepage scrollbar and click-to-jump. At 80x8 the list body owns rows 1..6,
-# so eight rows cannot all fit: the rightmost column grows a track with a short
-# thumb, and clicking a row jumps there with no Enter.
+# Homepage scrollbar: overflow paints a gutter; clicks place the thumb top
+# (and thus topline), never jump to a pane. Thumb range is body-relative.
 size 80 16
 meta hooks=1
 scan ww 1 /tmp/1
@@ -11,23 +10,28 @@ scan ww 5 /tmp/5
 scan ww 6 /tmp/6
 scan ww 7 /tmp/7
 scan ww 8 /tmp/8
-place ww 1 0 notes notes
-place ww 2 0 notes notes
-place ww 3 0 notes notes
-place ww 4 0 notes notes
-place ww 5 0 notes notes
-place ww 6 0 notes notes
-place ww 7 0 notes notes
-place ww 8 0 notes notes
+place ww 1 0 notes row1
+place ww 2 0 notes row2
+place ww 3 0 notes row3
+place ww 4 0 notes row4
+place ww 5 0 notes row5
+place ww 6 0 notes row6
+place ww 7 0 notes row7
+place ww 8 0 notes row8
 
 # eight rows still fit here, so nothing scrolls and no bar is painted
-expect screen excludes │
-expect screen excludes █
+expect scrollbar none
+expect topline 0
+expect screen contains row1
+expect screen contains row8
 
 size 80 8
+# 6 body lines out of 8 → 5-cell thumb on a 6-cell track, sitting at the top
 expect selected ww 1
-expect screen contains │
-expect screen contains █
+expect topline 0
+expect scrollbar thumb 0 4
+expect screen contains row1
+expect screen excludes row8
 
 # chrome never jumps: header line and footer line
 click 0 4
@@ -39,9 +43,21 @@ expect action none
 click 2 4
 expect selected ww 2
 expect action jump ww 2
+expect topline 0
 
-# the gutter itself scrolls the view: the click rides the cursor to the end
-# of the list without jumping
+# bottom gutter cell: place thumb top at travel end → max topline; no pane jump
 click 6 79
 expect action none
-expect selected ww 4
+expect topline 2
+expect scrollbar thumb 1 5
+expect screen contains row8
+expect screen excludes row1
+expect selected ww 3
+
+# a mid-track click from the bottom must move the thumb up again
+click 1 79
+expect action none
+expect topline 0
+expect scrollbar thumb 0 4
+expect screen contains row1
+expect screen excludes row8

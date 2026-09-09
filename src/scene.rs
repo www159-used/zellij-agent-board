@@ -1,6 +1,6 @@
 //! Host-side board scenes. Each input paints a real frame; checkpoints read it.
 
-use crate::render::paint_to_size;
+use crate::render::{list_body, paint_to_size};
 use crate::{Action, AgentId, Board, Key, PanePlace, PickerFocus};
 
 #[derive(Debug)]
@@ -164,13 +164,20 @@ impl Runner {
         let Some((kind, rest)) = args.split_first() else {
             return Err(SceneError {
                 line,
-                message: "expect needs selected/action/screen/status/hinting/searching".into(),
+                message: "expect needs selected|topline|scrollbar|action|screen|…".into(),
             });
         };
         match *kind {
             "selected" => {
                 exact(rest, 2, line, "expect selected SESSION PANE")?;
                 expect_selected(&self.board, rest, line)
+            }
+            "topline" => {
+                exact(rest, 1, line, "expect topline N")?;
+                expect_topline(&self.board, rest, line)
+            }
+            "scrollbar" => {
+                expect_scrollbar(&self.frame, &self.board, self.rows, self.cols, rest, line)
             }
             "status" => {
                 exact(rest, 3, line, "expect status SESSION PANE STATUS")?;
@@ -207,7 +214,9 @@ impl Runner {
             }
             other => Err(SceneError {
                 line,
-                message: format!("unknown expect {other}"),
+                message: format!(
+                    "unknown expect {other} (selected|topline|scrollbar|status|action|screen|…)"
+                ),
             }),
         }
     }
@@ -416,6 +425,118 @@ fn expect_selected(board: &Board, args: &[&str], line: usize) -> Result<(), Scen
     Ok(())
 }
 
+fn expect_topline(board: &Board, args: &[&str], line: usize) -> Result<(), SceneError> {
+    let want: u32 = parse_num(args.first(), line, "topline")?;
+    let actual = board.topline();
+    if actual != want {
+        return Err(SceneError {
+            line,
+            message: format!("topline {actual} != {want}"),
+        });
+    }
+    Ok(())
+}
+
+/// Read the rightmost body column off the painted frame.
+///
+/// - `expect scrollbar none` — no track/thumb glyphs in the gutter
+/// - `expect scrollbar thumb FIRST LAST` — body-relative inclusive range of `█`
+///   (other body gutter cells must be `│`)
+fn expect_scrollbar(
+    frame: &[String],
+    board: &Board,
+    rows: u16,
+    cols: u16,
+    args: &[&str],
+    line: usize,
+) -> Result<(), SceneError> {
+    let Some((kind, rest)) = args.split_first() else {
+        return Err(SceneError {
+            line,
+            message: "expect scrollbar none|thumb FIRST LAST".into(),
+        });
+    };
+    let marks = gutter_marks(frame, board, rows, cols, line)?;
+    match *kind {
+        "none" => {
+            exact(rest, 0, line, "expect scrollbar none")?;
+            if marks.iter().any(|ch| matches!(ch, '│' | '█')) {
+                return Err(SceneError {
+                    line,
+                    message: format!("scrollbar still painted: {}", gutter_debug(&marks)),
+                });
+            }
+            Ok(())
+        }
+        "thumb" => {
+            exact(rest, 2, line, "expect scrollbar thumb FIRST LAST")?;
+            let first: usize = parse_num(rest.first(), line, "thumb first")?;
+            let last: usize = parse_num(rest.get(1), line, "thumb last")?;
+            if first > last || last >= marks.len() {
+                return Err(SceneError {
+                    line,
+                    message: format!(
+                        "thumb range {first}..{last} out of body height {}",
+                        marks.len()
+                    ),
+                });
+            }
+            for (offset, ch) in marks.iter().enumerate() {
+                let want = if offset >= first && offset <= last {
+                    '█'
+                } else {
+                    '│'
+                };
+                if *ch != want {
+                    return Err(SceneError {
+                        line,
+                        message: format!(
+                            "gutter[{offset}]={ch:?} want {want:?} (thumb {first}..{last}): {}",
+                            gutter_debug(&marks)
+                        ),
+                    });
+                }
+            }
+            Ok(())
+        }
+        other => Err(SceneError {
+            line,
+            message: format!("expect scrollbar wants none|thumb, got {other}"),
+        }),
+    }
+}
+
+fn gutter_marks(
+    frame: &[String],
+    board: &Board,
+    rows: u16,
+    cols: u16,
+    line: usize,
+) -> Result<Vec<char>, SceneError> {
+    let body = list_body(board, rows, cols);
+    if body.width == 0 || body.height == 0 {
+        return Err(SceneError {
+            line,
+            message: "list body is empty".into(),
+        });
+    }
+    let gutter = usize::from(body.right().saturating_sub(1));
+    let mut marks = Vec::with_capacity(usize::from(body.height));
+    for step in 0..body.height {
+        let row = usize::from(body.y.saturating_add(step));
+        let text = frame.get(row).ok_or_else(|| SceneError {
+            line,
+            message: format!("frame missing row {row}"),
+        })?;
+        marks.push(text.chars().nth(gutter).unwrap_or(' '));
+    }
+    Ok(marks)
+}
+
+fn gutter_debug(marks: &[char]) -> String {
+    marks.iter().collect()
+}
+
 fn expect_status(board: &Board, args: &[&str], line: usize) -> Result<(), SceneError> {
     let session = need(args.first(), line, "session")?;
     let pane: u32 = parse_num(args.get(1), line, "pane")?;
@@ -615,5 +736,17 @@ mod tests {
     fn unknown_expect_is_an_error() {
         let err = run_scene("scan ww 3 /tmp/ww\nexpect focussed ww 3\n").expect_err("typo");
         assert!(err.message.contains("unknown expect"), "{}", err.message);
+    }
+
+    #[test]
+    fn scrollbar_expect_rejects_bad_thumb_range() {
+        let err = run_scene(
+            "size 80 8\nmeta hooks=1\nscan ww 1 /tmp/1\nscan ww 2 /tmp/2\n\
+             scan ww 3 /tmp/3\nscan ww 4 /tmp/4\nscan ww 5 /tmp/5\n\
+             scan ww 6 /tmp/6\nscan ww 7 /tmp/7\nscan ww 8 /tmp/8\n\
+             expect scrollbar thumb 0 9\n",
+        )
+        .expect_err("range");
+        assert!(err.message.contains("out of body"), "{}", err.message);
     }
 }

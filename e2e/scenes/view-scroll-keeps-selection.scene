@@ -28,27 +28,35 @@ place ww 11 0 notes row11
 place ww 12 0 notes row12
 
 # six of twelve rows fit in a 80x8 body
+expect topline 0
+expect scrollbar thumb 0 2
 expect screen contains row1
 expect screen excludes row7
 
 # cursor to the last row: the window shows the last six (rows 7..12)
 key G
 expect selected ww 12
+expect topline 6
+expect scrollbar thumb 3 5
 expect screen contains row12
 expect screen excludes row6
 
 # scroll up: the view rises and the cursor keeps its screen line (the bottom)
 scroll -2
 expect selected ww 10
+expect topline 4
 expect screen contains row6
 expect screen excludes row12
 
 # scroll up more, to the very top
 scroll -4
 expect selected ww 6
+expect topline 0
+expect scrollbar thumb 0 2
 expect screen contains row1
 expect screen excludes row7
 
 # nothing further up to reveal
 scroll -1
 expect selected ww 6
+expect topline 0

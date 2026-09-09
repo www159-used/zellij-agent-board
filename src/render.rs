@@ -400,13 +400,30 @@ pub fn scrollbar_at(board: &Board, rows: u16, cols: u16, column: u16, row: u16) 
     }
     let pos = u32::from(row - body.y).min(body_lines - 1);
     let max_top = total - body_lines;
-    Some(pos * max_top / (body_lines - 1))
+    // Same thumb geometry as [`render_scrollbar`]: a click places the *thumb
+    // top* at `pos` (clamped to the travel range). Mapping click→topline
+    // linearly left a large dead zone on short tracks — the fat thumb at the
+    // top soaked most clicks and kept topline at 0.
+    let thumb = (body_lines * body_lines)
+        .div_ceil(total)
+        .clamp(1, body_lines);
+    let travel = body_lines.saturating_sub(thumb);
+    if travel == 0 {
+        return Some(max_top);
+    }
+    let thumb_top = pos.min(travel);
+    Some(
+        u32::try_from((u64::from(thumb_top) * u64::from(max_top)) / u64::from(travel))
+            .unwrap_or(u32::MAX)
+            .min(max_top),
+    )
 }
 
 /// List body inside a `cols`×`rows` pane: below the header and the hooks
 /// warning, above the footer. Both the painter and the pointer code come
-/// here, so clicks land on the frame the eye saw.
-fn list_body(board: &Board, rows: u16, cols: u16) -> Rect {
+/// here, so clicks land on the frame the eye saw. Scenes use this to read
+/// the gutter column off a painted frame.
+pub(crate) fn list_body(board: &Board, rows: u16, cols: u16) -> Rect {
     let (content, _) = content_and_footer(Rect::new(0, 0, cols, rows));
     let mut y = content.y.saturating_add(1);
     if !board.hooks_installed {
@@ -1235,6 +1252,24 @@ mod tests {
         // body rows are lines 1..6; the thumb starts one row down
         assert!(lines[1].ends_with('│'), "top track:\n{text}");
         assert!(lines[2].ends_with('█'), "thumb start:\n{text}");
+    }
+
+    #[test]
+    fn scrollbar_thumb_sits_on_the_bottom_at_max_scroll() {
+        // At max topline the thumb must cover the last track cell — otherwise
+        // it looks like there is still more to scroll ("卡住" illusion).
+        let mut board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        board.agents = (1..=8).map(|pane| plain_agent("ww", pane)).collect();
+        board.topline = 2; // max: 8 lines, 6 visible
+        let text = painted(&board, 8, 80, "");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines[6].ends_with('█'),
+            "last body row must be thumb, not bare track:\n{text}"
+        );
     }
 
     #[test]

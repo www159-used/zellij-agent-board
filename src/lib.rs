@@ -891,15 +891,14 @@ impl Board {
 
     /// A click jumps straight there. The row under the pointer wins over any
     /// pending flash / search target, so the pointer is never second-guessed.
-    /// A click on the scrollbar gutter scrolls there; chrome does nothing.
+    /// A click on the scrollbar gutter jumps the view there; chrome does nothing.
     pub fn click(&mut self, rows: u16, cols: u16, column: u16, row: u16) -> Action {
         // An overlay owns the frame; rows behind it must not take the click.
         if self.help_visible || self.is_picking() {
             return Action::None;
         }
         if let Some(top) = render::scrollbar_at(self, rows, cols, column, row) {
-            let delta = i64::from(top) - i64::from(self.topline);
-            self.scroll_view(delta as i32);
+            self.jump_view_to(top);
             return Action::None;
         }
         let Some(index) = self.agent_at(rows, cols, column, row) else {
@@ -908,6 +907,30 @@ impl Board {
         self.selected = index;
         self.clamp_view();
         self.jump_at(index)
+    }
+
+    /// Put `topline` at `top` and keep the selection on-screen by moving the
+    /// cursor when needed — never by pulling the window back (gutter clicks
+    /// must be able to reach max_top from the first row).
+    fn jump_view_to(&mut self, top: u32) {
+        if self.list_height == 0 || self.agents.is_empty() {
+            return;
+        }
+        let wide = self.wide_list;
+        let body = u32::from(self.list_height);
+        let max_top = self.list_lines_total(wide).saturating_sub(body);
+        self.topline = top.min(max_top);
+        let view_end = self.topline.saturating_add(body);
+        let row_top = self.lines_before(self.selected, wide);
+        let row_end = self
+            .lines_before(self.selected + 1, wide)
+            .max(row_top.saturating_add(1));
+        if row_top < self.topline {
+            self.selected = self.agent_for_line(self.topline, wide);
+        } else if row_end > view_end {
+            self.selected = self.agent_for_line(view_end.saturating_sub(1), wide);
+        }
+        self.scroll_anchor = self.lines_before(self.selected, wide);
     }
 
     fn clear_motion(&mut self) {
@@ -2765,10 +2788,81 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         let mut board = Board::default();
         ingest_panes(&mut board, 8);
         board.set_list_geometry(80, 8);
-        // bottom of the track: scroll the view to the end, cursor rides along
+        // bottom of the track: jump the view to the end
         assert_eq!(board.click(8, 80, 79, 6), Action::None);
         assert_eq!(board.topline(), 2);
-        assert_eq!(board.selected, 2);
+    }
+
+    #[test]
+    fn gutter_click_from_top_reaches_max_topline() {
+        // Move-together + clamp_view used to pull topline back when the
+        // spotlight landed mid-row, so a bottom-gutter click never reached
+        // max_top (especially with activity lines / session chrome).
+        let mut board = Board::default();
+        let mut scan = String::from("META hooks=1\n");
+        for pane in 1..=12 {
+            scan.push_str(&format!(
+                "SCAN ww {pane} agent /tmp/a --workspace /tmp/a{pane}\n"
+            ));
+        }
+        for pane in 1..=12 {
+            scan.push_str(&format!(
+                "SCAN lp {pane} agent /tmp/b --workspace /tmp/b{pane}\n"
+            ));
+        }
+        board.ingest(&scan);
+        for agent in &mut board.agents {
+            if agent.id.pane_id % 2 == 0 {
+                agent.detail = "Shell x".into();
+            }
+        }
+        board.set_list_geometry(80, 8);
+        board.selected = 0;
+        board.topline = 0;
+        let max_top = board
+            .list_lines_total(true)
+            .saturating_sub(u32::from(board.list_height));
+        assert!(max_top > 2, "need overflow: max_top={max_top}");
+        // last body row of an 80x8 pane (header + 6 body + footer)
+        assert_eq!(board.click(8, 80, 79, 6), Action::None);
+        assert_eq!(
+            board.topline(),
+            max_top,
+            "gutter bottom must reach max_top (was {}), selected={}",
+            board.topline(),
+            board.selected
+        );
+    }
+
+    #[test]
+    fn gutter_track_is_not_a_dead_zone_near_the_top() {
+        // Slight overflow → fat thumb. A click one cell below the top must
+        // place the thumb top there and jump to max_top, not stay on 0.
+        let mut board = Board::default();
+        ingest_panes(&mut board, 8);
+        board.set_list_geometry(80, 8);
+        board.selected = 0;
+        board.topline = 0;
+        assert_eq!(board.click(8, 80, 79, 2), Action::None);
+        assert_eq!(
+            board.topline(),
+            2,
+            "click below the top thumb cell should reach max_top"
+        );
+        let text = crate::render::paint(
+            &board,
+            crate::render::PaintCtx {
+                rows: 8,
+                cols: 80,
+                home: "",
+            },
+        )
+        .texts()
+        .join("\n");
+        assert!(
+            text.lines().nth(6).is_some_and(|line| line.ends_with('█')),
+            "last body row should show the thumb at max scroll:\n{text}"
+        );
     }
 
     #[test]
