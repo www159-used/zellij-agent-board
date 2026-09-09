@@ -691,7 +691,10 @@ class LiveWorld:
             command,
             session=real,
         )
-        pane_id = _parse_pane_id(result.stdout) or self._find_named_pane(real, role)
+        pane_id = _pane_id_or(
+            result.stdout,
+            lambda: self._find_named_pane(real, role),
+        )
         if pane_id is not None:
             identity.write_text(f"{pane_id} {real}\n")
         return pane_id
@@ -977,6 +980,11 @@ def _parse_pane_id(text: str) -> int | None:
         if token.isdigit():
             return int(token)
     return None
+
+
+def _pane_id_or(text: str, fallback) -> int | None:
+    pane_id = _parse_pane_id(text)
+    return pane_id if pane_id is not None else fallback()
 
 
 _DISTURB_ADAPTERS = {

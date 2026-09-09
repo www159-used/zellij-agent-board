@@ -10,6 +10,7 @@ from unittest.mock import patch
 from harness.__main__ import _format
 from harness.oracle import Verdict
 from harness.run import (
+    _pane_id_or,
     LiveWorld,
     PtyClient,
     Report,
@@ -92,6 +93,17 @@ class RunSetup(unittest.TestCase):
 
         with patch("harness.run.os.write", side_effect=OSError(5, "I/O error")):
             self.assertFalse(client.write(b"\x1bq"))
+
+    def test_zero_is_a_valid_pane_id_without_falling_back(self) -> None:
+        fallback_called = False
+
+        def fallback() -> int:
+            nonlocal fallback_called
+            fallback_called = True
+            return 9
+
+        self.assertEqual(_pane_id_or("terminal_0\n", fallback), 0)
+        self.assertFalse(fallback_called)
 
     def test_only_focused_pane_sentinel_is_visible(self) -> None:
         panes = [
