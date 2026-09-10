@@ -293,6 +293,11 @@ impl Board {
         _at_stamp: Option<&str>,
     ) {
         if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == *id) {
+            // Failed ends the turn. A later idle/stop must not become an
+            // unread completion (some CLIs emit both).
+            if status == Status::Done && agent.status == Status::Failed {
+                return;
+            }
             let changing = agent.status != status;
             if changing {
                 agent.status_since = self.now;
@@ -317,6 +322,12 @@ impl Board {
                         agent.detail = detail.to_string();
                     }
                 }
+                Status::Waiting => {
+                    agent.finished_at = None;
+                    if !detail.is_empty() {
+                        agent.detail = detail.to_string();
+                    }
+                }
                 Status::Done => {
                     clear_turn_start(&agent.id);
                     agent.started_at = None;
@@ -329,7 +340,15 @@ impl Board {
                         agent.detail = detail.to_string();
                     }
                 }
-                Status::Idle | Status::Ended => {
+                Status::Failed => {
+                    clear_turn_start(&agent.id);
+                    agent.started_at = None;
+                    agent.finished_at = None;
+                    if !detail.is_empty() {
+                        agent.detail = detail.to_string();
+                    }
+                }
+                Status::Idle | Status::IdleWait | Status::Ended | Status::Interrupted => {
                     clear_turn_start(&agent.id);
                     agent.detail.clear();
                     agent.finished_at = None;
@@ -1626,7 +1645,10 @@ impl Board {
     fn apply_started(&mut self, started: Vec<(AgentId, u64)>) {
         for (id, started_at) in started {
             if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) {
-                if !matches!(agent.status, Status::Working | Status::Compact) {
+                if !matches!(
+                    agent.status,
+                    Status::Working | Status::Compact | Status::Waiting
+                ) {
                     continue;
                 }
                 match agent.started_at {
@@ -1851,6 +1873,77 @@ SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww
 SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
 ",
         );
+    }
+
+    #[test]
+    fn interrupt_stops_working_and_a_new_prompt_starts_a_new_turn() {
+        let mut board = Board::default();
+        let scan = "META hooks=1 epoch=100\nSCAN interrupt-test 42 codex codex\n";
+        board.ingest(scan);
+        board.ingest_notice("HOOK interrupt-test 42 beforeSubmitPrompt @100\n");
+        assert!(board.needs_clock());
+        board.ingest_notice("HOOK interrupt-test 42 interrupt @110\n");
+        assert_eq!(board.agents[0].status, Status::Interrupted);
+        assert!(!board.needs_clock());
+        assert_eq!(board.agents[0].started_at, None);
+        assert_eq!(board.agents[0].finished_at, None);
+        assert!(!board.agents[0].unread_done());
+        let mut reopened = Board::default();
+        reopened.ingest(&format!("{scan}HOOK interrupt-test 42 interrupt @110\n"));
+        assert_eq!(reopened.agents[0].status, Status::Interrupted);
+        reopened.ingest_notice("HOOK interrupt-test 42 beforeSubmitPrompt @120\n");
+        assert_eq!(reopened.agents[0].status, Status::Working);
+        assert_eq!(reopened.agents[0].started_at, Some(120));
+    }
+
+    #[test]
+    fn permission_keeps_turn_start_and_stop_failure_is_not_done() {
+        let mut board = Board::default();
+        let scan = "META hooks=1 epoch=100\nSCAN wait-test 7 claude claude\n";
+        board.ingest(scan);
+        board.ingest_notice("HOOK wait-test 7 beforeSubmitPrompt @100\n");
+        assert!(board.needs_clock());
+        board.ingest_notice("HOOK wait-test 7 permissionRequest @130 Bash\n");
+        assert_eq!(board.agents[0].status, Status::Waiting);
+        assert!(!board.needs_clock());
+        assert_eq!(board.agents[0].started_at, Some(100));
+        assert_eq!(board.agents[0].finished_at, None);
+        assert!(!board.agents[0].unread_done());
+        board.ingest_notice("HOOK wait-test 7 postToolUse @140 Bash\n");
+        assert_eq!(board.agents[0].status, Status::Working);
+        assert_eq!(board.agents[0].started_at, Some(100));
+        assert!(board.needs_clock());
+        board.ingest_notice("HOOK wait-test 7 stopFailure @150 rate_limit\n");
+        assert_eq!(board.agents[0].status, Status::Failed);
+        assert!(!board.needs_clock());
+        assert_eq!(board.agents[0].started_at, None);
+        assert_eq!(board.agents[0].finished_at, None);
+        assert!(!board.agents[0].unread_done());
+        assert_eq!(board.agents[0].detail, "rate_limit");
+        board.ingest_notice("HOOK wait-test 7 stop @160\n");
+        assert_eq!(board.agents[0].status, Status::Failed);
+        assert!(!board.agents[0].unread_done());
+        board.ingest_notice("HOOK wait-test 7 beforeSubmitPrompt @170\n");
+        assert_eq!(board.agents[0].status, Status::Working);
+        assert_eq!(board.agents[0].started_at, Some(170));
+    }
+
+    #[test]
+    fn post_compact_resumes_working_and_idle_wait_clears_the_turn() {
+        let mut board = Board::default();
+        board.ingest("META hooks=1 epoch=100\nSCAN compact-test 3 codex codex\n");
+        board.ingest_notice("HOOK compact-test 3 beforeSubmitPrompt @100\n");
+        board.ingest_notice("HOOK compact-test 3 preCompact @110\n");
+        assert_eq!(board.agents[0].status, Status::Compact);
+        assert_eq!(board.agents[0].started_at, Some(100));
+        board.ingest_notice("HOOK compact-test 3 postCompact @120\n");
+        assert_eq!(board.agents[0].status, Status::Working);
+        assert_eq!(board.agents[0].started_at, Some(100));
+        board.ingest_notice("HOOK compact-test 3 idleWait @130\n");
+        assert_eq!(board.agents[0].status, Status::IdleWait);
+        assert_eq!(board.agents[0].started_at, None);
+        assert_eq!(board.agents[0].finished_at, None);
+        assert!(!board.agents[0].unread_done());
     }
 
     #[test]

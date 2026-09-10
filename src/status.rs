@@ -9,6 +9,7 @@ pub enum Status {
     Done,
     Compact,
     Working,
+    Interrupted,
     Idle,
     Found,
     Unknown,
@@ -24,6 +25,7 @@ impl Status {
             Self::Done => "done",
             Self::Compact => "compact",
             Self::Working => "working",
+            Self::Interrupted => "stopped",
             Self::Idle => "idle",
             Self::Found => "found",
             Self::Unknown => "unknown",
@@ -34,6 +36,7 @@ impl Status {
     pub fn icon(self) -> &'static str {
         match self {
             Self::Failed => "✗",
+            Self::Interrupted => "■",
             Self::Waiting | Self::Working => "●",
             Self::IdleWait => "◑",
             Self::Done => "✓",
@@ -50,7 +53,12 @@ impl Status {
             Self::Waiting | Self::IdleWait => 2,
             Self::Working | Self::Compact => 0,
             Self::Done => 1,
-            Self::Idle | Self::Failed | Self::Found | Self::Unknown | Self::Ended => 3,
+            Self::Idle
+            | Self::Failed
+            | Self::Found
+            | Self::Unknown
+            | Self::Ended
+            | Self::Interrupted => 3,
         }
     }
 
@@ -68,8 +76,13 @@ impl Status {
                 Self::Working
             }
             "preCompact" => Self::Compact,
+            "postCompact" => Self::Working,
             "stop" | "afterAgentResponse" => Self::Done,
             "sessionEnd" => Self::Ended,
+            "interrupt" => Self::Interrupted,
+            "permissionRequest" => Self::Waiting,
+            "idleWait" => Self::IdleWait,
+            "stopFailure" => Self::Failed,
             "postToolUseFailure" => Self::Working,
             _ => return None,
         })
@@ -97,13 +110,31 @@ mod tests {
         );
         assert_eq!(Status::from_cursor_hook("stop"), Some(Status::Done));
         assert_eq!(Status::from_cursor_hook("sessionEnd"), Some(Status::Ended));
+        assert_eq!(
+            Status::from_cursor_hook("interrupt"),
+            Some(Status::Interrupted)
+        );
+        assert_eq!(
+            Status::from_cursor_hook("permissionRequest"),
+            Some(Status::Waiting)
+        );
+        assert_eq!(Status::from_cursor_hook("idleWait"), Some(Status::IdleWait));
+        assert_eq!(
+            Status::from_cursor_hook("stopFailure"),
+            Some(Status::Failed)
+        );
+        assert_eq!(
+            Status::from_cursor_hook("postCompact"),
+            Some(Status::Working)
+        );
         assert_eq!(Status::Working.icon(), "●");
         assert_eq!(Status::Working.color_level(), 0);
         assert!(!Status::Working.is_error());
+        assert!(Status::Failed.is_error());
     }
 
     #[test]
-    fn ignores_unknown_and_claude_only_events() {
+    fn ignores_unmapped_raw_hook_names() {
         assert_eq!(Status::from_cursor_hook("Notification"), None);
         assert_eq!(Status::from_cursor_hook("PermissionRequest"), None);
         assert_eq!(Status::from_cursor_hook(""), None);

@@ -389,6 +389,42 @@ mod tests {
         );
         assert_eq!(catalog.normalize_event("session.idle"), "stop");
         assert_eq!(catalog.normalize_event("stop"), "stop");
+        assert_eq!(catalog.normalize_event("Interrupt"), "interrupt");
+        assert_eq!(
+            catalog.normalize_event("PermissionRequest"),
+            "permissionRequest"
+        );
+        assert_eq!(catalog.normalize_event("StopFailure"), "stopFailure");
+        assert_eq!(catalog.normalize_event("PostCompact"), "postCompact");
+        assert_eq!(catalog.normalize_event("session.compacted"), "postCompact");
+        assert_eq!(catalog.normalize_event("session.error"), "stopFailure");
+        assert_eq!(
+            catalog.normalize_event("permission.asked"),
+            "permissionRequest"
+        );
+        assert!(catalog
+            .protocol("codex")
+            .is_some_and(|protocol| protocol.events.iter().any(|event| event == "Interrupt")));
+        assert!(catalog.protocol("cc").is_some_and(|protocol| {
+            [
+                "PermissionRequest",
+                "StopFailure",
+                "PostCompact",
+                "Notification",
+            ]
+            .into_iter()
+            .all(|event| protocol.events.iter().any(|item| item == event))
+        }));
+        assert!(catalog.protocol("codex").is_some_and(|protocol| {
+            [
+                "PermissionRequest",
+                "PreCompact",
+                "PostCompact",
+                "SessionEnd",
+            ]
+            .into_iter()
+            .all(|event| protocol.events.iter().any(|item| item == event))
+        }));
         assert_eq!(
             catalog.protocol("codebuddy").map(|p| p.install.as_str()),
             None
@@ -503,6 +539,14 @@ hook_dir = "~/.mycli/hooks"
     fn opencode_plugin_embeds_the_hook_marker() {
         let plugin = include_str!("../scripts/opencode-plugin.js");
         assert!(plugin.contains(super::HOOK_MARKER));
+        assert!(plugin.contains("\"session.compacted\": \"postCompact\""));
+        assert!(plugin.contains("\"permission.asked\""));
+        assert!(plugin.contains("session.error"));
+        assert!(plugin.contains("session.status"));
+        assert!(
+            !plugin.contains("aborted ? \"interrupt\"")
+                && plugin.contains("report(\"session.error\"")
+        );
     }
 
     #[test]

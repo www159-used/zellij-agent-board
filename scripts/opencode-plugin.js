@@ -24,13 +24,31 @@ export const ZellijAgentBoard = async () => {
 
   return {
     event: async ({ event }) => {
+      const type = event?.type;
+      const props = event?.properties ?? {};
       const map = {
         "session.created": "sessionStart",
         "session.deleted": "sessionEnd",
         "session.idle": "stop",
-        "session.compacted": "preCompact",
+        "session.compacted": "postCompact",
+        "permission.asked": "permissionRequest",
+        "permission.replied": "postToolUse",
       };
-      const mapped = map[event?.type];
+      if (type === "session.error") {
+        await report("session.error", {
+          hook_event_name: "session.error",
+          error: props.error ?? {},
+        });
+        return;
+      }
+      if (type === "session.status") {
+        await report("session.status", {
+          hook_event_name: "session.status",
+          status: props.status ?? {},
+        });
+        return;
+      }
+      const mapped = map[type];
       if (mapped) {
         await report(mapped, { hook_event_name: mapped });
       }

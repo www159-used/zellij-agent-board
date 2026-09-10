@@ -58,6 +58,120 @@ class HookTests(unittest.TestCase):
         self.assertFalse(self.started.exists())
         self.assertIn("afterAgentResponse", self.spool.read_text())
 
+    def test_codex_interrupt_clears_working_marker(self):
+        self.hook("UserPromptSubmit")
+        self.assertTrue(self.started.exists())
+        self.hook("Interrupt")
+        self.assertIn(" interrupt ", self.spool.read_text())
+        self.assertFalse(self.started.exists())
+        self.hook("UserPromptSubmit")
+        self.assertTrue(self.started.exists())
+
+    def test_cursor_stop_status_distinguishes_abort_and_error(self):
+        self.hook("beforeSubmitPrompt")
+        self.hook("stop", {"hook_event_name": "stop", "status": "aborted"})
+        self.assertIn(" interrupt ", self.spool.read_text())
+        self.assertFalse(self.started.exists())
+        self.hook("beforeSubmitPrompt")
+        self.assertTrue(self.started.exists())
+        self.hook("stop", {"hook_event_name": "stop", "status": "error"})
+        self.assertIn(" stopFailure ", self.spool.read_text())
+        self.assertFalse(self.started.exists())
+        self.hook("beforeSubmitPrompt")
+        self.hook("afterAgentResponse", {
+            "hook_event_name": "afterAgentResponse",
+            "status": "completed",
+        })
+        self.assertIn(" afterAgentResponse ", self.spool.read_text())
+        self.assertFalse(self.started.exists())
+        self.hook("beforeSubmitPrompt")
+        self.hook("stop", {"hook_event_name": "stop", "status": "completed"})
+        self.assertIn(" stop ", self.spool.read_text())
+        self.assertFalse(self.started.exists())
+
+    def test_notification_types_map_or_are_ignored(self):
+        self.hook("UserPromptSubmit")
+        self.assertTrue(self.started.exists())
+        self.hook("Notification", {
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt",
+            "message": "needs permission to use Bash",
+        })
+        self.assertIn(" permissionRequest ", self.spool.read_text())
+        self.assertIn("needs permission to use Bash", self.spool.read_text())
+        self.assertTrue(self.started.exists())
+        self.hook("Notification", {
+            "hook_event_name": "Notification",
+            "notification_type": "idle_prompt",
+        })
+        self.assertIn(" idleWait ", self.spool.read_text())
+        self.assertFalse(self.started.exists())
+        self.hook("UserPromptSubmit")
+        self.hook("Notification", {
+            "hook_event_name": "Notification",
+            "notification_type": "auth_success",
+        })
+        self.assertIn(" beforeSubmitPrompt ", self.spool.read_text())
+        self.assertNotIn(" auth_success ", self.spool.read_text())
+        self.assertNotIn(" notification ", self.spool.read_text())
+        self.assertTrue(self.started.exists())
+
+    def test_stop_failure_and_permission_request_normalize(self):
+        self.hook("UserPromptSubmit")
+        self.hook("PermissionRequest", {
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+        })
+        self.assertIn(" permissionRequest ", self.spool.read_text())
+        self.assertIn("Bash", self.spool.read_text())
+        self.assertTrue(self.started.exists())
+        self.hook("StopFailure", {
+            "hook_event_name": "StopFailure",
+            "error": "rate_limit",
+        })
+        self.assertIn(" stopFailure ", self.spool.read_text())
+        self.assertIn("rate_limit", self.spool.read_text())
+        self.assertFalse(self.started.exists())
+        self.hook("session.compacted")
+        self.assertIn(" postCompact ", self.spool.read_text())
+
+    def test_opencode_error_and_status_payloads(self):
+        self.hook("UserPromptSubmit")
+        self.hook("session.error", {
+            "hook_event_name": "session.error",
+            "error": {"name": "MessageAbortedError", "message": "aborted"},
+        })
+        self.assertIn(" interrupt ", self.spool.read_text())
+        self.assertFalse(self.started.exists())
+        self.hook("UserPromptSubmit")
+        self.hook("session.error", {
+            "hook_event_name": "session.error",
+            "error": {"name": "ApiError", "message": "provider 500"},
+        })
+        self.assertIn(" stopFailure ", self.spool.read_text())
+        self.assertIn("ApiError", self.spool.read_text())
+        self.assertFalse(self.started.exists())
+        self.hook("UserPromptSubmit")
+        self.assertTrue(self.started.exists())
+        self.hook("session.status", {
+            "hook_event_name": "session.status",
+            "status": {"type": "retry", "message": "rate limited"},
+        })
+        self.assertIn(" permissionRequest ", self.spool.read_text())
+        self.assertTrue(self.started.exists())
+        self.hook("session.status", {
+            "hook_event_name": "session.status",
+            "status": {"type": "busy"},
+        })
+        self.assertIn(" postToolUse ", self.spool.read_text())
+        self.assertTrue(self.started.exists())
+        prompt = self.spool.read_text()
+        self.hook("session.status", {
+            "hook_event_name": "session.status",
+            "status": {"type": "idle"},
+        })
+        self.assertEqual(self.spool.read_text(), prompt)
+
     def test_outside_zellij_does_not_write_state(self):
         self.env.pop("ZELLIJ_PANE_ID")
         self.env.pop("ZELLIJ_SESSION_NAME")

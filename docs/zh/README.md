@@ -58,6 +58,8 @@ TUI 首先读取扫描缓存，随后约每两秒请求一次后台 reconcile。
 
 标题、上次扫描、焦点及 seen/started 标记，按优先级存放在 `$ZAB_STATE_DIR`、`$XDG_CACHE_HOME/zellij-agent-board` 或 `~/.cache/zellij-agent-board`。Hook 将最近一条通知写入 `$TMPDIR/zellij-agent-board-spool`，并单独维护本轮开始时间，不启动 WASM 插件。未读完成状态可以发出终端通知。
 
+Codex `Interrupt` 以及 Cursor `stop`/`afterAgentResponse` 且 `status=aborted` 时显示为 `■ stopped`。Cursor `status=error`、Claude/CodeBuddy `StopFailure`、OpenCode `session.error` 显示为 `✗ failed`。两者都清除本轮计时，不标记为完成，也不发送完成通知。授权提示（`PermissionRequest`、CodeBuddy `Notification` 的 `permission_prompt`、OpenCode `permission.asked`）显示为 `● waiting`，并保留本轮起点，以便恢复后继续计时。Claude/CodeBuddy `Notification` 的 `idle_prompt` 显示为 `◑ idle-wait`，清回合且不发完成通知。升级后对所用 CLI 重新运行 `./scripts/install-hooks.sh`，并重启这些会话。安装这些 hook 之前发出的通知无法追溯恢复。
+
 ## 开发
 
 ```bash

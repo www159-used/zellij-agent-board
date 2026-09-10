@@ -60,6 +60,8 @@ The TUI first loads the cached scan, then requests a background reconcile about 
 
 Titles, the last scan, focus, and seen/started markers live in `$ZAB_STATE_DIR`, `$XDG_CACHE_HOME/zellij-agent-board`, or `~/.cache/zellij-agent-board`, in that order. Hooks publish their latest notice under `$TMPDIR/zellij-agent-board-spool` and separately maintain the turn-start marker. Hooks never launch a WASM plugin. Unread completion can emit a terminal notification.
 
+Codex `Interrupt` and Cursor `stop`/`afterAgentResponse` with `status=aborted` appear as `■ stopped`. Cursor `status=error`, Claude/CodeBuddy `StopFailure`, and OpenCode `session.error` appear as `✗ failed`. Both clear the working timer without marking the turn done or sending a completion notification. Permission prompts (`PermissionRequest`, CodeBuddy `Notification` `permission_prompt`, OpenCode `permission.asked`) appear as `● waiting` and keep the turn start so elapsed time resumes. Claude/CodeBuddy `Notification` `idle_prompt` appears as `◑ idle-wait` and clears the turn without a completion notice. After upgrading, rerun `./scripts/install-hooks.sh` for the CLIs you use and restart those sessions. Notices from before the new hooks were installed cannot be recovered.
+
 ## Develop
 
 ```bash

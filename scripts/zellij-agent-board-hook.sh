@@ -26,17 +26,38 @@ tool = str(data.get("tool_name") or "")
 inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
 cmd = str(inp.get("command") or data.get("command") or "")
 path = str(inp.get("file_path") or inp.get("path") or "")
-msg = str(data.get("agent_message") or data.get("prompt") or "")
-extra = cmd or path or msg
+msg = str(data.get("agent_message") or data.get("prompt") or data.get("message") or "")
+err = data.get("error")
+if isinstance(err, dict):
+    err_label = " ".join(
+        str(err.get(key) or "") for key in ("name", "type", "message")
+    )
+    err = err_label.strip() or str(err.get("name") or "")
+err = str(err or data.get("error_details") or "")
+extra = cmd or path or msg or err
 bits = [bit for bit in (tool, extra) if bit]
 detail = " ".join(" ".join(bits).split())[:160]
+st = data.get("status")
+if isinstance(st, dict):
+    status = str(st.get("type") or "")
+else:
+    status = str(st or "")
+if not status and "abort" in err.lower():
+    status = "aborted"
+note = str(data.get("notification_type") or "")
 print(event.replace("\n", " "))
 print(detail.replace("\n", " "))
+print(status.replace("\n", " "))
+print(note.replace("\n", " "))
 ' <<<"$payload" || true)
   event=$(printf '%s\n' "$parsed" | sed -n '1p')
   detail=$(printf '%s\n' "$parsed" | sed -n '2p')
+  status=$(printf '%s\n' "$parsed" | sed -n '3p')
+  note=$(printf '%s\n' "$parsed" | sed -n '4p')
 else
   [ -n "$event" ] || event=$(printf '%s' "$payload" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  status=$(printf '%s' "$payload" | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  note=$(printf '%s' "$payload" | sed -n 's/.*"notification_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
   detail=""
 fi
 
@@ -50,6 +71,31 @@ if [ -f "$map_file" ]; then
   mapped=$(awk -F= -v e="$event" '$1==e {print $2; exit}' "$map_file")
   [ -n "$mapped" ] && event=$mapped
 fi
+
+# Shared payload refine in this one hook — not a per-CLI script.
+# Flat event-map.txt cannot see status / notification_type.
+case "$event" in
+  stop|afterAgentResponse|stopFailure)
+    case "${status:-}" in
+      aborted) event=interrupt ;;
+      error) event=stopFailure ;;
+    esac
+    ;;
+  Notification|notification)
+    case "${note:-}" in
+      permission_prompt) event=permissionRequest ;;
+      idle_prompt) event=idleWait ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  session.status)
+    case "${status:-}" in
+      busy) event=postToolUse ;;
+      retry) event=permissionRequest ;;
+      *) exit 0 ;;
+    esac
+    ;;
+esac
 
 [ -n "$event" ] || exit 0
 
@@ -92,7 +138,7 @@ case "$event" in
       mv -f "$started_tmp" "$started" || exit 0
     started_tmp=""
     ;;
-  stop|afterAgentResponse|sessionEnd)
+  stop|afterAgentResponse|sessionEnd|interrupt|stopFailure|idleWait)
     rm -f "$started"
     ;;
 esac

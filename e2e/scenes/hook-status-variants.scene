@@ -1,0 +1,31 @@
+# Abort, failure, and permission prompts are not unread completions.
+size 90 14
+meta hooks=1 epoch=100
+scan demo 42 /tmp/api agent
+hook demo 42 beforeSubmitPrompt @100
+expect status demo 42 working
+hook demo 42 interrupt @110
+expect status demo 42 stopped
+expect screen contains stopped
+expect screen contains ■
+expect screen excludes working
+hook demo 42 beforeSubmitPrompt @120
+hook demo 42 permissionRequest @130 Bash
+expect status demo 42 waiting
+expect screen contains waiting
+expect screen excludes done
+hook demo 42 postToolUse @140 Bash
+expect status demo 42 working
+hook demo 42 stopFailure @150 rate_limit
+expect status demo 42 failed
+expect screen contains failed
+expect screen contains ✗
+expect screen excludes done
+hook demo 42 stop @160
+expect status demo 42 failed
+hook demo 42 beforeSubmitPrompt @170
+expect status demo 42 working
+hook demo 42 idleWait @180
+expect status demo 42 idle-wait
+expect screen contains idle-wait
+expect screen excludes working

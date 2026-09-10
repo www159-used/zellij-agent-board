@@ -717,7 +717,11 @@ fn header_line(board: &Board) -> Line<'static> {
     let mut parts = Vec::new();
     push_count(&mut parts, board, Status::Working, "working");
     push_count(&mut parts, board, Status::Compact, "compact");
+    push_count(&mut parts, board, Status::Waiting, "waiting");
     push_count(&mut parts, board, Status::Done, "done");
+    push_count(&mut parts, board, Status::Failed, "failed");
+    push_count(&mut parts, board, Status::Interrupted, "stopped");
+    push_count(&mut parts, board, Status::IdleWait, "idle-wait");
     push_count(&mut parts, board, Status::Idle, "idle");
     push_count(&mut parts, board, Status::Found, "found");
     push_count(&mut parts, board, Status::Unknown, "unknown");
@@ -1057,14 +1061,16 @@ fn status_color(status: Status) -> ratatui::style::Color {
         Status::Working | Status::Compact => theme().focus,
         Status::Done => theme().match_fg,
         Status::Failed | Status::Waiting | Status::IdleWait => theme().pin_mark,
-        Status::Idle | Status::Found | Status::Unknown | Status::Ended => theme().muted,
+        Status::Idle | Status::Found | Status::Unknown | Status::Ended | Status::Interrupted => {
+            theme().muted
+        }
     }
 }
 
 /// Seconds shown in the clock column (working elapsed or done ago).
 fn agent_time_secs(agent: &Agent, board: &Board) -> Option<u64> {
     match agent.status {
-        Status::Working | Status::Compact => agent
+        Status::Working | Status::Compact | Status::Waiting => agent
             .started_at
             .map(|started| board.wall_now.saturating_sub(started)),
         Status::Done => {
@@ -1087,7 +1093,7 @@ fn time_cell(agent: &Agent, board: &Board) -> (String, ratatui::style::Color) {
 
     let theme = theme();
     match agent.status {
-        Status::Working | Status::Compact => {
+        Status::Working | Status::Compact | Status::Waiting => {
             let when = agent_time_secs(agent, board)
                 .map(fmt_elapsed)
                 .unwrap_or_default();

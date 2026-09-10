@@ -33,6 +33,9 @@ events = [
 [protocol.cc]
 install = "cc"
 # SubagentStop is skipped on purpose: it fires mid-turn and would mark the pane done.
+# Notification is observe-only; the hook script maps permission_prompt / idle_prompt
+# and drops the rest. PermissionRequest / StopFailure / PostCompact are in the
+# current Claude and CodeBuddy docs; unknown event keys are ignored by older CLIs.
 events = [
   "SessionStart",
   "SessionEnd",
@@ -41,7 +44,11 @@ events = [
   "PostToolUse",
   "PostToolUseFailure",
   "Stop",
+  "StopFailure",
   "PreCompact",
+  "PostCompact",
+  "PermissionRequest",
+  "Notification",
 ]
 
 [protocol.cc.map]
@@ -52,7 +59,10 @@ PreToolUse = "preToolUse"
 PostToolUse = "postToolUse"
 PostToolUseFailure = "postToolUseFailure"
 Stop = "stop"
+StopFailure = "stopFailure"
 PreCompact = "preCompact"
+PostCompact = "postCompact"
+PermissionRequest = "permissionRequest"
 
 [protocol.opencode]
 install = "opencode"
@@ -62,7 +72,10 @@ plugin = "scripts/opencode-plugin.js"
 "session.created" = "sessionStart"
 "session.deleted" = "sessionEnd"
 "session.idle" = "stop"
-"session.compacted" = "preCompact"
+"session.compacted" = "postCompact"
+"session.error" = "stopFailure"
+"permission.asked" = "permissionRequest"
+"permission.replied" = "postToolUse"
 "chat.message" = "beforeSubmitPrompt"
 "tool.execute.before" = "preToolUse"
 "tool.execute.after" = "postToolUse"
@@ -73,18 +86,28 @@ plugin = "scripts/opencode-plugin.js"
 install = "codex"
 events = [
   "SessionStart",
+  "SessionEnd",
   "UserPromptSubmit",
   "PreToolUse",
   "PostToolUse",
   "Stop",
+  "Interrupt",
+  "PermissionRequest",
+  "PreCompact",
+  "PostCompact",
 ]
 
 [protocol.codex.map]
 SessionStart = "sessionStart"
+SessionEnd = "sessionEnd"
 UserPromptSubmit = "beforeSubmitPrompt"
 PreToolUse = "preToolUse"
 PostToolUse = "postToolUse"
 Stop = "stop"
+Interrupt = "interrupt"
+PermissionRequest = "permissionRequest"
+PreCompact = "preCompact"
+PostCompact = "postCompact"
 
 [[adapter]]
 id = "cursor"
