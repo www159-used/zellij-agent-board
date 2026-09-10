@@ -101,6 +101,7 @@ pub fn render_board(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) 
     if area.width == 0 || area.height == 0 {
         return;
     }
+    buffer.set_style(area, Style::default().fg(theme().text).bg(theme().surface));
     let (content, footer) = content_and_footer(area);
 
     if board.help_visible {
@@ -150,7 +151,7 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
         Span::styled(
             format!("{text:<22}"),
             Style::default()
-                .fg(theme().tip_typed)
+                .fg(theme().focus)
                 .add_modifier(Modifier::BOLD),
         )
     };
@@ -186,7 +187,7 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
     }
     if board.agents.is_empty() {
         Paragraph::new("no cursor agents")
-            .style(Style::default().fg(theme().mask_fg))
+            .style(Style::default().fg(theme().muted))
             .render(area, buffer);
         return;
     }
@@ -210,7 +211,7 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
             y,
             Line::from(Span::styled(
                 "hooks 未装",
-                Style::default().fg(theme().mask_fg),
+                Style::default().fg(theme().muted),
             )),
         );
     }
@@ -484,6 +485,10 @@ fn render_picker(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
     let focus = board.picker_focus();
     let box_area = picker_box(area);
     Clear.render(box_area, buffer);
+    buffer.set_style(
+        box_area,
+        Style::default().fg(theme().text).bg(theme().surface),
+    );
     let block = Block::default()
         .title(" search ")
         .borders(Borders::ALL)
@@ -510,13 +515,13 @@ fn render_picker_prompt(board: &Board, focus: PickerFocus, area: Rect, buffer: &
         spans.push(Span::styled(
             format!("{query}█"),
             Style::default()
-                .fg(ratatui::style::Color::White)
+                .fg(theme().text)
                 .add_modifier(Modifier::BOLD),
         ));
     } else {
         spans.push(Span::styled(
             query.to_string(),
-            Style::default().fg(theme().mask_fg),
+            Style::default().fg(theme().muted),
         ));
     }
     // Match count only. Cursor index used to be `1/N` for j/k; tips
@@ -527,7 +532,7 @@ fn render_picker_prompt(board: &Board, focus: PickerFocus, area: Rect, buffer: &
     let count_width = count.chars().count();
     if used + count_width < width {
         spans.push(Span::raw(" ".repeat(width - used - count_width)));
-        spans.push(Span::styled(count, Style::default().fg(theme().mask_fg)));
+        spans.push(Span::styled(count, Style::default().fg(theme().muted)));
     }
     Paragraph::new(Line::from(spans)).render(area, buffer);
 }
@@ -541,7 +546,7 @@ fn render_picker_results(board: &Board, home: &str, area: Rect, buffer: &mut Buf
     if start >= end {
         Paragraph::new(Line::from(Span::styled(
             "no matches",
-            Style::default().fg(theme().mask_fg),
+            Style::default().fg(theme().muted),
         )))
         .render(area, buffer);
         return;
@@ -598,7 +603,7 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
                 } else {
                     "  Tab  Enter go  Esc close"
                 },
-                Style::default().fg(theme().mask_fg),
+                Style::default().fg(theme().muted),
             ),
         ])
     } else if board.is_searching() {
@@ -610,12 +615,12 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
             Span::styled(
                 format!("{}█", board.search_query()),
                 Style::default()
-                    .fg(ratatui::style::Color::White)
+                    .fg(theme().text)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "  Enter accept  n/N  Esc",
-                Style::default().fg(theme().mask_fg),
+                Style::default().fg(theme().muted),
             ),
         ])
     } else if board.is_hinting() {
@@ -644,7 +649,7 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
                 } else {
                     "  Enter go  Esc"
                 },
-                Style::default().fg(theme().mask_fg),
+                Style::default().fg(theme().muted),
             ),
         ])
     } else {
@@ -681,12 +686,10 @@ fn footer_hints(width: u16, home: Option<&str>, pairs: &[(&str, &str)]) -> Line<
         let labeled = key.chars().count() + action.chars().count() + 4;
         let bare = key.chars().count() + 2;
         let key_style = Style::default()
-            .fg(theme().tip_mark_fg)
-            .bg(theme().tip_mark_bg)
+            .fg(theme().focus)
+            .bg(theme().key_fill)
             .add_modifier(Modifier::BOLD);
-        let action_style = Style::default()
-            .fg(ratatui::style::Color::White)
-            .add_modifier(Modifier::BOLD);
+        let action_style = Style::default().fg(theme().muted);
         let (chunk, extra) = if used + labeled <= budget {
             (
                 vec![
@@ -701,7 +704,7 @@ fn footer_hints(width: u16, home: Option<&str>, pairs: &[(&str, &str)]) -> Line<
             break;
         };
         if index > 0 && used + extra <= budget {
-            spans.push(Span::styled(" ", Style::default().fg(theme().mask_fg)));
+            spans.push(Span::styled(" ", Style::default().fg(theme().muted)));
             used += 1;
         }
         used += extra;
@@ -935,10 +938,13 @@ fn activity_text(agent: &Agent) -> Option<String> {
 }
 
 fn activity_line(text: &str, cols: usize, masked: bool) -> Line<'static> {
-    let _ = masked;
     Line::from(Span::styled(
         truncate(&format!("      └ {text}"), cols),
-        Style::default().fg(theme().mask_fg),
+        Style::default().fg(if masked {
+            theme().mask_fg
+        } else {
+            theme().muted
+        }),
     ))
 }
 
@@ -1019,14 +1025,14 @@ fn pad_right(text: &str, width: usize) -> String {
     }
 }
 
-/// Catalog badge (CA / CB / CC / OC) and its color. Cursor stays dim.
+/// Catalog family colors; families without a custom color use readable neutral text.
 fn tool_badge(agent: &crate::Agent) -> (String, ratatui::style::Color) {
     let label = crate::agent::tool_label(&agent.tool);
     let hex = crate::catalog::badge_for(&agent.tool).1;
     let color = hex
         .as_deref()
         .and_then(crate::theme::color_from_hex)
-        .unwrap_or_else(|| theme().mask_fg);
+        .unwrap_or_else(|| theme().muted);
     (label, color)
 }
 
@@ -1051,7 +1057,7 @@ fn status_color(status: Status) -> ratatui::style::Color {
         Status::Working | Status::Compact => theme().focus,
         Status::Done => theme().match_fg,
         Status::Failed | Status::Waiting | Status::IdleWait => theme().pin_mark,
-        Status::Idle | Status::Found | Status::Unknown | Status::Ended => theme().mask_fg,
+        Status::Idle | Status::Found | Status::Unknown | Status::Ended => theme().muted,
     }
 }
 
@@ -1094,7 +1100,7 @@ fn time_cell(agent: &Agent, board: &Board) -> (String, ratatui::style::Color) {
             if agent.unread_done() {
                 (format!("new {}", fmt_elapsed(secs)), theme.pin_mark)
             } else if secs > STALE_DONE_SECS {
-                (fmt_ago(secs), theme.mask_fg)
+                (fmt_ago(secs), theme.muted)
             } else {
                 (fmt_ago(secs), theme.tip_bg)
             }
@@ -1487,8 +1493,8 @@ mod tests {
         .lines
         .join("\n");
         assert!(
-            ansi.contains("\u{1b}[48;2;246;213;107m"),
-            "footer keys should sit on the bright tip-mark sand:\n{ansi}"
+            ansi.contains("\u{1b}[48;2;48;40;62m"),
+            "footer keys should use the subdued key surface:\n{ansi}"
         );
     }
 
@@ -1872,8 +1878,8 @@ mod tests {
             "read done time should stay on tip-bg: {fresh_line}"
         );
         assert!(
-            stale_line.contains("\u{1b}[38;2;61;68;84m"),
-            "stale done time should fade to mask-fg: {stale_line}"
+            stale_line.contains("\u{1b}[38;2;163;156;175m"),
+            "stale done time should use readable muted text: {stale_line}"
         );
     }
 

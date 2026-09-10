@@ -1,7 +1,12 @@
-/* zellij-agent-board 配色，和 overview 同一套变量。
+/* zellij-agent-board 深色主题，沿用 overview 的紫色主调。
    改默认：编辑本文件并重新编译。 */
 
 :root {
+  /* 基础表面、正文、辅助文字；淡化仅用于非匹配内容 */
+  --surface: #16131f;
+  --text: #ddd9e6;
+  --muted: #a39caf;
+  --key-fill: #30283e;
   /* 焦点：光标、选中填充 */
   --focus: #e4d4ff;
   --focus-fill: #3a2f52;
@@ -34,12 +39,12 @@
   /* 底栏药丸；名单里时间列默认 gutter；done 未读/陈旧再叠色 */
   --tip-fg: #0d1117;
   --tip-bg: #a2c5ce;
-  --tip-typed: var(--focus);
+  --tip-typed: #443250;
 
-  /* jump tip / 底栏按键：加宽药丸，深色字压亮砂，flash 蒙层上也够跳 */
+  /* jump tip：加宽药丸，深色字压亮砂，flash 蒙层上也够跳 */
   --tip-mark-fg: #161a22;
   --tip-mark-bg: #f6d56b;
 
   /* 名单里 CodeBuddy 行的 CB 徽标；其它家族颜色在 catalog 里 */
-  --tool-codebuddy: #86b6f2;
+  --tool-codebuddy: #98aecb;
 }

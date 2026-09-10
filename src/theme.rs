@@ -9,6 +9,10 @@ static CURRENT: Mutex<Option<Theme>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
+    pub surface: Color,
+    pub text: Color,
+    pub muted: Color,
+    pub key_fill: Color,
     pub focus: Color,
     pub focus_fill: Color,
     pub hover_fill: Color,
@@ -43,6 +47,10 @@ impl Theme {
 
     fn try_from_vars(vars: &BTreeMap<String, String>) -> Option<Self> {
         Some(Self {
+            surface: try_color(vars, "surface")?,
+            text: try_color(vars, "text")?,
+            muted: try_color(vars, "muted")?,
+            key_fill: try_color(vars, "key-fill")?,
             focus: try_color(vars, "focus")?,
             focus_fill: try_color(vars, "focus-fill")?,
             hover_fill: try_color(vars, "hover-fill")?,
@@ -168,16 +176,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn packed_theme_matches_overview() {
+    fn packed_theme_resolves_board_roles() {
         let theme = Theme::from_css(PACKED_THEME_CSS);
         assert_eq!(theme.session, Color::Rgb(105, 208, 196));
         assert_eq!(theme.task, Color::Rgb(0xe4, 0xd4, 0xff));
         assert_eq!(theme.focus_fill, Color::Rgb(0x3a, 0x2f, 0x52));
         assert_eq!(theme.hover_fill, Color::Rgb(0x2a, 0x25, 0x40));
         assert_eq!(theme.separator, theme.card_border);
-        assert_eq!(theme.tip_typed, theme.focus);
+        assert_eq!(theme.tip_typed, Color::Rgb(0x44, 0x32, 0x50));
         assert_eq!(theme.tip_mark_fg, Color::Rgb(0x16, 0x1a, 0x22));
         assert_eq!(theme.tip_mark_bg, Color::Rgb(0xf6, 0xd5, 0x6b));
-        assert_eq!(theme.tool_codebuddy, Color::Rgb(0x86, 0xb6, 0xf2));
+        assert_eq!(theme.tool_codebuddy, Color::Rgb(0x98, 0xae, 0xcb));
     }
 }

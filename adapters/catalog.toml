@@ -99,7 +99,7 @@ chat_store_needle = "/.cursor/chats/"
 [[adapter]]
 id = "codebuddy"
 badge = "CB"
-color = "#86b6f2"
+color = "#98aecb"
 bins = ["codebuddy", "cbc"]
 protocol = "cc"
 settings = "~/.codebuddy/settings.json"
@@ -108,7 +108,7 @@ hook_dir = "~/.codebuddy/hooks"
 [[adapter]]
 id = "claude"
 badge = "CC"
-color = "#d97757"
+color = "#bd9789"
 bins = ["claude"]
 protocol = "cc"
 settings = "~/.claude/settings.json"
@@ -130,7 +130,7 @@ skip = [
 [[adapter]]
 id = "opencode"
 badge = "OC"
-color = "#7dcfff"
+color = "#a3b4cc"
 bins = ["opencode"]
 protocol = "opencode"
 settings = "~/.config/opencode/plugins/zellij-agent-board.js"
@@ -164,7 +164,7 @@ skip = [
 [[adapter]]
 id = "codex"
 badge = "CX"
-color = "#10a37f"
+color = "#83b3a3"
 bins = ["codex"]
 protocol = "codex"
 settings = "~/.codex/hooks.json"

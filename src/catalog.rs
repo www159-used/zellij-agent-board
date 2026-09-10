@@ -413,13 +413,13 @@ mod tests {
         assert_eq!(catalog.badge_for("agent"), ("CA".into(), None));
         assert_eq!(
             catalog.badge_for("codebuddy"),
-            ("CB".into(), Some("#86b6f2".into()))
+            ("CB".into(), Some("#98aecb".into()))
         );
         assert_eq!(catalog.badge_for("claude").0, "CC");
         assert_eq!(catalog.badge_for("opencode").0, "OC");
         assert_eq!(
             catalog.badge_for("codex"),
-            ("CX".into(), Some("#10a37f".into()))
+            ("CX".into(), Some("#83b3a3".into()))
         );
         assert_eq!(
             catalog
