@@ -4,7 +4,7 @@ English · [中文](docs/zh/README.md)
 
 Floating Zellij dashboard of running coding agents, with live hook status, search, and jump-to-pane across sessions.
 
-Supports Cursor, CodeBuddy, Claude Code, OpenCode, and Codex through a declarative adapter catalog. Process scans create and remove Agents; hooks only update existing Agents. See [ROADMAP.md](ROADMAP.md) for follow-up work.
+Supports Cursor, CodeBuddy, Claude Code, OpenCode, Codex, and Reasonix through a declarative adapter catalog. Process scans create and remove Agents; hooks only update existing Agents. See [ROADMAP.md](ROADMAP.md) for follow-up work.
 
 This project is the dashboard; the separate `zellij-agent` project provides a floating agent launcher.
 
@@ -21,7 +21,7 @@ The release workflow produces `.tar.gz` bundles for Linux x86_64/ARM64 (built on
 
 `install.sh` copies the bundled binaries, or builds both when run from a source checkout, into `~/.config/zellij/plugins/`. Override the WASM path with `ZELLIJ_AGENT_BOARD_PLUGIN_PATH`; the TUI is installed beside it. The runtime TUI path can be overridden with `ZELLIJ_AGENT_BOARD_TUI` or a `tui` plugin config key.
 
-`install-hooks.sh` registers hooks from `adapters/catalog.toml` (Cursor, CodeBuddy, Claude Code, OpenCode, Codex). Pass an adapter id to install one only; the default is all. A new cc-family CLI is a drop-in TOML under `~/.config/zellij-agent-board/adapters/`.
+`install-hooks.sh` registers hooks from `adapters/catalog.toml` (Cursor, CodeBuddy, Claude Code, OpenCode, Codex, Reasonix). Pass an adapter id to install one only; the default is all. A new cc-family CLI is a drop-in TOML under `~/.config/zellij-agent-board/adapters/`.
 
 ## Keybinding
 

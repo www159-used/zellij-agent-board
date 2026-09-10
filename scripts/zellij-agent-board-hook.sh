@@ -21,9 +21,17 @@ except Exception:
 if not isinstance(data, dict):
     data = {}
 if not event:
-    event = str(data.get("hook_event_name") or "")
-tool = str(data.get("tool_name") or "")
+    event = str(data.get("hook_event_name") or data.get("event") or "")
+tool = str(data.get("tool_name") or data.get("toolName") or "")
 inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+args = data.get("toolArgs")
+if isinstance(args, str):
+    try:
+        args = json.loads(args)
+    except Exception:
+        args = {}
+if not inp and isinstance(args, dict):
+    inp = args
 cmd = str(inp.get("command") or data.get("command") or "")
 path = str(inp.get("file_path") or inp.get("path") or "")
 msg = str(data.get("agent_message") or data.get("prompt") or data.get("message") or "")
@@ -44,7 +52,9 @@ else:
     status = str(st or "")
 if not status and "abort" in err.lower():
     status = "aborted"
-note = str(data.get("notification_type") or "")
+if not status and (data.get("isInterrupt") or data.get("is_interrupt")):
+    status = "aborted"
+note = str(data.get("notification_type") or data.get("notificationType") or "")
 print(event.replace("\n", " "))
 print(detail.replace("\n", " "))
 print(status.replace("\n", " "))

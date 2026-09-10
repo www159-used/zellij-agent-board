@@ -156,6 +156,38 @@ def install_codex(adapter: dict, protocols: dict, command: str) -> None:
     ensure_codex_hooks_feature()
 
 
+def install_reasonix(adapter: dict, protocols: dict, command: str) -> None:
+    # Flat {command, match} entries. Claude's matcher/hooks tree is ignored.
+    path = expand_home(adapter["settings"])
+    events = protocols[adapter["protocol"]]["events"]
+    if path.exists():
+        data = json.loads(path.read_text())
+    else:
+        data = {}
+    if not isinstance(data, dict):
+        raise SystemExit("settings.json is not an object")
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise SystemExit("settings.json hooks is not an object")
+    changed = False
+    for event in events:
+        entries = hooks.get(event) or []
+        if not isinstance(entries, list):
+            raise SystemExit(f"settings.json hooks.{event} is not a list")
+        wanted_cmd = f"{command} {event}"
+        if any(
+            isinstance(item, dict) and item.get("command") == wanted_cmd for item in entries
+        ):
+            continue
+        entries.append({"command": wanted_cmd})
+        hooks[event] = entries
+        changed = True
+    if changed or not path.exists():
+        write_json(path, data)
+    print(f"installed {command}")
+    print(f"hooks: {path}")
+
+
 def main(argv: list[str]) -> None:
     target = argv[1] if len(argv) > 1 else "all"
     catalog = load_catalog()
@@ -184,6 +216,8 @@ def main(argv: list[str]) -> None:
             install_codex(adapter, protocols, command)
         elif kind == "opencode":
             install_opencode(adapter, protocols, dest_dir)
+        elif kind == "reasonix":
+            install_reasonix(adapter, protocols, command)
         else:
             raise SystemExit(f"unknown install {kind} for {adapter['id']}")
 

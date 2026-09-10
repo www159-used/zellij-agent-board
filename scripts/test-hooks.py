@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -172,11 +173,76 @@ class HookTests(unittest.TestCase):
         })
         self.assertEqual(self.spool.read_text(), prompt)
 
+    def test_reasonix_native_payload_and_interrupt(self):
+        self.hook("UserPromptSubmit", {
+            "event": "UserPromptSubmit",
+            "prompt": "fix the board",
+        })
+        self.assertIn(" beforeSubmitPrompt ", self.spool.read_text())
+        self.assertIn("fix the board", self.spool.read_text())
+        self.assertTrue(self.started.exists())
+        self.hook("PreToolUse", {
+            "event": "PreToolUse",
+            "toolName": "bash",
+            "toolArgs": {"command": "ls"},
+        })
+        self.assertIn(" preToolUse ", self.spool.read_text())
+        self.assertIn("bash", self.spool.read_text())
+        self.assertIn("ls", self.spool.read_text())
+        self.assertTrue(self.started.exists())
+        self.hook("Stop", {"event": "Stop", "isInterrupt": True})
+        self.assertIn(" interrupt ", self.spool.read_text())
+        self.assertFalse(self.started.exists())
+        self.hook("UserPromptSubmit")
+        self.hook("Notification", {
+            "event": "Notification",
+            "notificationType": "permission_prompt",
+            "message": "approve bash",
+        })
+        self.assertIn(" permissionRequest ", self.spool.read_text())
+        self.assertTrue(self.started.exists())
+
     def test_outside_zellij_does_not_write_state(self):
         self.env.pop("ZELLIJ_PANE_ID")
         self.env.pop("ZELLIJ_SESSION_NAME")
         self.hook("beforeSubmitPrompt")
         self.assertEqual(list(self.root.iterdir()), [])
+
+
+class InstallTests(unittest.TestCase):
+    def test_reasonix_writes_flat_hook_commands(self):
+        import importlib.util
+
+        scripts = Path(__file__).resolve().parent
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        spec = importlib.util.spec_from_file_location(
+            "install_hooks", scripts / "install-hooks.py"
+        )
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        settings = root / "settings.json"
+        hook = root / "zellij-agent-board-hook.sh"
+        adapter = {"settings": str(settings), "protocol": "reasonix"}
+        protocols = {
+            "reasonix": {
+                "events": ["UserPromptSubmit", "Stop", "PermissionRequest"],
+            }
+        }
+        installer.install_reasonix(adapter, protocols, str(hook))
+        data = json.loads(settings.read_text())
+        self.assertEqual(
+            data["hooks"]["UserPromptSubmit"],
+            [{"command": f"{hook} UserPromptSubmit"}],
+        )
+        self.assertEqual(data["hooks"]["Stop"], [{"command": f"{hook} Stop"}])
+        installer.install_reasonix(adapter, protocols, str(hook))
+        again = json.loads(settings.read_text())
+        self.assertEqual(len(again["hooks"]["Stop"]), 1)
 
 
 if __name__ == "__main__":

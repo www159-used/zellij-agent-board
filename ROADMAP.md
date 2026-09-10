@@ -2,7 +2,7 @@
 
 ## 当前已实现
 
-- 声明式适配 Cursor、CodeBuddy、Claude Code、OpenCode、Codex；扫描决定 Agent 是否存在，hook 更新状态。
+- 声明式适配 Cursor、CodeBuddy、Claude Code、OpenCode、Codex、Reasonix；扫描决定 Agent 是否存在，hook 更新状态。
 - vim 风格移动、分页、可见区域 Flash、增量搜索和全列表选择器。
 - `started/` 保留本轮开始时间，`seen/` 保留已读完成状态，扫描缓存支持重开首帧。
 - 默认居中的大浮窗，可配置宽高和位置。

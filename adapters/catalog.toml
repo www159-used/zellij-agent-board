@@ -109,6 +109,37 @@ PermissionRequest = "permissionRequest"
 PreCompact = "preCompact"
 PostCompact = "postCompact"
 
+# Reasonix (Go CLI): Claude-shaped event names, but settings.json is a flat
+# {command, match} list — not the Claude matcher/hooks tree. Native stdin
+# uses event/toolName/toolArgs/isInterrupt/notificationType.
+[protocol.reasonix]
+install = "reasonix"
+events = [
+  "SessionStart",
+  "SessionEnd",
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "Stop",
+  "StopFailure",
+  "PermissionRequest",
+  "Notification",
+  "PreCompact",
+]
+
+[protocol.reasonix.map]
+SessionStart = "sessionStart"
+SessionEnd = "sessionEnd"
+UserPromptSubmit = "beforeSubmitPrompt"
+PreToolUse = "preToolUse"
+PostToolUse = "postToolUse"
+PostToolUseFailure = "postToolUseFailure"
+Stop = "stop"
+StopFailure = "stopFailure"
+PermissionRequest = "permissionRequest"
+PreCompact = "preCompact"
+
 [[adapter]]
 id = "cursor"
 badge = "CA"
@@ -222,5 +253,43 @@ skip = [
   "exec-server",
   "features",
   "agents",
+  "help",
+]
+
+[[adapter]]
+id = "reasonix"
+badge = "RX"
+color = "#c4b08a"
+bins = ["reasonix"]
+protocol = "reasonix"
+settings = "~/.reasonix/settings.json"
+hook_dir = "~/.reasonix/hooks"
+skip = [
+  "--print",
+  "-p",
+  "--version",
+  "-V",
+  "-v",
+  "run",
+  "review",
+  "web",
+  "serve",
+  "acp",
+  "--acp",
+  "setup",
+  "config",
+  "report",
+  "mcp",
+  "subagent",
+  "init",
+  "doctor",
+  "session",
+  "hook",
+  "task",
+  "bot",
+  "upgrade",
+  "update",
+  "completion",
+  "version",
   "help",
 ]

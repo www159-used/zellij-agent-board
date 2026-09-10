@@ -364,19 +364,30 @@ mod tests {
     }
 
     #[test]
-    fn builtin_has_the_four_families() {
+    fn builtin_lists_catalog_families() {
         let catalog = Catalog::builtin();
         let ids: Vec<_> = catalog
             .adapters()
             .iter()
             .map(|adapter| adapter.id.as_str())
             .collect();
-        assert_eq!(ids, ["cursor", "codebuddy", "claude", "opencode", "codex"]);
+        assert_eq!(
+            ids,
+            [
+                "cursor",
+                "codebuddy",
+                "claude",
+                "opencode",
+                "codex",
+                "reasonix"
+            ]
+        );
         assert!(catalog.wants_bin("agent"));
         assert!(catalog.wants_bin("codebuddy"));
         assert!(catalog.wants_bin("claude"));
         assert!(catalog.wants_bin("opencode"));
         assert!(catalog.wants_bin("codex"));
+        assert!(catalog.wants_bin("reasonix"));
         assert!(!catalog.wants_bin("vim"));
     }
 
@@ -441,6 +452,16 @@ mod tests {
                 .map(|adapter| adapter.protocol.as_str()),
             Some("cc")
         );
+        assert_eq!(
+            catalog
+                .adapter_for_bin("reasonix")
+                .map(|adapter| adapter.protocol.as_str()),
+            Some("reasonix")
+        );
+        assert_eq!(
+            catalog.protocol("reasonix").map(|p| p.install.as_str()),
+            Some("reasonix")
+        );
     }
 
     #[test]
@@ -456,6 +477,10 @@ mod tests {
         assert_eq!(
             catalog.badge_for("codex"),
             ("CX".into(), Some("#83b3a3".into()))
+        );
+        assert_eq!(
+            catalog.badge_for("reasonix"),
+            ("RX".into(), Some("#c4b08a".into()))
         );
         assert_eq!(
             catalog
@@ -485,6 +510,10 @@ mod tests {
         assert!(keep_process(&argv(&["opencode", "/tmp/proj"])));
         assert!(keep_process(&argv(&["codex"])));
         assert!(keep_process(&argv(&["codex", "resume", "--last"])));
+        assert!(keep_process(&argv(&["reasonix"])));
+        assert!(keep_process(&argv(&["reasonix", "--continue"])));
+        assert!(!keep_process(&argv(&["reasonix", "run", "hello"])));
+        assert!(!keep_process(&argv(&["reasonix", "-p", "hello"])));
         assert!(keep_row(&argv(&["opencode-next"])));
         assert!(!keep_row(&argv(&["agent", "status"])));
     }
@@ -581,6 +610,9 @@ hook_dir = "~/.mycli/hooks"
             .iter()
             .any(|path| path.ends_with(".claude/settings.json")));
         assert!(paths.iter().any(|path| path.ends_with(".codex/hooks.json")));
+        assert!(paths
+            .iter()
+            .any(|path| path.ends_with(".reasonix/settings.json")));
         assert!(paths
             .iter()
             .any(|path| path.ends_with("opencode/plugins/zellij-agent-board.js")));

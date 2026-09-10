@@ -4,7 +4,7 @@
 
 Zellij 浮动看板：列出正在运行的 coding agent，通过 hook 更新状态，支持搜索及跨会话跳转到对应 pane。
 
-通过声明式适配目录支持 Cursor、CodeBuddy、Claude Code、OpenCode 和 Codex。进程扫描决定 Agent 的增删，hook 只更新已有 Agent。后续工作见 [ROADMAP.md](../../ROADMAP.md)。
+通过声明式适配目录支持 Cursor、CodeBuddy、Claude Code、OpenCode、Codex 和 Reasonix。进程扫描决定 Agent 的增删，hook 只更新已有 Agent。后续工作见 [ROADMAP.md](../../ROADMAP.md)。
 
 本项目负责看板；独立的 `zellij-agent` 项目负责浮动 agent 启动器。
 
@@ -21,7 +21,7 @@ Zellij 浮动看板：列出正在运行的 coding agent，通过 hook 更新状
 
 `install.sh` 使用包内二进制；在源码目录中运行时则先构建。两者都安装到 `~/.config/zellij/plugins/`。WASM 路径可用 `ZELLIJ_AGENT_BOARD_PLUGIN_PATH` 覆盖，TUI 安装在旁边。运行时 TUI 路径可用 `ZELLIJ_AGENT_BOARD_TUI` 或插件配置里的 `tui` 覆盖。
 
-`install-hooks.sh` 按 `adapters/catalog.toml` 注册 hook（Cursor、CodeBuddy、Claude Code、OpenCode、Codex）。可传 adapter id 只装其一，默认全部。新的 cc 系 CLI 丢一份 TOML 到 `~/.config/zellij-agent-board/adapters/` 即可。
+`install-hooks.sh` 按 `adapters/catalog.toml` 注册 hook（Cursor、CodeBuddy、Claude Code、OpenCode、Codex、Reasonix）。可传 adapter id 只装其一，默认全部。新的 cc 系 CLI 丢一份 TOML 到 `~/.config/zellij-agent-board/adapters/` 即可。
 
 ## 快捷键
 

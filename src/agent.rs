@@ -187,6 +187,8 @@ mod tests {
         assert!(!keep_cursor_agent(&argv(&["claude", "-p"])));
         assert!(keep_cursor_agent(&argv(&["opencode"])));
         assert!(!keep_cursor_agent(&argv(&["opencode", "run"])));
+        assert!(keep_cursor_agent(&argv(&["reasonix"])));
+        assert!(!keep_cursor_agent(&argv(&["reasonix", "doctor"])));
     }
 
     #[test]
@@ -198,6 +200,7 @@ mod tests {
         assert_eq!(tool_label("cbc"), "CB");
         assert_eq!(tool_label("claude"), "CC");
         assert_eq!(tool_label("opencode"), "OC");
+        assert_eq!(tool_label("reasonix"), "RX");
     }
 
     #[test]
