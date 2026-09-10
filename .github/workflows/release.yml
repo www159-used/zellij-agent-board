@@ -6,11 +6,11 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  verify:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -24,21 +24,89 @@ jobs:
         run: |
           cargo fmt --check
           cargo lint
-          cargo test --lib
+          cargo test --locked --lib --bin board-tui
 
       - name: Build WASM
         run: cargo wasm
 
-      - name: Package checksums
+      - name: Package standalone WASM
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
-          cp target/wasm32-wasip1/release/zellij-agent-board.wasm "zellij-agent-board-${GITHUB_REF_NAME}.wasm"
-          sha256sum "zellij-agent-board-${GITHUB_REF_NAME}.wasm" > "zellij-agent-board-${GITHUB_REF_NAME}.wasm.sha256"
+          mkdir -p target/release-assets
+          cp target/wasm32-wasip1/release/zellij-agent-board.wasm "target/release-assets/zellij-agent-board-${VERSION}.wasm"
+          cd target/release-assets
+          sha256sum "zellij-agent-board-${VERSION}.wasm" > "zellij-agent-board-${VERSION}.wasm.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-wasm
+          path: target/release-assets/*
+          if-no-files-found: error
 
+  package:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-wasm
+          path: wasm
+      - name: Test and build host
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo test --locked --lib --bin board-tui
+          python3 scripts/test-hooks.py
+          cargo build --locked --release --bin board-tui --target "$TARGET"
+      - name: Package and test installation
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          bash scripts/package-release.sh "$VERSION" "$TARGET" "wasm/zellij-agent-board-${VERSION}.wasm" "target/$TARGET/release/board-tui"
+          bash scripts/test-release-package.sh "target/packages/zellij-agent-board-${VERSION}-${TARGET}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: target/packages/*
+          if-no-files-found: error
+
+  publish:
+    needs: [verify, package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            zellij-agent-board-${{ github.ref_name }}.wasm
-            zellij-agent-board-${{ github.ref_name }}.wasm.sha256
+            release-assets/*.wasm
+            release-assets/*.wasm.sha256
+            release-assets/*.tar.gz
+            release-assets/*.tar.gz.sha256

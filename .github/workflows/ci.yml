@@ -21,7 +21,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo lint
-      - run: cargo test --lib
+      - run: cargo test --locked --lib --bin board-tui
+      - run: python3 scripts/test-hooks.py
       - run: cargo wasm
       - run: cargo build --release --bin board-tui
       - name: Install zellij

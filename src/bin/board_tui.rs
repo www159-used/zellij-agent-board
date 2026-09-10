@@ -2,12 +2,13 @@
 //!
 //! MVC loop: `Board` plus the host store are the model. The first frame
 //! paints the last SCAN snapshot. A sibling `--reconcile` process writes
-//! the store; this process only reads.
+//! scan and title snapshots. This process only updates its own seen/started
+//! markers; missing home titles are filled in memory before the first paint.
 
 use std::fs;
 use std::io::{self, stdout, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::cursor;
@@ -29,9 +30,9 @@ use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use zellij_agent_board::{
-    focus_path, format_jump, load_places, load_scan, parse_focus, persist_places, persist_seen,
-    places_path, reconcile_once, render_board, run_reconcile, runtime_dir, scan_path,
-    scan_places_for, spool_dir, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
+    focus_path, format_jump, load_places, load_scan, parse_focus, persist_seen, places_path,
+    reconcile_once, render_board, run_reconcile, runtime_dir, scan_path, scan_places_for,
+    spool_dir, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -49,6 +50,7 @@ struct App {
     /// so the hover preview has to be resolved again.
     pointer: Option<(u16, u16)>,
     last_reconcile: Instant,
+    reconcile: Option<Child>,
     last_tick: Instant,
     scan_mtime: Option<SystemTime>,
     places_mtime: Option<SystemTime>,
@@ -252,6 +254,7 @@ impl App {
             view: Size::new(0, 0),
             pointer: None,
             last_reconcile: now - SCAN_EVERY,
+            reconcile: None,
             last_tick: now,
             scan_mtime: None,
             places_mtime: None,
@@ -261,7 +264,7 @@ impl App {
 
     fn bootstrap(&mut self) {
         self.load_model();
-        spawn_reconcile();
+        spawn_reconcile(&mut self.reconcile);
         self.last_reconcile = Instant::now();
     }
 
@@ -299,8 +302,8 @@ impl App {
         {
             return;
         }
-        persist_places(scan_places_for(std::slice::from_ref(&self.home)));
-        self.reload_places();
+        self.board
+            .apply_places(scan_places_for(std::slice::from_ref(&self.home)));
     }
 
     fn run(&mut self, terminal: &mut HostTerminal) -> io::Result<()> {
@@ -326,7 +329,7 @@ impl App {
             dirty |= self.take_store();
             let now = Instant::now();
             if now.duration_since(self.last_reconcile) >= SCAN_EVERY {
-                spawn_reconcile();
+                spawn_reconcile(&mut self.reconcile);
                 self.last_reconcile = Instant::now();
             }
             if dir_changed(&spool_dir(), &mut self.spool_mtime) {
@@ -491,11 +494,9 @@ impl App {
                 }
             }
         }
-        if file_changed(&places_path(), &mut self.places_mtime) {
-            if self.reload_places() {
-                dirty = true;
-                log::info!("places_reload");
-            }
+        if file_changed(&places_path(), &mut self.places_mtime) && self.reload_places() {
+            dirty = true;
+            log::info!("places_reload");
         }
         dirty
     }
@@ -553,8 +554,9 @@ enum DrainInput {
     Idle,
 }
 
-fn spawn_reconcile() {
+fn spawn_reconcile(running: &mut Option<Child>) {
     let Ok(exe) = std::env::current_exe() else {
+        log::warn!("reconcile_spawn_no_exe");
         return;
     };
     let mut cmd = Command::new(exe);
@@ -569,7 +571,51 @@ fn spawn_reconcile() {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let _ = cmd.spawn();
+    if let Err(err) = spawn_if_idle(running, &mut cmd) {
+        log::warn!("reconcile_spawn_fail err={err}");
+    }
+}
+
+fn spawn_if_idle(running: &mut Option<Child>, cmd: &mut Command) -> io::Result<bool> {
+    if let Some(child) = running.as_mut() {
+        if child.try_wait()?.is_none() {
+            return Ok(false);
+        }
+    }
+    // try_wait already reaped; drop the handle even if the next spawn fails.
+    running.take();
+    *running = Some(cmd.spawn()?);
+    Ok(true)
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::spawn_if_idle;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn reconcile_skips_a_running_child_and_reaps_it_before_restarting() {
+        // stdin keeps cat alive without sleeps or a live Zellij session.
+        let mut cmd = Command::new("cat");
+        cmd.stdin(Stdio::piped()).stdout(Stdio::null());
+        let mut running: Option<Child> = None;
+        assert!(spawn_if_idle(&mut running, &mut cmd).unwrap());
+        let first = running.as_ref().expect("retain the child for reaping").id();
+        assert!(!spawn_if_idle(&mut running, &mut cmd).unwrap());
+        assert_eq!(running.as_ref().unwrap().id(), first);
+
+        drop(running.as_mut().unwrap().stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !spawn_if_idle(&mut running, &mut cmd).unwrap() {
+            assert!(Instant::now() < deadline, "finished child was not reaped");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut next = running.take().unwrap();
+        assert_ne!(next.id(), first);
+        drop(next.stdin.take());
+        assert!(next.wait().unwrap().success());
+    }
 }
 
 /// C-e / C-y: the view-scroll pair. Positive reveals later rows.

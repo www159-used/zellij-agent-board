@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Catalog adapter hook → zellij-agent-board. Always exit 0. Only report inside a Zellij pane.
 set -u
-trap 'exit 0' EXIT
+trap 'rm -f "${spool_tmp:-}" "${started_tmp:-}"; exit 0' EXIT
 
 [ -n "${ZELLIJ_PANE_ID:-}" ] || exit 0
 [ -n "${ZELLIJ_SESSION_NAME:-}" ] || exit 0
@@ -63,10 +63,11 @@ fi
 # Spool only. Never `zellij pipe --plugin` — that launches WASM on every
 # Cursor hook and is what pushed the host session to hundreds of percent CPU.
 spool_dir="${TMPDIR:-/tmp}/zellij-agent-board-spool"
-mkdir -p "$spool_dir"
-tmp="${spool_dir}/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}.tmp.$$"
-printf '%s\n' "$line" >"$tmp"
-mv -f "$tmp" "${spool_dir}/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}"
+mkdir -p "$spool_dir/.pending" || exit 0
+spool_tmp=$(mktemp "$spool_dir/.pending/hook.XXXXXX") || exit 0
+printf '%s\n' "$line" >"$spool_tmp" &&
+  mv -f "$spool_tmp" "${spool_dir}/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}" || exit 0
+spool_tmp=""
 
 # Live hook mail stays in TMPDIR. Titles / seen / started live in the
 # host cache so they survive reboot and q.
@@ -85,8 +86,11 @@ fi
 started="${state_dir}/started/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}"
 case "$event" in
   beforeSubmitPrompt)
-    mkdir -p "$(dirname "$started")"
-    printf 'STARTED %s %s %s\n' "${ZELLIJ_SESSION_NAME}" "${ZELLIJ_PANE_ID}" "${epoch}" >"$started"
+    mkdir -p "${state_dir}/started/.pending" || exit 0
+    started_tmp=$(mktemp "${state_dir}/started/.pending/start.XXXXXX") || exit 0
+    printf 'STARTED %s %s %s\n' "${ZELLIJ_SESSION_NAME}" "${ZELLIJ_PANE_ID}" "${epoch}" >"$started_tmp" &&
+      mv -f "$started_tmp" "$started" || exit 0
+    started_tmp=""
     ;;
   stop|afterAgentResponse|sessionEnd)
     rm -f "$started"

@@ -39,8 +39,10 @@ fn init_logging() {
 }
 const FOCUS_WRITER: &str = r#"
 dir="${ZAB_STATE_DIR:?}"
-mkdir -p "$dir"
-printf '%s' "${ZAB_FOCUS}" >"$dir/focus"
+mkdir -p "$dir/.pending" || exit 1
+tmp="$(mktemp "$dir/.pending/focus.XXXXXX")" || exit 1
+trap 'rm -f "$tmp"' EXIT
+printf '%s' "${ZAB_FOCUS}" >"$tmp" && mv -f "$tmp" "$dir/focus"
 "#;
 
 /// `bash -c` (not `-l`) keeps ZAB_* env. The zellij binary is probed here —

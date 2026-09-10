@@ -1,4 +1,5 @@
-//! One host process writes the store. The TUI only reads.
+//! One host process writes scan and title snapshots. The TUI reads them;
+//! seen/started markers have separate writers in the TUI and hooks.
 //!
 //! The lock is `flock`: the kernel drops it if this process dies, even
 //! when Drop does not run.

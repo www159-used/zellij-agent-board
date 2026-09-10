@@ -15,6 +15,8 @@ mod scan;
 #[cfg(not(target_arch = "wasm32"))]
 mod scene;
 mod status;
+#[cfg(not(target_arch = "wasm32"))]
+mod store;
 mod theme;
 mod toggle;
 
@@ -2635,7 +2637,7 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         board.set_list_geometry(80, 16);
         board.decide(Key::StartHint);
         assert_eq!(board.decide(Key::Input('x')), Action::None);
-        assert_eq!(board.hint_label(9).as_deref(), Some("q"));
+        assert_eq!(board.hint_label(9), Some("q"));
         assert_eq!(
             board.decide(Key::Input('q')),
             Action::Jump {

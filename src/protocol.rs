@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::agent::{AgentId, PanePlace};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::{write_snapshot, write_snapshot_if_absent};
 
 /// `zellij pipe --name` — never pass `--plugin` or Zellij will launch WASM.
 pub const PIPE_NAME: &str = "zellij-agent-board";
@@ -160,6 +162,7 @@ pub fn merge_places(
 /// Stale pane ids (leftover `board-tui` floats) would never match SCAN and
 /// would keep titles from attaching. Other sessions stay put. Empty
 /// `incoming` is a no-op so a failed list does not wipe.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn replace_session_places(
     existing: impl IntoIterator<Item = (AgentId, PanePlace)>,
     incoming: impl IntoIterator<Item = (AgentId, PanePlace)>,
@@ -206,7 +209,6 @@ fn migrate_tmpdir_state() {
     if src == dest || !src.is_dir() {
         return;
     }
-    let _ = std::fs::create_dir_all(&dest);
     copy_if_absent(&src.join("focus"), &dest.join("focus"));
     copy_if_absent(&src.join("scan"), &dest.join("scan"));
     copy_if_absent(&src.join("scan.host"), &dest.join("scan"));
@@ -219,7 +221,7 @@ fn migrate_tmpdir_state() {
             parse_places(&std::fs::read_to_string(src.join("places.host")).unwrap_or_default()),
         );
         if !merged.is_empty() {
-            let _ = std::fs::write(&places, format_places(merged));
+            let _ = write_snapshot_if_absent(&places, format_places(merged));
         }
     }
 }
@@ -229,10 +231,9 @@ fn copy_if_absent(src: &Path, dest: &Path) {
     if dest.exists() || !src.exists() {
         return;
     }
-    if let Some(parent) = dest.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Ok(contents) = std::fs::read(src) {
+        let _ = write_snapshot_if_absent(dest, contents);
     }
-    let _ = std::fs::copy(src, dest);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -253,17 +254,32 @@ pub fn ensure_state() {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_places() -> Vec<(AgentId, PanePlace)> {
     ensure_migrated();
+    merged_places()
+}
+
+/// Current `places` wins over leftover `places.host`. Readers stay
+/// read-only; the reconciler deletes the legacy file after a successful
+/// persist.
+#[cfg(not(target_arch = "wasm32"))]
+fn merged_places() -> Vec<(AgentId, PanePlace)> {
     let places = parse_places(&std::fs::read_to_string(places_path()).unwrap_or_default());
     let leftover = parse_places(&std::fs::read_to_string(host_places_path()).unwrap_or_default());
     if leftover.is_empty() {
-        return places;
+        places
+    } else {
+        merge_places(leftover, places)
     }
-    let merged = merge_places(places, leftover);
-    if std::fs::create_dir_all(runtime_dir()).is_ok() {
-        let _ = std::fs::write(places_path(), format_places(merged.clone()));
-        let _ = std::fs::remove_file(host_places_path());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn publish_snapshot(path: &Path, contents: impl AsRef<[u8]>) -> bool {
+    match write_snapshot(path, contents) {
+        Ok(()) => true,
+        Err(err) => {
+            log::warn!("snapshot_fail path={} err={err}", path.display());
+            false
+        }
     }
-    merged
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -273,15 +289,11 @@ pub fn persist_places(incoming: impl IntoIterator<Item = (AgentId, PanePlace)>) 
         return;
     }
     ensure_migrated();
-    if std::fs::create_dir_all(runtime_dir()).is_err() {
-        return;
-    }
     let path = places_path();
-    let existing = parse_places(&std::fs::read_to_string(&path).unwrap_or_default());
-    let leftover = parse_places(&std::fs::read_to_string(host_places_path()).unwrap_or_default());
-    let merged = replace_session_places(merge_places(existing, leftover), incoming);
-    let _ = std::fs::write(&path, format_places(merged));
-    let _ = std::fs::remove_file(host_places_path());
+    let merged = replace_session_places(merged_places(), incoming);
+    if publish_snapshot(&path, format_places(merged)) {
+        let _ = std::fs::remove_file(host_places_path());
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -290,10 +302,7 @@ pub fn persist_scan(text: &str) {
         return;
     }
     ensure_migrated();
-    if std::fs::create_dir_all(runtime_dir()).is_err() {
-        return;
-    }
-    let _ = std::fs::write(scan_path(), text);
+    let _ = publish_snapshot(&scan_path(), text);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -306,13 +315,9 @@ pub fn load_scan() -> Option<String> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn persist_seen(session: &str, pane_id: u32, finished_at: u64) {
     ensure_migrated();
-    let dir = seen_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let path = dir.join(format!("{session}-{pane_id}"));
-    let _ = std::fs::write(
-        path,
+    let path = seen_dir().join(format!("{session}-{pane_id}"));
+    let _ = publish_snapshot(
+        &path,
         format!("{}\n", format_seen(session, pane_id, finished_at)),
     );
 }
@@ -320,13 +325,9 @@ pub fn persist_seen(session: &str, pane_id: u32, finished_at: u64) {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn persist_started(session: &str, pane_id: u32, started_at: u64) {
     ensure_migrated();
-    let dir = started_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let path = dir.join(format!("{session}-{pane_id}"));
-    let _ = std::fs::write(
-        path,
+    let path = started_dir().join(format!("{session}-{pane_id}"));
+    let _ = publish_snapshot(
+        &path,
         format!("{}\n", format_started(session, pane_id, started_at)),
     );
 }
