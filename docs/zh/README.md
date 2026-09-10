@@ -19,7 +19,7 @@ Zellij 浮动面板：列出还在跑的 coding agent，用 Cursor hook 更新�
 
 WASM 桥和宿主 `board-tui` 都会拷到 `~/.config/zellij/plugins/`。WASM 路径可用 `ZELLIJ_AGENT_BOARD_PLUGIN_PATH` 覆盖；TUI 可用 `ZELLIJ_AGENT_BOARD_TUI` 或插件配置里的 `tui`。
 
-`install-hooks.sh` 按 `adapters/catalog.toml` 注册 hook（Cursor、CodeBuddy、Claude Code、OpenCode）。可传 adapter id 只装其一，默认全部。新的 cc 系 CLI 丢一份 TOML 到 `~/.config/zellij-agent-board/adapters/` 即可。
+`install-hooks.sh` 按 `adapters/catalog.toml` 注册 hook（Cursor、CodeBuddy、Claude Code、OpenCode、Codex）。可传 adapter id 只装其一，默认全部。新的 cc 系 CLI 丢一份 TOML 到 `~/.config/zellij-agent-board/adapters/` 即可。
 
 ## 快捷键
 

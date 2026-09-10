@@ -371,11 +371,12 @@ mod tests {
             .iter()
             .map(|adapter| adapter.id.as_str())
             .collect();
-        assert_eq!(ids, ["cursor", "codebuddy", "claude", "opencode"]);
+        assert_eq!(ids, ["cursor", "codebuddy", "claude", "opencode", "codex"]);
         assert!(catalog.wants_bin("agent"));
         assert!(catalog.wants_bin("codebuddy"));
         assert!(catalog.wants_bin("claude"));
         assert!(catalog.wants_bin("opencode"));
+        assert!(catalog.wants_bin("codex"));
         assert!(!catalog.wants_bin("vim"));
     }
 
@@ -417,6 +418,10 @@ mod tests {
         assert_eq!(catalog.badge_for("claude").0, "CC");
         assert_eq!(catalog.badge_for("opencode").0, "OC");
         assert_eq!(
+            catalog.badge_for("codex"),
+            ("CX".into(), Some("#10a37f".into()))
+        );
+        assert_eq!(
             catalog
                 .adapter_for_bin("agent")
                 .and_then(|adapter| adapter.chat_store_needle.clone()),
@@ -439,8 +444,11 @@ mod tests {
         assert!(!keep_process(&argv(&["vim", "src/main.rs"])));
         assert!(!keep_process(&argv(&["claude", "-p", "hello"])));
         assert!(!keep_process(&argv(&["opencode", "run", "hello"])));
+        assert!(!keep_process(&argv(&["codex", "exec", "hello"])));
         assert!(keep_process(&argv(&["claude"])));
         assert!(keep_process(&argv(&["opencode", "/tmp/proj"])));
+        assert!(keep_process(&argv(&["codex"])));
+        assert!(keep_process(&argv(&["codex", "resume", "--last"])));
         assert!(keep_row(&argv(&["opencode-next"])));
         assert!(!keep_row(&argv(&["agent", "status"])));
     }
@@ -528,6 +536,7 @@ hook_dir = "~/.mycli/hooks"
         assert!(paths
             .iter()
             .any(|path| path.ends_with(".claude/settings.json")));
+        assert!(paths.iter().any(|path| path.ends_with(".codex/hooks.json")));
         assert!(paths
             .iter()
             .any(|path| path.ends_with("opencode/plugins/zellij-agent-board.js")));

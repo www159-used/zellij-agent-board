@@ -129,6 +129,33 @@ def install_opencode(adapter: dict, protocols: dict, dest_dir: Path) -> None:
     print(f"plugin: {dest}")
 
 
+def ensure_codex_hooks_feature() -> None:
+    """Codex ignores hooks.json unless the hooks feature is on."""
+    codex = shutil.which("codex")
+    if not codex:
+        print("codex not on PATH; enable hooks later: codex features enable hooks")
+        return
+    import subprocess
+
+    result = subprocess.run(
+        [codex, "features", "enable", "hooks"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        print("enabled feature: hooks")
+    else:
+        err = (result.stderr or result.stdout or "").strip()
+        print(f"could not enable hooks feature: {err or result.returncode}")
+
+
+def install_codex(adapter: dict, protocols: dict, command: str) -> None:
+    # Same Claude-shaped hooks tree; file is hooks.json not settings.json.
+    install_cc(adapter, protocols, command)
+    ensure_codex_hooks_feature()
+
+
 def main(argv: list[str]) -> None:
     target = argv[1] if len(argv) > 1 else "all"
     catalog = load_catalog()
@@ -153,6 +180,8 @@ def main(argv: list[str]) -> None:
             install_cursor(adapter, protocols, command)
         elif kind == "cc":
             install_cc(adapter, protocols, command)
+        elif kind == "codex":
+            install_codex(adapter, protocols, command)
         elif kind == "opencode":
             install_opencode(adapter, protocols, dest_dir)
         else:

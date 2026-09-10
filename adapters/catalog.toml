@@ -67,6 +67,25 @@ plugin = "scripts/opencode-plugin.js"
 "tool.execute.before" = "preToolUse"
 "tool.execute.after" = "postToolUse"
 
+# Codex CLI: Claude-shaped hooks in ~/.codex/hooks.json (not settings.json).
+# Event set is the subset Codex documents today; names match the cc map.
+[protocol.codex]
+install = "codex"
+events = [
+  "SessionStart",
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "Stop",
+]
+
+[protocol.codex.map]
+SessionStart = "sessionStart"
+UserPromptSubmit = "beforeSubmitPrompt"
+PreToolUse = "preToolUse"
+PostToolUse = "postToolUse"
+Stop = "stop"
+
 [[adapter]]
 id = "cursor"
 badge = "CA"
@@ -140,4 +159,45 @@ skip = [
   "db",
   "run",
   "pr",
+]
+
+[[adapter]]
+id = "codex"
+badge = "CX"
+color = "#10a37f"
+bins = ["codex"]
+protocol = "codex"
+settings = "~/.codex/hooks.json"
+hook_dir = "~/.codex/hooks"
+skip = [
+  "--version",
+  "-V",
+  "-v",
+  "exec",
+  "e",
+  "review",
+  "login",
+  "logout",
+  "mcp",
+  "plugin",
+  "app-server",
+  "remote-control",
+  "app",
+  "completion",
+  "update",
+  "doctor",
+  "sandbox",
+  "debug",
+  "apply",
+  "a",
+  "queue",
+  "archive",
+  "delete",
+  "migrate-rollouts",
+  "unarchive",
+  "cloud",
+  "exec-server",
+  "features",
+  "agents",
+  "help",
 ]
