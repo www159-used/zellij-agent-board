@@ -1,0 +1,4 @@
+{"v":1,"ts":100,"event":"open","session":"old","agents":3}
+{"v":1,"ts":140,"event":"jump","from":"old","to":"other"}
+{"v":1,"ts":150,"event":"jump","from":"old","to":"other"}
+{"v":1,"ts":200,"event":"close","session":"old","secs":100,"jumps":2,"max_agents":5}

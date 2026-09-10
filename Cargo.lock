@@ -2898,6 +2898,7 @@ dependencies = [
  "crossterm",
  "flate2",
  "fs2",
+ "getrandom 0.4.3",
  "log",
  "ratatui",
  "serde",

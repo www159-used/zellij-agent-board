@@ -82,10 +82,12 @@ cargo build --release --bin board-tui
 
 ## Usage stats
 
-The host TUI records anonymous, local-only usage events (board opens, jumps, and feature use) as one JSON object per line in `~/.local/share/zellij-agent-board/usage.jsonl`. Nothing leaves the machine. Set `ZELLIJ_AGENT_BOARD_NO_STATS` to turn it off, or `ZELLIJ_AGENT_BOARD_STATS` to override the path.
+The host TUI records local usage facts as JSONL in `$XDG_DATA_HOME/zellij-agent-board/usage.jsonl` (default `~/.local/share/zellij-agent-board/usage.jsonl`). Nothing leaves the machine. Set `ZELLIJ_AGENT_BOARD_NO_STATS` to disable collection, or `ZELLIJ_AGENT_BOARD_STATS` to override the path.
 
 ```bash
 board-tui --stats
 ```
 
-Each line carries a `v` schema version, an epoch-second `ts`, an `event` name, and event-specific fields. Adding events or fields stays backward compatible; see the schema contract in `src/stats.rs`.
+Each opening gets a fresh random visit ID. Version 2 records mapped input actions, changed board snapshots, jump requests, pipe results, and normal/error exits. Typed text, titles, paths, and real session/pane identifiers are omitted; temporary row/session IDs only last for that visit. There is no persistent installation ID. Older v1 logs may contain session names; they are not rewritten.
+
+The summary derives mode entries from state transitions and reports operation counts, pipe outcomes, and visits missing a close event. Pipe success does not confirm focus. Logs currently append without rotation. See [the collection and analysis design](docs/design/usage-analytics.md) for fields and limitations.

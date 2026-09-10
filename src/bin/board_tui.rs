@@ -56,9 +56,8 @@ struct App {
     scan_mtime: Option<SystemTime>,
     places_mtime: Option<SystemTime>,
     spool_mtime: Option<SystemTime>,
-    session_start: Instant,
-    jumps: u64,
-    max_agents: u64,
+    usage: stats::Visit,
+    jump_sender: fn(&str, u32, &str) -> &'static str,
 }
 
 fn log_path() -> PathBuf {
@@ -243,7 +242,10 @@ Log: {}
         app.board.agents.len()
     );
     let mut terminal = setup()?;
+    app.usage
+        .record("open", &[("os", json!(std::env::consts::OS))]);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run(&mut terminal)));
+    app.finish_usage(&result);
     restore(&mut terminal)?;
     log::info!("close session={}", app.home);
     match result {
@@ -258,6 +260,14 @@ fn replay(path: &str) -> io::Result<()> {
 }
 
 impl App {
+    fn finish_usage(&mut self, result: &std::thread::Result<io::Result<()>>) {
+        self.usage.close(match result {
+            Ok(Ok(())) => "dismiss",
+            Ok(Err(_)) => "io_error",
+            Err(_) => "panic",
+        });
+    }
+
     fn new() -> Self {
         let now = Instant::now();
         Self {
@@ -271,9 +281,8 @@ impl App {
             scan_mtime: None,
             places_mtime: None,
             spool_mtime: None,
-            session_start: now,
-            jumps: 0,
-            max_agents: 0,
+            usage: stats::Visit::default(),
+            jump_sender: send_jump,
         }
     }
 
@@ -281,30 +290,6 @@ impl App {
         self.load_model();
         spawn_reconcile(&mut self.reconcile);
         self.last_reconcile = Instant::now();
-        self.note_agents();
-        stats::record(
-            "open",
-            &[
-                ("session", json!(self.home)),
-                ("agents", json!(self.max_agents)),
-            ],
-        );
-    }
-
-    fn note_agents(&mut self) {
-        self.max_agents = self.max_agents.max(self.board.agents.len() as u64);
-    }
-
-    fn record_close(&self) {
-        stats::record(
-            "close",
-            &[
-                ("session", json!(self.home)),
-                ("secs", json!(self.session_start.elapsed().as_secs())),
-                ("jumps", json!(self.jumps)),
-                ("max_agents", json!(self.max_agents)),
-            ],
-        );
     }
 
     fn load_model(&mut self) {
@@ -356,12 +341,13 @@ impl App {
                 self.board
                     .set_list_geometry(self.view.width, self.view.height);
                 draw(terminal, &self.board, &self.home)?;
+                self.usage
+                    .snapshot(&self.board, self.view.width, self.view.height);
                 dirty = false;
             }
             if event::poll(POLL)? {
                 match self.drain_input()? {
                     DrainInput::Quit => {
-                        self.record_close();
                         return Ok(());
                     }
                     DrainInput::Dirty => dirty = true,
@@ -369,7 +355,6 @@ impl App {
                 }
             }
             dirty |= self.take_store();
-            self.note_agents();
             let now = Instant::now();
             if now.duration_since(self.last_reconcile) >= SCAN_EVERY {
                 spawn_reconcile(&mut self.reconcile);
@@ -422,13 +407,7 @@ impl App {
         // C-e / C-y: same move-together scroll as the wheel (spotlight holds
         // its screen line; the list flows under it).
         if let Some(delta) = view_scroll_delta(event) {
-            let moved = self.board.scroll_view(delta);
-            let preview = self.refresh_hover();
-            return if moved || preview {
-                Loop::Changed
-            } else {
-                Loop::Ignored
-            };
+            return self.scroll_input("keyboard", delta);
         }
         let mapped = if self.board.is_picking() {
             map_picker_key(event)
@@ -439,22 +418,19 @@ impl App {
             return Loop::Ignored;
         };
         let before = ModeSnap::capture(&self.board);
-        self.note_feature(&key);
-        match self.board.decide(key) {
+        self.usage
+            .snapshot(&self.board, self.view.width, self.view.height);
+        self.usage.key(key);
+        let action = self.board.decide(key);
+        self.usage
+            .snapshot(&self.board, self.view.width, self.view.height);
+        match action {
             Action::Dismiss => {
                 log::info!("quit");
                 Loop::Quit
             }
             Action::Jump { session, pane_id } => {
-                log_mode_ends(&before, &self.board, "jump");
-                self.jumps += 1;
-                stats::record(
-                    "jump",
-                    &[("from", json!(self.home)), ("to", json!(session))],
-                );
-                persist_done_seen(&self.board, &session, pane_id);
-                send_jump(&session, pane_id, "key");
-                Loop::Changed
+                self.finish_jump(&before, &session, pane_id, "key")
             }
             Action::None => {
                 log_mode_change(key, &before, &self.board);
@@ -463,19 +439,23 @@ impl App {
         }
     }
 
-    /// Count the intent behind feature keys. Fires only in the board's base
-    /// state so typing inside search / flash never inflates the numbers.
-    fn note_feature(&self, key: &Key) {
-        if self.board.help_visible || self.board.is_searching() || self.board.is_hinting() {
-            return;
-        }
-        let event = match key {
-            Key::StartSearch => "search",
-            Key::StartHint => "flash",
-            Key::ToggleHelp => "help",
-            _ => return,
-        };
-        stats::record(event, &[("session", json!(self.home))]);
+    fn dispatch_jump(&mut self, session: &str, pane_id: u32, via: &str) {
+        let request_seq = self.usage.jump(session, pane_id);
+        let outcome = (self.jump_sender)(session, pane_id, via);
+        self.usage.record(
+            "jump_result",
+            &[
+                ("request_seq", json!(request_seq)),
+                ("outcome", json!(outcome)),
+            ],
+        );
+    }
+
+    fn finish_jump(&mut self, before: &ModeSnap, session: &str, pane_id: u32, via: &str) -> Loop {
+        log_mode_ends(before, &self.board, "jump");
+        persist_done_seen(&self.board, session, pane_id);
+        self.dispatch_jump(session, pane_id, via);
+        Loop::Changed
     }
 
     /// Pointer input: a click jumps to the row under it, motion previews
@@ -484,21 +464,26 @@ impl App {
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Loop {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                self.usage
+                    .snapshot(&self.board, self.view.width, self.view.height);
+                self.usage.record(
+                    "input",
+                    &[
+                        ("source", json!("mouse")),
+                        ("operation", json!("Click")),
+                        ("column", json!(mouse.column)),
+                        ("row", json!(mouse.row)),
+                    ],
+                );
                 let before = ModeSnap::capture(&self.board);
-                match self
-                    .board
-                    .click(self.view.height, self.view.width, mouse.column, mouse.row)
-                {
+                let action =
+                    self.board
+                        .click(self.view.height, self.view.width, mouse.column, mouse.row);
+                self.usage
+                    .snapshot(&self.board, self.view.width, self.view.height);
+                match action {
                     Action::Jump { session, pane_id } => {
-                        log_mode_ends(&before, &self.board, "jump");
-                        self.jumps += 1;
-                        stats::record(
-                            "jump",
-                            &[("from", json!(self.home)), ("to", json!(session))],
-                        );
-                        persist_done_seen(&self.board, &session, pane_id);
-                        send_jump(&session, pane_id, "click");
-                        Loop::Changed
+                        self.finish_jump(&before, &session, pane_id, "click")
                     }
                     Action::None => Loop::Changed,
                     Action::Dismiss => {
@@ -527,13 +512,7 @@ impl App {
                 } else {
                     3
                 };
-                let moved = self.board.scroll_view(delta);
-                let preview = self.refresh_hover();
-                if moved || preview {
-                    Loop::Changed
-                } else {
-                    Loop::Ignored
-                }
+                self.scroll_input("mouse", delta)
             }
             _ => Loop::Ignored,
         }
@@ -547,6 +526,28 @@ impl App {
         };
         self.board
             .hover(self.view.height, self.view.width, column, row)
+    }
+
+    /// C-e/C-y and the wheel share one path: record the input, slide the
+    /// view, re-resolve the hover, then snapshot the changed board.
+    fn scroll_input(&mut self, source: &str, delta: i32) -> Loop {
+        self.usage.record(
+            "input",
+            &[
+                ("source", json!(source)),
+                ("operation", json!("Scroll")),
+                ("delta", json!(delta)),
+            ],
+        );
+        let moved = self.board.scroll_view(delta);
+        let preview = self.refresh_hover();
+        self.usage
+            .snapshot(&self.board, self.view.width, self.view.height);
+        if moved || preview {
+            Loop::Changed
+        } else {
+            Loop::Ignored
+        }
     }
 
     fn take_store(&mut self) -> bool {
@@ -663,6 +664,98 @@ mod process_tests {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
+    fn test_app(path: &std::path::Path) -> super::App {
+        let mut app = super::App::new();
+        app.usage = zellij_agent_board::stats::Visit::new(Some(path.into()));
+        app.usage.record("open", &[]);
+        app.view = ratatui::layout::Size::new(100, 30);
+        app.board
+            .ingest("SCAN private 3 agent /bin/agent --workspace /tmp/private\n");
+        assert_eq!(app.board.agents.len(), 1);
+        app.board.set_list_geometry(100, 30);
+        app
+    }
+
+    #[test]
+    fn host_keyboard_search_jump_and_exit_record_linked_facts() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.jsonl");
+        let mut app = test_app(&path);
+        app.jump_sender = |session, pane, via| {
+            assert_eq!((session, pane, via), ("private", 3, "key"));
+            "exit_error"
+        };
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('q'))),
+            Loop::Quit
+        ));
+        app.finish_usage(&Ok(Ok(())));
+        let log = fs::read_to_string(path).unwrap();
+        let summary = stats::summarize(&log);
+        assert_eq!(summary.mode_entries["searching"], 1);
+        assert!(!summary.mode_entries.contains_key("hinting"));
+        assert_eq!(summary.inputs["keyboard/Input"], 1);
+        assert_eq!(summary.count("jump"), 1);
+        assert_eq!(summary.dispatch_results["exit_error"], 1);
+        assert_eq!(summary.incomplete_visits, 0);
+        let rows: Vec<serde_json::Value> = log
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let request = rows.iter().find(|row| row["event"] == "jump").unwrap();
+        let result = rows
+            .iter()
+            .find(|row| row["event"] == "jump_result")
+            .unwrap();
+        assert_eq!(result["request_seq"], request["seq"]);
+        assert_eq!(result["visit_id"], request["visit_id"]);
+        assert_eq!(rows.last().unwrap()["reason"], "dismiss");
+        assert!(!log.contains("private"));
+    }
+
+    #[test]
+    fn host_mouse_jump_and_error_exits_record_results() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.jsonl");
+        let mut app = test_app(&path);
+        app.jump_sender = |_, _, via| {
+            assert_eq!(via, "click");
+            "ok"
+        };
+        // Resolve a target with the real hit-testing logic, independent of chrome height.
+        for row in 0..30 {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 5,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+            if stats::summarize(&fs::read_to_string(&path).unwrap()).count("jump") > 0 {
+                break;
+            }
+        }
+        app.finish_usage(&Ok(Err(io::Error::other("test failure"))));
+        let log = fs::read_to_string(&path).unwrap();
+        let summary = stats::summarize(&log);
+        assert_eq!(summary.count("jump"), 1);
+        assert_eq!(summary.dispatch_results["ok"], 1);
+        assert!(summary.inputs["mouse/Click"] >= 1);
+        assert!(log.contains("io_error"));
+        let panic_path = dir.path().join("panic.jsonl");
+        let mut app = test_app(&panic_path);
+        app.finish_usage(&Err(Box::new("panic payload")));
+        let log = fs::read_to_string(panic_path).unwrap();
+        assert!(log.contains("\"reason\":\"panic\""));
+        assert!(!log.contains("panic payload"));
+    }
+
     #[test]
     fn reconcile_skips_a_running_child_and_reaps_it_before_restarting() {
         // stdin keeps cat alive without sleeps or a live Zellij session.
@@ -775,7 +868,7 @@ fn persist_done_seen(board: &Board, session: &str, pane_id: u32) {
     persist_seen(session, pane_id, finished_at);
 }
 
-fn send_jump(session: &str, pane_id: u32, via: &str) {
+fn send_jump(session: &str, pane_id: u32, via: &str) -> &'static str {
     let payload = format_jump(session, pane_id);
     log::info!("jump to={session} pane={pane_id} via={via}");
     let mut cmd = Command::new(zellij_bin());
@@ -788,12 +881,18 @@ fn send_jump(session: &str, pane_id: u32, via: &str) {
         .args(["pipe", "--name", PIPE_NAME, "--", &payload])
         .status()
     {
-        Ok(status) if status.success() => {}
-        Ok(status) => log::warn!(
-            "jump_pipe_fail to={session} pane={pane_id} via={via} code={}",
-            status.code().unwrap_or(-1)
-        ),
-        Err(err) => log::warn!("jump_pipe_fail to={session} pane={pane_id} via={via} err={err}"),
+        Ok(status) if status.success() => "ok",
+        Ok(status) => {
+            log::warn!(
+                "jump_pipe_fail to={session} pane={pane_id} via={via} code={}",
+                status.code().unwrap_or(-1)
+            );
+            "exit_error"
+        }
+        Err(err) => {
+            log::warn!("jump_pipe_fail to={session} pane={pane_id} via={via} err={err}");
+            "spawn_error"
+        }
     }
 }
 

@@ -77,3 +77,9 @@ cargo build --release --bin board-tui
 `e2e/scenes/` 是宿主场景：每步按声明尺寸绘制当前帧，`expect` 检查点只看这一帧。`board-tui --replay` 不需要 TTY。`./scripts/e2e-zellij.sh` 在一次性 session 中检查底栏绘制，再发 `q` 确认 TUI 关闭。无头 session 无法授予插件权限，因此直接通过 `new-pane` 启动 TUI，WASM 加载允许跳过。没有 `zellij` 时脚本跳过；设 `ZAB_E2E_ZELLIJ_REQUIRED=1` 可强制失败。授权、Alt+q 开关和跨会话跳转仍需交互验证。
 
 通过 `bash scripts/package-release.sh VERSION TARGET WASM TUI [OUT_DIR]` 生成平台安装包和 SHA-256 校验文件，再用 `bash scripts/test-release-package.sh ARCHIVE` 在临时目录中验证解压、安装和宿主程序启动。发布流水线会在每个平台通过此检查后才发布。
+
+## 使用统计
+
+宿主 TUI 将基础行为记录到本机 JSONL，不上传。运行 `board-tui --stats` 查看汇总；设置 `ZELLIJ_AGENT_BOARD_NO_STATS` 关闭采集，`ZELLIJ_AGENT_BOARD_STATS` 可覆盖路径。默认位置是 `$XDG_DATA_HOME/zellij-agent-board/usage.jsonl`，未设置时为 `~/.local/share/zellij-agent-board/usage.jsonl`。
+
+每次打开生成新的访问 ID，没有持久安装 ID。记录操作、变化后的状态、跳转请求和投递结果；不保存输入内容、标题、路径和真实 session/pane 标识。旧版日志可能仍含 session 名，不自动改写。汇总从基础事件推导模式进入次数；投递成功不等于实际聚焦成功，缺失关闭事件的访问单独计数。当前日志尚未轮转。详见[设计说明](../design/usage-analytics.md)。
