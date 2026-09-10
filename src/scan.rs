@@ -2,8 +2,15 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// `zellij action list-panes` can hang forever on a stuck client IPC.
+/// Without a cap, one reconcile holds `reconcile.lock` and the board
+/// keeps jumping to stale pane ids (dead pane → focus no-op → master).
+const ZELLIJ_CLI_TIMEOUT: Duration = Duration::from_secs(3);
 
 use crate::agent::{keep_cursor_agent, AgentId, PanePlace};
 use crate::catalog::catalog;
@@ -107,24 +114,10 @@ pub fn scan_places_for(sessions: &[String]) -> Vec<(AgentId, PanePlace)> {
         if session.is_empty() {
             continue;
         }
-        let Ok(output) = Command::new(zellij_bin())
-            .args([
-                "--session",
-                session,
-                "action",
-                "list-panes",
-                "--all",
-                "--json",
-            ])
-            .output()
-        else {
+        let Some(output) = list_panes_json(session) else {
             continue;
         };
-        if !output.status.success() {
-            continue;
-        }
-        let json = String::from_utf8_lossy(&output.stdout);
-        out.extend(places_from_list_panes_json(session, &json));
+        out.extend(places_from_list_panes_json(session, &output));
     }
     out
 }
@@ -171,31 +164,35 @@ pub fn places_from_list_panes_json(session: &str, json: &str) -> Vec<(AgentId, P
         .collect()
 }
 
-/// `None` means list-panes failed — keep the row (fail open) so a
-/// probe glitch cannot empty the board. `Some` is the live terminal
-/// pane ids; a process whose `ZELLIJ_PANE_ID` is missing is an orphan
-/// left behind after the pane closed.
+/// `None` means list-panes failed or timed out — keep the row (fail
+/// open) so a probe glitch cannot empty the board. `Some` is the live
+/// terminal pane ids; a process whose `ZELLIJ_PANE_ID` is missing is an
+/// orphan left behind after the pane closed.
 fn list_terminal_pane_ids(session: &str) -> Option<HashSet<u32>> {
-    let output = Command::new(zellij_bin())
-        .args([
-            "--session",
-            session,
-            "action",
-            "list-panes",
-            "--all",
-            "--json",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
+    let json = list_panes_json(session)?;
     Some(
-        places_from_list_panes_json(session, &String::from_utf8_lossy(&output.stdout))
+        places_from_list_panes_json(session, &json)
             .into_iter()
             .map(|(id, _)| id.pane_id)
             .collect(),
     )
+}
+
+fn list_panes_json(session: &str) -> Option<String> {
+    let mut cmd = Command::new(zellij_bin());
+    cmd.args([
+        "--session",
+        session,
+        "action",
+        "list-panes",
+        "--all",
+        "--json",
+    ]);
+    let output = command_output_timeout(cmd, ZELLIJ_CLI_TIMEOUT)?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn pane_still_open(pane: u32, listed: Option<&HashSet<u32>>) -> bool {
@@ -203,10 +200,9 @@ fn pane_still_open(pane: u32, listed: Option<&HashSet<u32>>) -> bool {
 }
 
 fn list_sessions() -> Vec<String> {
-    let Ok(output) = Command::new(zellij_bin())
-        .args(["list-sessions", "-n"])
-        .output()
-    else {
+    let mut cmd = Command::new(zellij_bin());
+    cmd.args(["list-sessions", "-n"]);
+    let Some(output) = command_output_timeout(cmd, ZELLIJ_CLI_TIMEOUT) else {
         return Vec::new();
     };
     String::from_utf8_lossy(&output.stdout)
@@ -216,6 +212,28 @@ fn list_sessions() -> Vec<String> {
             (!name.is_empty()).then(|| name.to_string())
         })
         .collect()
+}
+
+/// Run a command with a wall-clock cap. Zellij IPC can stall; without
+/// this, reconcile holds the store lock and the board jumps with stale
+/// pane ids.
+fn command_output_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = cmd.spawn().ok()?;
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(output)) => Some(output),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+            let _ = rx.recv_timeout(Duration::from_secs(1));
+            None
+        }
+    }
 }
 
 /// Candidate zellij locations, first hit wins. The plugin launcher and the
@@ -433,9 +451,29 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        agent_pids_from_text, pane_still_open, places_from_list_panes_json, ps_command_args,
-        scan_places_for, zellij_ids_from_env_blob,
+        agent_pids_from_text, command_output_timeout, pane_still_open, places_from_list_panes_json,
+        ps_command_args, scan_places_for, zellij_ids_from_env_blob,
     };
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn command_output_timeout_kills_a_hung_child() {
+        let started = Instant::now();
+        let mut sleep = Command::new("sleep");
+        sleep.arg("30");
+        assert!(command_output_timeout(sleep, Duration::from_millis(200)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn command_output_timeout_returns_fast_success() {
+        let mut printf = Command::new("printf");
+        printf.arg("ok");
+        let output = command_output_timeout(printf, Duration::from_secs(2)).expect("printf");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ok");
+    }
 
     #[test]
     fn drops_orphan_pane_ids_once_list_panes_is_known() {
