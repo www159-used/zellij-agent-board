@@ -1,0 +1,39 @@
+# Flash tip `q` must jump, not quit (flash.nvim: Esc aborts, q is a label).
+# Ten "xx" matches make the 10th tip `q` (alphabet asdfghjklq…).
+size 80 16
+meta hooks=1
+scan ww 1 /tmp/1
+scan ww 2 /tmp/2
+scan ww 3 /tmp/3
+scan ww 4 /tmp/4
+scan ww 5 /tmp/5
+scan ww 6 /tmp/6
+scan ww 7 /tmp/7
+scan ww 8 /tmp/8
+scan ww 9 /tmp/9
+scan ww 10 /tmp/10
+place ww 1 0 xx xx
+place ww 2 0 xx xx
+place ww 3 0 xx xx
+place ww 4 0 xx xx
+place ww 5 0 xx xx
+place ww 6 0 xx xx
+place ww 7 0 xx xx
+place ww 8 0 xx xx
+place ww 9 0 xx xx
+place ww 10 0 xx xx
+
+key s
+key input x
+expect hinting yes
+key q
+expect hinting no
+expect action jump ww 10
+
+# Idle `q` still quits; Esc clears flash without quitting.
+key s
+key esc
+expect hinting no
+expect action none
+key q
+expect action dismiss

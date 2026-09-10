@@ -2620,6 +2620,33 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
     }
 
     #[test]
+    fn flash_tip_q_jumps_instead_of_clearing_hint() {
+        let mut board = Board::default();
+        let mut scan = String::new();
+        for pane in 1..=10 {
+            scan.push_str(&format!(
+                "SCAN ww {pane} agent /Users/ww/.local/bin/agent --workspace /tmp/{pane}\n"
+            ));
+        }
+        board.ingest(&scan);
+        for agent in &mut board.agents {
+            agent.tab_name = "xx".into();
+        }
+        board.set_list_geometry(80, 16);
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Input('x')), Action::None);
+        assert_eq!(board.hint_label(9).as_deref(), Some("q"));
+        assert_eq!(
+            board.decide(Key::Input('q')),
+            Action::Jump {
+                session: "ww".into(),
+                pane_id: 10,
+            }
+        );
+        assert!(!board.is_hinting());
+    }
+
+    #[test]
     fn flash_sole_tab_match_jumps_immediately() {
         let mut board = Board::default();
         ingest_two(&mut board);

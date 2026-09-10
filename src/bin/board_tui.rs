@@ -429,7 +429,10 @@ fn map_key(event: KeyEvent, hinting: bool, searching: bool) -> Option<Key> {
         return None;
     }
     match event.code {
-        KeyCode::Esc | KeyCode::Char('q') => Some(Key::Dismiss),
+        // Flash/search (like flash.nvim): Esc aborts. `q` is a tip/query
+        // char while typing; only idle `q` quits the board.
+        KeyCode::Esc => Some(Key::Dismiss),
+        KeyCode::Char('q') if !typing => Some(Key::Dismiss),
         KeyCode::Char('?') if !typing => Some(Key::ToggleHelp),
         KeyCode::Backspace if typing => Some(Key::Backspace),
         KeyCode::Char('s') if !typing => Some(Key::StartHint),

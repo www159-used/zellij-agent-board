@@ -123,7 +123,11 @@ impl Runner {
 
     fn key(&mut self, args: &[&str], line: usize) -> Result<(), SceneError> {
         self.flush();
-        let key = parse_key(args, line)?;
+        // Mirror board-tui: idle `q` quits; flash/search/picker treat it as
+        // typed input (tip label or query char). Esc always dismisses.
+        let typing =
+            self.board.is_hinting() || self.board.is_searching() || self.board.is_picking();
+        let key = parse_key(args, line, typing)?;
         self.last = self.board.decide(key);
         self.paint();
         Ok(())
@@ -306,13 +310,21 @@ fn apply_place(board: &mut Board, args: &[&str], line: usize) -> Result<(), Scen
     Ok(())
 }
 
-fn parse_key(args: &[&str], line: usize) -> Result<Key, SceneError> {
+fn parse_key(args: &[&str], line: usize, typing: bool) -> Result<Key, SceneError> {
     match args.first().copied() {
         Some("enter") | Some("e") => {
             exact(args, 1, line, "key enter")?;
             Ok(Key::Confirm)
         }
-        Some("esc") | Some("q") => {
+        Some("esc") => {
+            exact(args, 1, line, "key esc")?;
+            Ok(Key::Dismiss)
+        }
+        Some("q") if typing => {
+            exact(args, 1, line, "key q")?;
+            Ok(Key::Input('q'))
+        }
+        Some("q") => {
             exact(args, 1, line, "key q")?;
             Ok(Key::Dismiss)
         }
