@@ -1,8 +1,12 @@
 //! Zellij WASM bridge. Scan / paint / keys live in the host `board-tui`.
+//!
+//! Logs go to stderr → Zellij's `zellij.log` (plugins cannot write the host
+//! `board.log`). Prefix every line with `zab` so `rg zab zellij.log` works.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use log::{Level, LevelFilter, Log, Metadata, Record};
 use zellij_agent_board::{
     bridge_close_plan, float_size_from_config, format_focus, format_places, is_host_tui_exit,
     jump_steps, looks_like_board_tui, now_ms, parse_jump, runtime_dir, should_abandon_empty_bridge,
@@ -12,6 +16,27 @@ use zellij_agent_board::{
 use zellij_tile::prelude::*;
 
 const PLUGIN_NAME: &str = "zellij-agent-board";
+
+struct ZellijLog;
+
+impl Log for ZellijLog {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= Level::Info
+    }
+
+    fn log(&self, record: &Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!("zab {} {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+fn init_logging() {
+    static LOGGER: ZellijLog = ZellijLog;
+    let _ = log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info));
+}
 const FOCUS_WRITER: &str = r#"
 dir="${ZAB_STATE_DIR:?}"
 mkdir -p "$dir"
@@ -87,12 +112,14 @@ register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        init_logging();
         let ids = get_plugin_ids();
         self.own_plugin_id = Some(ids.plugin_id);
         self.client_id = Some(ids.client_id);
         self.opened_at_ms = now_ms();
         self.float_size = float_size_from_config(&configuration);
         self.tui_path = tui_path(&configuration);
+        log::info!("plugin_load id={} client={}", ids.plugin_id, ids.client_id);
         subscribe(&[
             EventType::ModeUpdate,
             EventType::SessionUpdate,
@@ -116,6 +143,7 @@ impl ZellijPlugin for State {
             Event::PermissionRequestResult(result) => {
                 if result == PermissionStatus::Granted {
                     self.permissions_granted = true;
+                    log::info!("permission_granted");
                     if let Some(id) = self.own_plugin_id {
                         rename_plugin_pane(id, PLUGIN_NAME);
                     }
@@ -129,6 +157,8 @@ impl ZellijPlugin for State {
                     if !self.close_if_duplicate() {
                         self.try_open_tui(false);
                     }
+                } else {
+                    log::warn!("permission_denied");
                 }
                 false
             }
@@ -186,6 +216,7 @@ impl ZellijPlugin for State {
                 if context.get("zellij_agent_board").map(String::as_str) == Some("tui") {
                     self.tui_id = Some(pane_id);
                     self.tui_visible = true;
+                    log::info!("tui_opened pane={pane_id}");
                     self.hide_bridge_keep_tui();
                 }
                 false
@@ -195,6 +226,7 @@ impl ZellijPlugin for State {
                 if is_host_tui_exit(self.tui_id, pane_id, false) {
                     self.tui_id = None;
                     self.tui_visible = false;
+                    log::info!("tui_closed pane={pane_id}");
                     if should_shutdown_on_tui_close(self.bridge_hidden, self.dying) {
                         self.shutdown_bridge();
                     } else if !self.dying && self.tui_attempts < 3 {
@@ -212,6 +244,10 @@ impl ZellijPlugin for State {
             return false;
         };
         if let Some((session, pane_id)) = parse_jump(payload) {
+            log::info!(
+                "jump to={session} pane={pane_id} from={}",
+                self.current_session.as_deref().unwrap_or("")
+            );
             self.dying = true;
             for step in jump_steps(self.current_session.as_deref(), &session, pane_id) {
                 match step {
@@ -252,6 +288,7 @@ impl State {
             BridgeClosePlan::None => false,
             BridgeClosePlan::Drop { ids } => {
                 let dying = ids.contains(&own_id);
+                log::info!("duplicate_drop own={own_id} dying={dying}");
                 if dying {
                     self.dying = true;
                 }
@@ -264,6 +301,7 @@ impl State {
                 dying
             }
             BridgeClosePlan::Shutdown { ids } => {
+                log::info!("duplicate_shutdown own={own_id}");
                 self.shutdown_board(&ids);
                 true
             }
@@ -349,6 +387,11 @@ impl State {
             return;
         };
         self.tui_attempts = self.tui_attempts.saturating_add(1);
+        log::info!(
+            "tui_launch session={session} attempt={} path={}",
+            self.tui_attempts,
+            self.tui_path
+        );
         let _ = self.show_float();
         let mut context = BTreeMap::new();
         context.insert("zellij_agent_board".to_string(), "tui-launch".to_string());
@@ -408,11 +451,13 @@ impl State {
     }
 
     fn shutdown_bridge(&mut self) {
+        log::info!("bridge_shutdown");
         self.dying = true;
         close_self();
     }
 
     fn abandon_empty_bridge(&mut self) {
+        log::warn!("bridge_abandon attempts={}", self.tui_attempts);
         self.dying = true;
         if self.floating_layer.should_hide_on_close() {
             let _ = hide_floating_panes(self.own_tab_id);

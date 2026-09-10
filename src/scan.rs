@@ -188,7 +188,7 @@ fn list_panes_json(session: &str) -> Option<String> {
         "--all",
         "--json",
     ]);
-    let output = command_output_timeout(cmd, ZELLIJ_CLI_TIMEOUT)?;
+    let output = command_output_timeout(cmd, ZELLIJ_CLI_TIMEOUT, "list-panes", session)?;
     output
         .status
         .success()
@@ -202,7 +202,7 @@ fn pane_still_open(pane: u32, listed: Option<&HashSet<u32>>) -> bool {
 fn list_sessions() -> Vec<String> {
     let mut cmd = Command::new(zellij_bin());
     cmd.args(["list-sessions", "-n"]);
-    let Some(output) = command_output_timeout(cmd, ZELLIJ_CLI_TIMEOUT) else {
+    let Some(output) = command_output_timeout(cmd, ZELLIJ_CLI_TIMEOUT, "list-sessions", "") else {
         return Vec::new();
     };
     String::from_utf8_lossy(&output.stdout)
@@ -217,7 +217,12 @@ fn list_sessions() -> Vec<String> {
 /// Run a command with a wall-clock cap. Zellij IPC can stall; without
 /// this, reconcile holds the store lock and the board jumps with stale
 /// pane ids.
-fn command_output_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
+fn command_output_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+    kind: &str,
+    session: &str,
+) -> Option<Output> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = cmd.spawn().ok()?;
     let pid = child.id();
@@ -231,6 +236,17 @@ fn command_output_timeout(mut cmd: Command, timeout: Duration) -> Option<Output>
         Err(_) => {
             let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
             let _ = rx.recv_timeout(Duration::from_secs(1));
+            if session.is_empty() {
+                log::warn!(
+                    "zellij_cli_timeout kind={kind} timeout_ms={}",
+                    timeout.as_millis()
+                );
+            } else {
+                log::warn!(
+                    "zellij_cli_timeout kind={kind} session={session} timeout_ms={}",
+                    timeout.as_millis()
+                );
+            }
             None
         }
     }
@@ -462,7 +478,7 @@ mod tests {
         let started = Instant::now();
         let mut sleep = Command::new("sleep");
         sleep.arg("30");
-        assert!(command_output_timeout(sleep, Duration::from_millis(200)).is_none());
+        assert!(command_output_timeout(sleep, Duration::from_millis(200), "sleep", "").is_none());
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
@@ -470,7 +486,8 @@ mod tests {
     fn command_output_timeout_returns_fast_success() {
         let mut printf = Command::new("printf");
         printf.arg("ok");
-        let output = command_output_timeout(printf, Duration::from_secs(2)).expect("printf");
+        let output =
+            command_output_timeout(printf, Duration::from_secs(2), "printf", "").expect("printf");
         assert!(output.status.success());
         assert_eq!(output.stdout, b"ok");
     }

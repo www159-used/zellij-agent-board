@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::io::{self, stdout, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -30,8 +30,8 @@ use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use zellij_agent_board::{
     focus_path, format_jump, load_places, load_scan, parse_focus, persist_places, persist_seen,
-    places_path, reconcile_once, render_board, run_reconcile, scan_path, scan_places_for,
-    spool_dir, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
+    places_path, reconcile_once, render_board, run_reconcile, runtime_dir, scan_path,
+    scan_places_for, spool_dir, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -55,6 +55,130 @@ struct App {
     spool_mtime: Option<SystemTime>,
 }
 
+fn log_path() -> PathBuf {
+    runtime_dir().join("board.log")
+}
+
+const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+const LOG_KEEP_GZ: usize = 5;
+
+/// File-only logger so the TUI PTY stays clean. Appends to `board.log`; at
+/// 10 MiB the file is gzipped to `board-YYYYMMDD-HHMMSS.log.gz` (keep 5).
+/// TUI and `--reconcile` share the path; rotation uses a lock file.
+fn init_logging() {
+    use std::sync::OnceLock;
+    static LOGGER: OnceLock<BoardFileLogger> = OnceLock::new();
+    let path = log_path();
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let logger = LOGGER.get_or_init(|| BoardFileLogger { path });
+    let _ = log::set_logger(logger).map(|()| log::set_max_level(log::LevelFilter::Info));
+}
+
+struct BoardFileLogger {
+    path: PathBuf,
+}
+
+impl log::Log for BoardFileLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let line = format!(
+            "{} {} {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+            record.level(),
+            record.args()
+        );
+        rotate_board_log_if_needed(&self.path);
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+fn rotate_board_log_if_needed(path: &Path) {
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+    if meta.len() < LOG_ROTATE_BYTES {
+        return;
+    }
+    let lock_path = path.with_extension("log.lock");
+    let Ok(lock) = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+    else {
+        return;
+    };
+    use fs2::FileExt;
+    if lock.try_lock_exclusive().is_err() {
+        return;
+    }
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+    if meta.len() < LOG_ROTATE_BYTES {
+        return;
+    }
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let gz_path = parent.join(format!("board-{stamp}.log.gz"));
+    let tmp_path = path.with_extension("log.rotating");
+    if fs::rename(path, &tmp_path).is_err() {
+        return;
+    }
+    let compressed = (|| -> io::Result<()> {
+        let mut input = fs::File::open(&tmp_path)?;
+        let output = fs::File::create(&gz_path)?;
+        let mut encoder = flate2::write::GzEncoder::new(output, flate2::Compression::default());
+        io::copy(&mut input, &mut encoder)?;
+        encoder.finish()?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&tmp_path);
+    if compressed.is_err() {
+        let _ = fs::remove_file(&gz_path);
+        return;
+    }
+    prune_board_log_gz(parent, LOG_KEEP_GZ);
+}
+
+fn prune_board_log_gz(dir: &Path, keep: usize) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut gz: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("board-") && name.ends_with(".log.gz"))
+        })
+        .collect();
+    gz.sort();
+    let drop = gz.len().saturating_sub(keep);
+    for path in gz.into_iter().take(drop) {
+        let _ = fs::remove_file(path);
+    }
+}
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -66,11 +190,16 @@ board-tui — host dashboard for zellij-agent-board
   board-tui                         live board (needs a TTY)
   board-tui --reconcile             write the host store once and exit
   board-tui --replay FILE.scene     run an e2e scene; no TTY
-"
+
+Log: {}
+  rotates at 10MiB → board-YYYYMMDD-HHMMSS.log.gz (keep 5)
+",
+                log_path().display()
             );
             return Ok(());
         }
         Some("--reconcile") => {
+            init_logging();
             let _ = run_reconcile();
             return Ok(());
         }
@@ -91,11 +220,18 @@ board-tui — host dashboard for zellij-agent-board
         }
         None => {}
     }
+    init_logging();
     let mut app = App::new();
     app.bootstrap();
+    log::info!(
+        "open session={} agents={}",
+        app.home,
+        app.board.agents.len()
+    );
     let mut terminal = setup()?;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run(&mut terminal)));
     restore(&mut terminal)?;
+    log::info!("close session={}", app.home);
     match result {
         Ok(ok) => ok,
         Err(panic) => std::panic::resume_unwind(panic),
@@ -130,7 +266,8 @@ impl App {
     }
 
     fn load_model(&mut self) {
-        if load_scan().is_none() {
+        let had_cache = load_scan().is_some();
+        if !had_cache {
             let _ = reconcile_once();
         }
         if let Some(cached) = load_scan() {
@@ -140,6 +277,12 @@ impl App {
         self.fill_home_titles();
         self.reload_spool();
         self.mark_launch_focus();
+        log::info!(
+            "bootstrap session={} cache={} agents={}",
+            self.home,
+            had_cache,
+            self.board.agents.len()
+        );
     }
 
     /// One `list-panes` for this session before the first paint. Remote
@@ -249,14 +392,22 @@ impl App {
         let Some(key) = mapped else {
             return Loop::Ignored;
         };
+        let before = ModeSnap::capture(&self.board);
         match self.board.decide(key) {
-            Action::Dismiss => Loop::Quit,
+            Action::Dismiss => {
+                log::info!("quit");
+                Loop::Quit
+            }
             Action::Jump { session, pane_id } => {
+                log_mode_ends(&before, &self.board, "jump");
                 persist_done_seen(&self.board, &session, pane_id);
-                send_jump(&session, pane_id);
+                send_jump(&session, pane_id, "key");
                 Loop::Changed
             }
-            Action::None => Loop::Changed,
+            Action::None => {
+                log_mode_change(key, &before, &self.board);
+                Loop::Changed
+            }
         }
     }
 
@@ -266,17 +417,22 @@ impl App {
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Loop {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                let before = ModeSnap::capture(&self.board);
                 match self
                     .board
                     .click(self.view.height, self.view.width, mouse.column, mouse.row)
                 {
                     Action::Jump { session, pane_id } => {
+                        log_mode_ends(&before, &self.board, "jump");
                         persist_done_seen(&self.board, &session, pane_id);
-                        send_jump(&session, pane_id);
+                        send_jump(&session, pane_id, "click");
                         Loop::Changed
                     }
                     Action::None => Loop::Changed,
-                    Action::Dismiss => Loop::Quit,
+                    Action::Dismiss => {
+                        log::info!("quit");
+                        Loop::Quit
+                    }
                 }
             }
             MouseEventKind::Moved | MouseEventKind::Drag(_) => {
@@ -325,11 +481,21 @@ impl App {
         let mut dirty = false;
         if file_changed(&scan_path(), &mut self.scan_mtime) {
             if let Some(text) = load_scan() {
-                dirty |= self.board.ingest(&text);
+                let before = self.board.agents.len();
+                if self.board.ingest(&text) {
+                    dirty = true;
+                    log::info!(
+                        "scan_reload agents_before={before} agents={}",
+                        self.board.agents.len()
+                    );
+                }
             }
         }
         if file_changed(&places_path(), &mut self.places_mtime) {
-            dirty |= self.reload_places();
+            if self.reload_places() {
+                dirty = true;
+                log::info!("places_reload");
+            }
         }
         dirty
     }
@@ -353,7 +519,11 @@ impl App {
             }
         }
         self.board.ingest_notice(&text);
-        self.board.hooks_installed != before_hooks || self.board.agents != before
+        let changed = self.board.hooks_installed != before_hooks || self.board.agents != before;
+        if changed {
+            log::info!("spool_reload hooks={}", self.board.hooks_installed);
+        }
+        changed
     }
 
     fn mark_launch_focus(&mut self) {
@@ -490,17 +660,90 @@ fn persist_done_seen(board: &Board, session: &str, pane_id: u32) {
     persist_seen(session, pane_id, finished_at);
 }
 
-fn send_jump(session: &str, pane_id: u32) {
+fn send_jump(session: &str, pane_id: u32, via: &str) {
     let payload = format_jump(session, pane_id);
+    log::info!("jump to={session} pane={pane_id} via={via}");
     let mut cmd = Command::new(zellij_bin());
     if let Ok(home) = std::env::var("ZELLIJ_SESSION_NAME") {
         if !home.is_empty() {
             cmd.args(["--session", &home]);
         }
     }
-    let _ = cmd
+    match cmd
         .args(["pipe", "--name", PIPE_NAME, "--", &payload])
-        .status();
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => log::warn!(
+            "jump_pipe_fail to={session} pane={pane_id} via={via} code={}",
+            status.code().unwrap_or(-1)
+        ),
+        Err(err) => log::warn!("jump_pipe_fail to={session} pane={pane_id} via={via} err={err}"),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ModeSnap {
+    hinting: bool,
+    searching: bool,
+    picking: bool,
+}
+
+impl ModeSnap {
+    fn capture(board: &Board) -> Self {
+        Self {
+            hinting: board.is_hinting(),
+            searching: board.is_searching(),
+            picking: board.is_picking(),
+        }
+    }
+}
+
+fn log_mode_ends(before: &ModeSnap, board: &Board, reason: &str) {
+    let after = ModeSnap::capture(board);
+    if before.hinting && !after.hinting {
+        log::info!("flash_end reason={reason}");
+    }
+    if before.searching && !after.searching {
+        log::info!("search_end reason={reason}");
+    }
+    if before.picking && !after.picking {
+        log::info!("picker_end reason={reason}");
+    }
+}
+
+fn log_mode_change(key: Key, before: &ModeSnap, board: &Board) {
+    let after = ModeSnap::capture(board);
+    if !before.hinting && after.hinting {
+        log::info!("flash_start");
+    } else if before.hinting && !after.hinting {
+        let reason = match key {
+            Key::Dismiss => "abort",
+            _ => "end",
+        };
+        log::info!("flash_end reason={reason}");
+    }
+    if !before.searching && after.searching {
+        log::info!("search_start");
+    } else if before.searching && !after.searching {
+        let reason = match key {
+            Key::Dismiss => "abort",
+            _ => "end",
+        };
+        log::info!("search_end reason={reason}");
+    }
+    if !before.picking && after.picking {
+        log::info!("picker_start");
+    } else if before.picking && !after.picking {
+        let reason = match key {
+            Key::Dismiss => "abort",
+            _ => "end",
+        };
+        log::info!("picker_end reason={reason}");
+    }
+    if matches!(key, Key::ToggleHelp) {
+        log::info!("help_toggle visible={}", board.help_visible);
+    }
 }
 
 /// Draw through ratatui's cell diff. The PTY is still the only pipe out of

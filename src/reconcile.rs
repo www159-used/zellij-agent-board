@@ -5,6 +5,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use fs2::FileExt;
 
@@ -72,10 +73,18 @@ pub fn try_acquire_lock(path: &Path) -> Option<ReconcileLock> {
 /// One pass under the lock. Used when the TUI has no snapshot yet.
 pub fn reconcile_once() -> bool {
     ensure_state();
+    let started = Instant::now();
     let Some(_lock) = try_acquire_lock(&reconcile_lock_path()) else {
+        log::info!("reconcile_lock_busy");
         return false;
     };
     reconcile_pass();
+    let ms = started.elapsed().as_millis() as u64;
+    // Periodic reconcile is every ~2s; only log slow passes so the default-on
+    // log stays useful instead of drowning in noise.
+    if ms >= 500 {
+        log::info!("reconcile_slow ms={ms}");
+    }
     true
 }
 
