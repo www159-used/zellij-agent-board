@@ -72,6 +72,7 @@ python3 scripts/test-hooks.py
 cargo e2e
 cargo run --bin board-tui -- --replay e2e/scenes/slash-search-moves.scene
 ./scripts/e2e-zellij.sh
+./scripts/zab-fault.sh board-cross-session-jump 20
 cargo wasm
 cargo build --release --bin board-tui
 ```
@@ -91,3 +92,9 @@ board-tui --stats
 Each opening gets a fresh random visit ID. Version 2 records mapped input actions, changed board snapshots, jump requests, pipe results, and normal/error exits. Typed text, titles, paths, and real session/pane identifiers are omitted; temporary row/session IDs only last for that visit. There is no persistent installation ID. Older v1 logs may contain session names; they are not rewritten.
 
 The summary derives mode entries from state transitions and reports operation counts, pipe outcomes, and visits missing a close event. Pipe success does not confirm focus. Logs currently append without rotation. See [the collection and analysis design](docs/design/usage-analytics.md) for fields and limitations.
+
+`./scripts/zab-fault.sh` runs repository-local lifecycle experiments through
+a real PTY-attached client. It covers native switching, same-session board
+focus, and the production cross-session jump path. See
+[`e2e/zellij/README.md`](e2e/zellij/README.md) for scenarios, Holds, exact
+Zellij version selection, and failure artifacts.

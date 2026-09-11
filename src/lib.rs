@@ -56,8 +56,10 @@ pub use scene::{run_scene, SceneError};
 pub use status::Status;
 pub use toggle::{
     bridge_close_plan, closes_the_board, duplicate_close_ids, duplicate_close_ids_with_focus,
-    is_host_tui_exit, jump_steps, looks_like_board_tui, now_ms, should_abandon_empty_bridge,
-    should_open_tui, should_shutdown_on_tui_close, BridgeClosePlan, JumpStep, TOGGLE_DEBOUNCE_MS,
+    is_host_tui_exit, jump_steps, looks_like_board_tui, now_ms, plugin_ids_to_close_explicitly,
+    should_abandon_empty_bridge, should_also_close_self, should_hide_bridge_keep_tui,
+    should_open_tui, should_park_bridge_keep_tui, should_shutdown_on_tui_close,
+    should_unsuppress_before_close, BridgeClosePlan, JumpStep, TOGGLE_DEBOUNCE_MS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

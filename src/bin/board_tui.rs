@@ -31,9 +31,9 @@ use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use serde_json::json;
 use zellij_agent_board::{
-    focus_path, format_jump, load_places, load_scan, parse_focus, persist_seen, places_path,
-    reconcile_once, render_board, run_reconcile, runtime_dir, scan_path, scan_places_for,
-    spool_dir, stats, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
+    focus_path, format_jump, load_places, load_scan, now_ms, parse_focus, persist_seen,
+    places_path, reconcile_once, render_board, run_reconcile, runtime_dir, scan_path,
+    scan_places_for, spool_dir, stats, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -871,6 +871,7 @@ fn persist_done_seen(board: &Board, session: &str, pane_id: u32) {
 fn send_jump(session: &str, pane_id: u32, via: &str) -> &'static str {
     let payload = format_jump(session, pane_id);
     log::info!("jump to={session} pane={pane_id} via={via}");
+    trace_jump(&format!("attempt session={session} pane_id={pane_id}"));
     let mut cmd = Command::new(zellij_bin());
     if let Ok(home) = std::env::var("ZELLIJ_SESSION_NAME") {
         if !home.is_empty() {
@@ -881,15 +882,20 @@ fn send_jump(session: &str, pane_id: u32, via: &str) -> &'static str {
         .args(["pipe", "--name", PIPE_NAME, "--", &payload])
         .status()
     {
-        Ok(status) if status.success() => "ok",
         Ok(status) => {
-            log::warn!(
-                "jump_pipe_fail to={session} pane={pane_id} via={via} code={}",
-                status.code().unwrap_or(-1)
-            );
-            "exit_error"
+            trace_jump(&format!("exit status={status}"));
+            if status.success() {
+                "ok"
+            } else {
+                log::warn!(
+                    "jump_pipe_fail to={session} pane={pane_id} via={via} code={}",
+                    status.code().unwrap_or(-1)
+                );
+                "exit_error"
+            }
         }
         Err(err) => {
+            trace_jump(&format!("spawn_error error={err}"));
             log::warn!("jump_pipe_fail to={session} pane={pane_id} via={via} err={err}");
             "spawn_error"
         }
@@ -957,6 +963,19 @@ fn log_mode_change(key: Key, before: &ModeSnap, board: &Board) {
     }
     if matches!(key, Key::ToggleHelp) {
         log::info!("help_toggle visible={}", board.help_visible);
+    }
+}
+
+fn trace_jump(message: &str) {
+    let Ok(path) = std::env::var("ZAB_JUMP_TRACE") else {
+        return;
+    };
+    let timestamp = now_ms();
+    if let Some(parent) = Path::new(&path).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut trace) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(trace, "{timestamp} {message}");
     }
 }
 

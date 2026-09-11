@@ -1,0 +1,8 @@
+[[case]]
+name = "native-cross-session-switch"
+description = "Switch sessions without involving the board."
+repeat = 40
+given = { attached = "origin" }
+target = { ref = "dest.target", shows = "ZAB-SENTINEL-DEST" }
+when = { switch = "dest" }
+then = { attached = "dest", sees = "dest.target" }

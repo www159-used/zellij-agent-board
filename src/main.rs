@@ -9,9 +9,11 @@ use std::path::PathBuf;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use zellij_agent_board::{
     bridge_close_plan, float_size_from_config, format_focus, format_places, is_host_tui_exit,
-    jump_steps, looks_like_board_tui, now_ms, parse_jump, runtime_dir, should_abandon_empty_bridge,
-    should_open_tui, should_shutdown_on_tui_close, AgentId, BridgeClosePlan, FloatSize,
-    FloatingLayerState, JumpStep, PanePlace,
+    jump_steps, looks_like_board_tui, now_ms, parse_jump, plugin_ids_to_close_explicitly,
+    runtime_dir, should_abandon_empty_bridge, should_also_close_self, should_hide_bridge_keep_tui,
+    should_open_tui, should_park_bridge_keep_tui, should_shutdown_on_tui_close,
+    should_unsuppress_before_close, AgentId, BridgeClosePlan, FloatSize, FloatingLayerState,
+    JumpStep, PanePlace,
 };
 use zellij_tile::prelude::*;
 
@@ -108,6 +110,11 @@ struct State {
     tui_attempts: u8,
     launch_focus_written: bool,
     bridge_hidden: bool,
+    skip_redundant_self_close: bool,
+    skip_own_explicit_close: bool,
+    skip_hide_bridge: bool,
+    park_bridge: bool,
+    unsuppress_before_close: bool,
 }
 
 register_plugin!(State);
@@ -122,6 +129,11 @@ impl ZellijPlugin for State {
         self.float_size = float_size_from_config(&configuration);
         self.tui_path = tui_path(&configuration);
         log::info!("plugin_load id={} client={}", ids.plugin_id, ids.client_id);
+        self.skip_redundant_self_close = config_flag(&configuration, "skip_redundant_self_close");
+        self.skip_own_explicit_close = config_flag(&configuration, "skip_own_explicit_close");
+        self.skip_hide_bridge = config_flag(&configuration, "skip_hide_bridge");
+        self.park_bridge = config_flag(&configuration, "park_bridge");
+        self.unsuppress_before_close = config_flag(&configuration, "unsuppress_before_close");
         subscribe(&[
             EventType::ModeUpdate,
             EventType::SessionUpdate,
@@ -251,6 +263,7 @@ impl ZellijPlugin for State {
                 self.current_session.as_deref().unwrap_or("")
             );
             self.dying = true;
+            self.unsuppress_bridge_for_close();
             for step in jump_steps(self.current_session.as_deref(), &session, pane_id) {
                 match step {
                     JumpStep::CloseOriginBoard => self.close_tui_here(),
@@ -436,20 +449,52 @@ impl State {
         }
     }
 
+    fn unsuppress_bridge_for_close(&mut self) {
+        if !should_unsuppress_before_close(self.unsuppress_before_close, self.bridge_hidden) {
+            return;
+        }
+        show_self(false);
+        self.bridge_hidden = false;
+    }
+
     fn hide_bridge_keep_tui(&mut self) {
-        if self.bridge_hidden {
+        let should_hide = should_hide_bridge_keep_tui(self.bridge_hidden, self.skip_hide_bridge);
+        let should_park = should_park_bridge_keep_tui(self.bridge_hidden, self.park_bridge);
+        if !should_hide && !should_park {
             return;
         }
         let _ = self.show_float();
         if let Some(id) = self.tui_id {
             show_pane_with_id(PaneId::Terminal(id), true, true);
         }
-        hide_self();
+        if should_park {
+            self.park_self();
+        } else {
+            hide_self();
+        }
         let _ = self.show_float();
         if let Some(id) = self.tui_id {
             show_pane_with_id(PaneId::Terminal(id), true, true);
         }
         self.bridge_hidden = true;
+    }
+
+    fn park_self(&self) {
+        let Some(id) = self.own_plugin_id else {
+            return;
+        };
+        change_floating_panes_coordinates(vec![(
+            PaneId::Plugin(id),
+            FloatingPaneCoordinates::new(
+                Some("100%".to_string()),
+                Some("100%".to_string()),
+                Some("1".to_string()),
+                Some("1".to_string()),
+                None,
+                Some(true),
+            )
+            .expect("fixed parking coordinates are valid"),
+        )]);
     }
 
     fn shutdown_bridge(&mut self) {
@@ -484,13 +529,24 @@ impl State {
 
     fn close_bridge(&mut self, plugin_ids: &[u32]) {
         self.dying = true;
-        for id in plugin_ids {
-            close_pane_with_id(PaneId::Plugin(*id));
+        let explicit_ids = plugin_ids_to_close_explicitly(
+            self.own_plugin_id,
+            plugin_ids,
+            self.skip_own_explicit_close,
+        );
+        for id in explicit_ids {
+            close_pane_with_id(PaneId::Plugin(id));
         }
         if self.floating_layer.should_hide_on_close() {
             let _ = hide_floating_panes(self.own_tab_id);
         }
-        close_self();
+        if should_also_close_self(
+            self.own_plugin_id,
+            plugin_ids,
+            self.skip_redundant_self_close,
+        ) {
+            close_self();
+        }
     }
 
     fn shutdown_board(&mut self, plugin_ids: &[u32]) {
@@ -635,6 +691,11 @@ impl State {
             .find(|pane_id| **pane_id != own_pane)
             .copied()
     }
+}
+
+/// Plugin configuration flags are strings; only the literal `true` enables one.
+fn config_flag(configuration: &BTreeMap<String, String>, key: &str) -> bool {
+    configuration.get(key).is_some_and(|value| value == "true")
 }
 
 fn tui_path(configuration: &BTreeMap<String, String>) -> String {

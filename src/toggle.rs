@@ -209,6 +209,57 @@ pub fn jump_steps(current: Option<&str>, target: &str, pane_id: u32) -> Vec<Jump
     vec![JumpStep::CloseOriginBoard, next, JumpStep::CloseBridge]
 }
 
+/// After `close_pane_with_id(own)`, `close_self()` is a second close of the
+/// same plugin. The diagnostic flag drops only that extra close so a
+/// control run can keep the current product sequence.
+pub fn should_also_close_self(
+    own_id: Option<u32>,
+    plugin_ids: &[u32],
+    skip_redundant: bool,
+) -> bool {
+    if !skip_redundant {
+        return true;
+    }
+    !matches!(own_id, Some(id) if plugin_ids.contains(&id))
+}
+
+/// `close_pane_with_id(own)` plus `close_self()` is two close APIs for the
+/// same pane. The diagnostic flag keeps `close_self` and only lists others
+/// for the explicit close, so the origin pane still leaves the screen.
+pub fn plugin_ids_to_close_explicitly(
+    own_id: Option<u32>,
+    plugin_ids: &[u32],
+    skip_own_explicit: bool,
+) -> Vec<u32> {
+    if !skip_own_explicit {
+        return plugin_ids.to_vec();
+    }
+    plugin_ids
+        .iter()
+        .copied()
+        .filter(|id| Some(*id) != own_id)
+        .collect()
+}
+
+/// `hide_self` suppresses the bridge. Later `ClosePane` then goes through
+/// Zellij's replace-with-suppressed-pane path. The diagnostic flag keeps
+/// the plugin visible so close is a normal pane close.
+pub fn should_hide_bridge_keep_tui(already_hidden: bool, skip_hide: bool) -> bool {
+    !already_hidden && !skip_hide
+}
+
+/// The diagnostic parking variant keeps the bridge as an ordinary floating
+/// pane, avoiding `SuppressPane`, while making it non-visible to the user.
+pub fn should_park_bridge_keep_tui(already_hidden: bool, park_bridge: bool) -> bool {
+    !already_hidden && park_bridge
+}
+
+/// Keep `hide_self` while the board is up, but restore the plugin before
+/// close so `ClosePane` does not go through replace-with-suppressed-pane.
+pub fn should_unsuppress_before_close(enabled: bool, bridge_hidden: bool) -> bool {
+    enabled && bridge_hidden
+}
+
 #[cfg(test)]
 mod tests {
     use super::{closes_the_board, duplicate_close_ids, TOGGLE_DEBOUNCE_MS};
@@ -401,6 +452,88 @@ mod tests {
             ]
         );
         assert_eq!(jump_steps(None, "lp", 1)[0], JumpStep::CloseOriginBoard);
+    }
+
+    #[test]
+    fn current_close_always_also_closes_self() {
+        use super::should_also_close_self;
+        assert!(should_also_close_self(Some(3), &[3], false));
+        assert!(should_also_close_self(Some(3), &[3, 9], false));
+        assert!(should_also_close_self(None, &[3], false));
+    }
+
+    #[test]
+    fn diagnostic_skips_self_close_when_own_id_already_closed() {
+        use super::should_also_close_self;
+        assert!(!should_also_close_self(Some(3), &[3], true));
+        assert!(!should_also_close_self(Some(3), &[3, 9], true));
+    }
+
+    #[test]
+    fn diagnostic_still_closes_self_when_own_id_was_not_listed() {
+        use super::should_also_close_self;
+        assert!(should_also_close_self(Some(3), &[9], true));
+        assert!(should_also_close_self(None, &[9], true));
+        assert!(should_also_close_self(Some(3), &[], true));
+    }
+
+    #[test]
+    fn current_close_lists_every_plugin_id() {
+        use super::plugin_ids_to_close_explicitly;
+        assert_eq!(
+            plugin_ids_to_close_explicitly(Some(3), &[3, 9], false),
+            vec![3, 9]
+        );
+    }
+
+    #[test]
+    fn diagnostic_omits_own_id_from_the_explicit_close() {
+        use super::plugin_ids_to_close_explicitly;
+        assert_eq!(
+            plugin_ids_to_close_explicitly(Some(3), &[3, 9], true),
+            vec![9]
+        );
+        assert_eq!(
+            plugin_ids_to_close_explicitly(Some(3), &[3], true),
+            Vec::<u32>::new()
+        );
+        assert_eq!(plugin_ids_to_close_explicitly(None, &[3], true), vec![3]);
+    }
+
+    #[test]
+    fn current_open_hides_the_bridge_once() {
+        use super::should_hide_bridge_keep_tui;
+        assert!(should_hide_bridge_keep_tui(false, false));
+        assert!(!should_hide_bridge_keep_tui(true, false));
+    }
+
+    #[test]
+    fn diagnostic_keeps_the_bridge_visible() {
+        use super::should_hide_bridge_keep_tui;
+        assert!(!should_hide_bridge_keep_tui(false, true));
+        assert!(!should_hide_bridge_keep_tui(true, true));
+    }
+
+    #[test]
+    fn diagnostic_parks_the_bridge_once_without_suppressing_it() {
+        use super::should_park_bridge_keep_tui;
+        assert!(should_park_bridge_keep_tui(false, true));
+        assert!(!should_park_bridge_keep_tui(true, true));
+        assert!(!should_park_bridge_keep_tui(false, false));
+    }
+
+    #[test]
+    fn current_close_does_not_unsuppress_first() {
+        use super::should_unsuppress_before_close;
+        assert!(!should_unsuppress_before_close(false, true));
+        assert!(!should_unsuppress_before_close(false, false));
+    }
+
+    #[test]
+    fn diagnostic_unsuppresses_only_a_hidden_bridge() {
+        use super::should_unsuppress_before_close;
+        assert!(should_unsuppress_before_close(true, true));
+        assert!(!should_unsuppress_before_close(true, false));
     }
 
     #[test]
