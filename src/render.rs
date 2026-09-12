@@ -829,7 +829,7 @@ fn agent_row(
     }
     spans.push(Span::styled(format!("{} ", row_icon(agent)), status_style));
     spans.push(Span::styled(
-        pad_right(agent.status.label(), 8),
+        pad_right(agent.status.label(), 9),
         status_style,
     ));
 
@@ -1576,6 +1576,11 @@ mod tests {
         done.pane_title = "Ship it".into();
         done.visited = true;
         board.agents.push(done);
+        let mut idle_wait = agent();
+        idle_wait.id.pane_id = 10;
+        idle_wait.status = Status::IdleWait;
+        idle_wait.started_at = None;
+        board.agents.push(idle_wait);
         let text = painted(&board, 20, 110, "ww");
         let working = text
             .lines()
@@ -1588,6 +1593,12 @@ mod tests {
         let w = display_index(working, "api").expect("working place");
         let d = display_index(finished, "api").expect("done place");
         assert_eq!(w, d, "place column drifted:\n{working}\n{finished}");
+        let waiting = text
+            .lines()
+            .find(|line| line.contains("idle-wait") && line.contains("api"))
+            .expect("idle-wait row");
+        let i = display_index(waiting, "api").expect("idle-wait place");
+        assert_eq!(w, i, "place column drifted:\n{working}\n{waiting}");
     }
 
     #[test]
