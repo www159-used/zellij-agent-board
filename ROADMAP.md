@@ -6,7 +6,7 @@
 - vim 风格移动、分页、可见区域 Flash、增量搜索和全列表选择器。
 - `started/` 保留本轮开始时间，`seen/` 保留已读完成状态，扫描缓存支持重开首帧。
 - 默认居中的大浮窗，可配置宽高和位置。
-- 原子发布快照，后台扫描子进程回收，Linux/macOS 平台安装包及安装验证。
+- redb 事务快照、单宿主 daemon 和后台扫描，Linux/macOS 平台安装包及安装验证。
 
 ## 后续工作
 
@@ -28,6 +28,6 @@
 
 ## 暂时不做 / 避坑原则
 
-- **保持文件存储**：标题、已读、Working 起点和上次 SCAN 默认在 `~/.cache/zellij-agent-board`。首帧读取缓存；reconcile 在锁内发布扫描和标题快照，TUI 和 hook 单独维护 seen/started 标记。
+- **宿主状态统一所有权**：daemon 独占 redb，TUI 通过本地 IPC 读取 scan/标题快照；hook、focus、seen/started 暂时保留文件输入通道。数据库首次导入旧缓存，后续以数据库为准。
 - **日常 Alt+q 别加 `skip_plugin_cache`**：避免反复加载 WASM 导致内存和发热堆积（仅 overview Alt+y 需要）。
 - **保持轻量桥接**（空桥 + new-pane）：优先保证缓存首帧与低开销。

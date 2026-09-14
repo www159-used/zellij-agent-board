@@ -1,8 +1,8 @@
 //! File / pipe protocol between the WASM bridge and the host TUI.
 //!
-//! Durable host state lives in `~/.cache/zellij-agent-board`: titles, seen,
-//! started, and the last SCAN snapshot. First paint reads the
-//! snapshot; a live scan only patches rows. Hook spool stays in `$TMPDIR`.
+//! Focus and seen/started ingress remain in the cache directory. The daemon
+//! imports legacy scan/title files once into redb, then serves snapshots over
+//! IPC. Hook spool stays in `$TMPDIR`.
 
 use std::path::{Path, PathBuf};
 
@@ -65,7 +65,7 @@ pub fn persist_last_jump(path: &Path, session: &str, pane_id: u32) {
     publish_snapshot(path, serde_json::to_vec(&(session, pane_id)).unwrap());
 }
 
-/// Leftover TUI-only file. Read on migrate, then stop writing it.
+/// Legacy TUI-only title file, imported into redb on initialization.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn host_places_path() -> PathBuf {
     runtime_dir().join("places.host")
@@ -255,26 +255,6 @@ pub fn ensure_state() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn load_places() -> Vec<(AgentId, PanePlace)> {
-    ensure_migrated();
-    merged_places()
-}
-
-/// Current `places` wins over leftover `places.host`. Readers stay
-/// read-only; the reconciler deletes the legacy file after a successful
-/// persist.
-#[cfg(not(target_arch = "wasm32"))]
-fn merged_places() -> Vec<(AgentId, PanePlace)> {
-    let places = parse_places(&std::fs::read_to_string(places_path()).unwrap_or_default());
-    let leftover = parse_places(&std::fs::read_to_string(host_places_path()).unwrap_or_default());
-    if leftover.is_empty() {
-        places
-    } else {
-        merge_places(leftover, places)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn publish_snapshot(path: &Path, contents: impl AsRef<[u8]>) -> bool {
     match write_snapshot(path, contents) {
         Ok(()) => true,
@@ -283,36 +263,6 @@ fn publish_snapshot(path: &Path, contents: impl AsRef<[u8]>) -> bool {
             false
         }
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn persist_places(incoming: impl IntoIterator<Item = (AgentId, PanePlace)>) {
-    let incoming: Vec<(AgentId, PanePlace)> = incoming.into_iter().collect();
-    if incoming.is_empty() {
-        return;
-    }
-    ensure_migrated();
-    let path = places_path();
-    let merged = replace_session_places(merged_places(), incoming);
-    if publish_snapshot(&path, format_places(merged)) {
-        let _ = std::fs::remove_file(host_places_path());
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn persist_scan(text: &str) {
-    if text.trim().is_empty() {
-        return;
-    }
-    ensure_migrated();
-    let _ = publish_snapshot(&scan_path(), text);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn load_scan() -> Option<String> {
-    ensure_migrated();
-    let text = std::fs::read_to_string(scan_path()).ok()?;
-    (!text.trim().is_empty()).then_some(text)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -476,14 +426,5 @@ mod tests {
             state_dir_from(None, None, None, tmp),
             tmp.join("zellij-agent-board")
         );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn scan_snapshot_round_trips() {
-        use super::{load_scan, persist_scan};
-        let text = "META hooks=1\nSCAN ww 3 agent /bin/agent --workspace /tmp/ww\n";
-        persist_scan(text);
-        assert_eq!(load_scan().as_deref(), Some(text));
     }
 }

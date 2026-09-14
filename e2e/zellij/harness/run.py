@@ -18,7 +18,7 @@ import tempfile
 import termios
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from pathlib import Path
 
@@ -144,25 +144,28 @@ def _run_once(
         held = 0
         for cycle in range(1, cycles + 1):
             world.notes.append(f"cycle {cycle}/{cycles}")
-            disturb = world.disturb()
-            if disturb is not None:
-                return _runtime_failure_report(
-                    experiment, world, trial, cycles, held, disturb
-                )
-            judgement = world.wait_held()
-            if judgement.kind != Verdict.HELD:
-                expectation = _expectation(experiment, judgement.hold)
-                world.bundle(judgement.kind, judgement.hold, judgement.evidence)
-                return _report(
-                    experiment,
-                    judgement.kind,
-                    cycles=cycles,
-                    held=held,
-                    hold=judgement.hold,
-                    expectation=expectation,
-                    evidence=judgement.evidence,
-                    artifacts=trial,
-                )
+            for phase in experiment.checkpoints:
+                world.notes.append(f"phase {phase.name}")
+                disturb = world.disturb(phase.disturb)
+                if disturb is not None:
+                    return _runtime_failure_report(
+                        experiment, world, trial, cycles, held, disturb
+                    )
+                judgement = world.wait_held(holds=phase.also)
+                if judgement.kind != Verdict.HELD:
+                    expectation = _expectation(replace(experiment, also=phase.also), judgement.hold)
+                    evidence = f"phase {phase.name}: {judgement.evidence}"
+                    world.bundle(judgement.kind, judgement.hold, evidence, holds=phase.also)
+                    return _report(
+                        experiment,
+                        judgement.kind,
+                        cycles=cycles,
+                        held=held,
+                        hold=judgement.hold,
+                        expectation=expectation,
+                        evidence=evidence,
+                        artifacts=trial,
+                    )
             held += 1
             if cycle < cycles:
                 restored = world.restore()
@@ -346,6 +349,7 @@ class LiveWorld:
         self.real_names: dict[str, str] = {}
         self.pane_ids: dict[tuple[str, str], int] = {}
         self.pty: PtyClient | None = None
+        self.daemon: subprocess.Popen | None = None
         self.server_cookie: dict[str, int] | None = None
         self.notes: list[str] = []
         token = secrets.token_hex(2)
@@ -409,6 +413,18 @@ class LiveWorld:
                     session=real,
                 )
         self._seed_scan()
+        if self.needs_board:
+            with (self.trial / "daemon.log").open("w") as log:
+                self.daemon = subprocess.Popen(
+                    [str(self.tui), "--daemon"], env=self.env,
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                    start_new_session=True,
+                )
+            if not self._wait(lambda: (self.state / "daemon.endpoint").exists()
+                              or self.daemon.poll() is not None, 5):
+                return "daemon_not_ready"
+            if self.daemon.poll() is not None:
+                return "daemon_exited"
         attach = self.real_names[self.experiment.world.attach]
         self.pty = PtyClient(
             [self.zellij, "--config", str(self.config), "attach", attach],
@@ -431,8 +447,8 @@ class LiveWorld:
             return "world_never_quiet"
         return None
 
-    def disturb(self) -> str | None:
-        for step in self.experiment.disturb:
+    def disturb(self, steps=None) -> str | None:
+        for step in self.experiment.disturb if steps is None else steps:
             adapter_name = _DISTURB_ADAPTERS.get(step.kind)
             if adapter_name is None:
                 return f"unsupported_disturb:{step.kind}"
@@ -498,6 +514,9 @@ class LiveWorld:
         )
         return None
 
+    def _disturb_return(self, step: Disturb) -> str | None:
+        return self.restore()
+
     def restore(self) -> str | None:
         if self.pty is None or not self.pty.alive():
             return "world_never_quiet"
@@ -514,10 +533,10 @@ class LiveWorld:
             return self._open_board()
         return None
 
-    def wait_held(self, timeout: float = 10.0):
+    def wait_held(self, timeout: float = 10.0, *, holds=None):
         deadline = time.monotonic() + timeout
         while True:
-            last = judge(self.observe())
+            last = judge(self.observe(holds))
             if last.kind == Verdict.HELD:
                 return last
             if last.hold in {"client_alive", "control_alive", "server_stable"}:
@@ -526,10 +545,10 @@ class LiveWorld:
                 return last
             time.sleep(0.2)
 
-    def observe(self) -> Observation:
+    def observe(self, holds=None) -> Observation:
         required_session = None
         required_sentinels: set[str] = set()
-        for hold in self.experiment.also:
+        for hold in self.experiment.also if holds is None else holds:
             if hold.kind == "on_session":
                 required_session = hold.session
             if hold.kind == "sees" and hold.target:
@@ -552,8 +571,9 @@ class LiveWorld:
             log_lines=self._log_lines(),
         )
 
-    def bundle(self, verdict: str, hold: str | None = None, evidence: str | None = None) -> None:
-        expectation = _expectation(self.experiment, hold)
+    def bundle(self, verdict: str, hold: str | None = None, evidence: str | None = None, *, holds=None) -> None:
+        experiment = self.experiment if holds is None else replace(self.experiment, also=holds)
+        expectation = _expectation(experiment, hold)
         (self.trial / "outcome.txt").write_text(
             f"verdict={verdict}\nhold={hold or ''}\nevidence={evidence or ''}\n"
         )
@@ -593,6 +613,16 @@ class LiveWorld:
         )
         if self.pty is not None:
             (self.trial / "pty.txt").write_text(self.pty.transcript())
+        if (self.state / "daemon.endpoint").exists():
+            try:
+                snapshot = subprocess.run(
+                    [str(self.tui), "--snapshot"], env=self.env,
+                    capture_output=True, text=True, timeout=3, check=False,
+                )
+                (self.trial / "snapshot.json").write_text(snapshot.stdout)
+                (self.trial / "snapshot-error.txt").write_text(snapshot.stderr)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                self.notes.append(f"snapshot capture failed: {error}")
         scan = self.state / "scan"
         if scan.is_file():
             shutil.copy2(scan, self.trial / "scan")
@@ -662,6 +692,25 @@ class LiveWorld:
             if self.pty is not None:
                 self.pty.close()
                 self.pty = None
+            if (self.state / "daemon.endpoint").exists():
+                try:
+                    subprocess.run(
+                        [str(self.tui), "--daemon-stop"],
+                        env=self.env,
+                        capture_output=True,
+                        timeout=35,
+                        check=False,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    self.notes.append("daemon teardown failed")
+            daemon = getattr(self, "daemon", None)
+            if daemon is not None:
+                try:
+                    daemon.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    daemon.kill()
+                    daemon.wait(timeout=5)
+                self.daemon = None
             for real in self.real_names.values():
                 try:
                     subprocess.run(
@@ -1067,6 +1116,7 @@ def _pane_id_or(text: str, fallback) -> int | None:
 
 
 _DISTURB_ADAPTERS = {
+    "return": "_disturb_return",
     "switch": "_disturb_switch",
     "go": "_disturb_go",
 }

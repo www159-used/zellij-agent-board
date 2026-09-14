@@ -7,8 +7,8 @@ attached client.
 ## Language
 
 **Experiment**:
-One named trial: a World, an ordered Disturb, and the Holds that must
-stay true for the whole run.
+One named trial: a World and ordered Phases. Default lifecycle Holds apply
+at every checkpoint; each Phase adds its own expected outcome.
 _Avoid_: test, case, script, scene (scenes are in-process Board replays)
 
 **World**:
@@ -21,8 +21,8 @@ An intended change to the World — native switch or go-to-Agent.
 _Avoid_: action, step, command (those leak CLI/PTY verbs)
 
 **Hold**:
-A World fact that must remain true from quiet to teardown. Default
-Holds are always on; a scenario may only add facts.
+A World fact checked after a disturbance settles. Default lifecycle Holds
+are always on; phase-specific Holds apply only at that phase checkpoint.
 _Avoid_: assert, oracle, invariant (Hold is the declared fact)
 
 **AgentRef**:
@@ -33,3 +33,8 @@ _Avoid_: pane id, AgentId (AgentId is the product identity after Scan)
 **Verdict**:
 The closed result of one Experiment: Held, Broken, or SetupFailed.
 _Avoid_: pass, fail, error (those collapse setup and product faults)
+
+**Phase**:
+An ordered disturbance and its expected outcome. Later phases run only after
+the current checkpoint holds; intermediate failures cannot be hidden by a
+successful final outcome. A legacy experiment has one implicit result phase.

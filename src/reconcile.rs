@@ -1,23 +1,16 @@
-//! One host process writes scan and title snapshots. The TUI reads them;
-//! seen/started markers have separate writers in the TUI and hooks.
+//! Scan planning and the exclusive daemon ownership lock.
+//! Seen/started markers retain their existing TUI/hook input channels.
 //!
 //! The lock is `flock`: the kernel drops it if this process dies, even
 //! when Drop does not run.
 
 use std::fs::{self, File, OpenOptions};
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::path::Path;
 
 use fs2::FileExt;
 
 use crate::discover::parse_host_line;
-use crate::protocol::{ensure_state, persist_places, persist_scan, runtime_dir};
-use crate::scan::{scan_host_text, scan_places_for};
 use crate::HostLine;
-
-pub fn reconcile_lock_path() -> PathBuf {
-    runtime_dir().join("reconcile.lock")
-}
 
 /// Home session first so the open board gets titles before remote
 /// `list-panes` (zab is last alphabetically and used to wait for everyone).
@@ -71,38 +64,6 @@ pub fn try_acquire_lock(path: &Path) -> Option<ReconcileLock> {
     Some(ReconcileLock { _file: file })
 }
 
-/// One pass under the lock. Used when the TUI has no snapshot yet.
-pub fn reconcile_once() -> bool {
-    ensure_state();
-    let started = Instant::now();
-    let Some(_lock) = try_acquire_lock(&reconcile_lock_path()) else {
-        log::info!("reconcile_lock_busy");
-        return false;
-    };
-    reconcile_pass();
-    let ms = started.elapsed().as_millis() as u64;
-    // Periodic reconcile is every ~2s; only log slow passes so the default-on
-    // log stays useful instead of drowning in noise.
-    if ms >= 500 {
-        log::info!("reconcile_slow ms={ms}");
-    }
-    true
-}
-
-/// Same as [`reconcile_once`]: lock, write, exit.
-pub fn run_reconcile() -> bool {
-    reconcile_once()
-}
-
-fn reconcile_pass() {
-    let text = scan_host_text();
-    persist_scan(&text);
-    let home = std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default();
-    for session in refresh_sessions(&sessions_from_scan(&text), &home) {
-        persist_places(scan_places_for(&[session]));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{refresh_sessions, sessions_from_scan, try_acquire_lock};
@@ -144,7 +105,7 @@ SCAN ww 4 agent /bin/agent --workspace /tmp/ww
                 .unwrap_or(0)
         ));
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("reconcile.lock");
+        let path = dir.join("daemon.lock");
         let first = try_acquire_lock(&path).expect("first writer");
         assert!(try_acquire_lock(&path).is_none());
         drop(first);

@@ -1,14 +1,12 @@
 //! Host TUI adapter. Scan, spool, places, keys, and ratatui live here.
 //!
-//! MVC loop: `Board` plus the host store are the model. The first frame
-//! paints the last SCAN snapshot. A sibling `--reconcile` process writes
-//! scan and title snapshots. This process only updates its own seen/started
-//! markers; missing home titles are filled in memory before the first paint.
+//! The daemon owns redb and scan scheduling. The TUI reads consistent
+//! snapshots over local IPC and keeps hook/seen/started notices responsive.
 
 use std::fs;
 use std::io::{self, stdout, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::cursor;
@@ -31,9 +29,9 @@ use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use serde_json::json;
 use zellij_agent_board::{
-    format_jump, load_last_jump, load_places, load_scan, now_ms, persist_last_jump, persist_seen,
-    places_path, reconcile_once, render_board, run_reconcile, runtime_dir, scan_path,
-    scan_places_for, spool_dir, stats, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
+    daemon, format_jump, load_last_jump, now_ms, parse_places, persist_last_jump, persist_seen,
+    render_board, runtime_dir, scan_places_for, spool_dir, stats, zellij_bin, Action, AgentId,
+    Board, Key, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -54,10 +52,8 @@ struct App {
     /// so the hover preview has to be resolved again.
     pointer: Option<(u16, u16)>,
     last_reconcile: Instant,
-    reconcile: Option<Child>,
     last_tick: Instant,
-    scan_mtime: Option<SystemTime>,
-    places_mtime: Option<SystemTime>,
+    revision: u64,
     spool_mtime: Option<SystemTime>,
     usage: stats::Visit,
     jump_sender: fn(&str, u32, &str) -> &'static str,
@@ -72,7 +68,7 @@ const LOG_KEEP_GZ: usize = 5;
 
 /// File-only logger so the TUI PTY stays clean. Appends to `board.log`; at
 /// 10 MiB the file is gzipped to `board-YYYYMMDD-HHMMSS.log.gz` (keep 5).
-/// TUI and `--reconcile` share the path; rotation uses a lock file.
+/// TUI and daemon share the path; rotation uses a lock file.
 fn init_logging() {
     use std::sync::OnceLock;
     static LOGGER: OnceLock<BoardFileLogger> = OnceLock::new();
@@ -205,7 +201,10 @@ board-tui — host dashboard for zellij-agent-board
   board-tui                         live board (needs a TTY)
   board-tui --focus SESSION PANE    select the launching agent on open
   board-tui --stats                 show local usage summary
-  board-tui --reconcile             write the host store once and exit
+  board-tui --daemon                run the redb state owner
+  board-tui --daemon-stop           stop the state owner
+  board-tui --snapshot              print the committed snapshot as JSON
+  board-tui --reconcile             request a background refresh
   board-tui --replay FILE.scene     run an e2e scene; no TTY
 
 Log: {}
@@ -217,7 +216,28 @@ Log: {}
         }
         Some("--reconcile") => {
             init_logging();
-            let _ = run_reconcile();
+            daemon::ensure_running(&std::env::current_exe()?)?;
+            return daemon::refresh(std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default());
+        }
+        Some("--daemon") => {
+            init_logging();
+            return daemon::serve().inspect_err(|error| {
+                log::error!("daemon_failed err={error}");
+            });
+        }
+        Some("--daemon-stop") => {
+            daemon::shutdown()?;
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while daemon::data_dir().join("daemon.endpoint").exists() {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::other("daemon shutdown timed out"));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            return Ok(());
+        }
+        Some("--snapshot") => {
+            println!("{}", serde_json::to_string(&daemon::snapshot()?)?);
             return Ok(());
         }
         Some("--replay") => {
@@ -241,7 +261,7 @@ Log: {}
     init_logging();
     let mut app = App::new();
     app.launch_focus = launch_focus;
-    app.bootstrap();
+    app.bootstrap()?;
     log::info!(
         "open session={} agents={}",
         app.home,
@@ -303,38 +323,31 @@ impl App {
             view: Size::new(0, 0),
             pointer: None,
             last_reconcile: now - SCAN_EVERY,
-            reconcile: None,
             last_tick: now,
-            scan_mtime: None,
-            places_mtime: None,
+            revision: 0,
             spool_mtime: None,
             usage: stats::Visit::default(),
             jump_sender: send_jump,
         }
     }
 
-    fn bootstrap(&mut self) {
+    fn bootstrap(&mut self) -> io::Result<()> {
+        daemon::ensure_running(&std::env::current_exe()?)?;
         self.load_model();
-        spawn_reconcile(&mut self.reconcile);
+        daemon::refresh(self.home.clone())?;
         self.last_reconcile = Instant::now();
+        Ok(())
     }
 
     fn load_model(&mut self) {
-        let had_cache = load_scan().is_some();
-        if !had_cache {
-            let _ = reconcile_once();
-        }
-        if let Some(cached) = load_scan() {
-            self.board.ingest(&cached);
-        }
-        self.reload_places();
+        self.take_store();
         self.fill_home_titles();
         self.reload_spool();
         self.restore_open_selection();
         log::info!(
-            "bootstrap session={} cache={} agents={}",
+            "bootstrap session={} revision={} agents={}",
             self.home,
-            had_cache,
+            self.revision,
             self.board.agents.len()
         );
     }
@@ -385,7 +398,15 @@ impl App {
             dirty |= self.take_store();
             let now = Instant::now();
             if now.duration_since(self.last_reconcile) >= SCAN_EVERY {
-                spawn_reconcile(&mut self.reconcile);
+                let refreshed = daemon::refresh(self.home.clone());
+                if let Err(error) = refreshed {
+                    log::warn!("daemon_refresh_fail err={error}");
+                    if let Ok(exe) = std::env::current_exe() {
+                        if daemon::ensure_running(&exe).is_ok() {
+                            let _ = daemon::refresh(self.home.clone());
+                        }
+                    }
+                }
                 self.last_reconcile = Instant::now();
             }
             if dir_changed(&spool_dir(), &mut self.spool_mtime) {
@@ -617,29 +638,20 @@ impl App {
     }
 
     fn take_store(&mut self) -> bool {
+        let Ok(snapshot) = daemon::snapshot() else {
+            return false;
+        };
+        if snapshot.revision == self.revision {
+            return false;
+        }
+        self.revision = snapshot.revision;
         let mut dirty = false;
-        if file_changed(&scan_path(), &mut self.scan_mtime) {
-            if let Some(text) = load_scan() {
-                let before = self.board.agents.len();
-                if self.board.ingest(&text) {
-                    dirty = true;
-                    log::info!(
-                        "scan_reload agents_before={before} agents={}",
-                        self.board.agents.len()
-                    );
-                }
-            }
+        if let Some(scan) = snapshot.scan {
+            dirty |= self.board.ingest(&scan);
         }
-        if file_changed(&places_path(), &mut self.places_mtime) && self.reload_places() {
-            dirty = true;
-            log::info!("places_reload");
-        }
+        dirty |= self.board.apply_places(parse_places(&snapshot.places));
         dirty |= self.apply_launch_focus();
         dirty
-    }
-
-    fn reload_places(&mut self) -> bool {
-        self.board.apply_places(load_places())
     }
 
     fn reload_spool(&mut self) -> bool {
@@ -717,45 +729,8 @@ enum DrainInput {
     Idle,
 }
 
-fn spawn_reconcile(running: &mut Option<Child>) {
-    let Ok(exe) = std::env::current_exe() else {
-        log::warn!("reconcile_spawn_no_exe");
-        return;
-    };
-    let mut cmd = Command::new(exe);
-    cmd.arg("--reconcile")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // Leave the TUI process group so `q` / --close-on-exit does not SIGHUP
-    // a list-panes pass that still has to write the home session.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    if let Err(err) = spawn_if_idle(running, &mut cmd) {
-        log::warn!("reconcile_spawn_fail err={err}");
-    }
-}
-
-fn spawn_if_idle(running: &mut Option<Child>, cmd: &mut Command) -> io::Result<bool> {
-    if let Some(child) = running.as_mut() {
-        if child.try_wait()?.is_none() {
-            return Ok(false);
-        }
-    }
-    // try_wait already reaped; drop the handle even if the next spawn fails.
-    running.take();
-    *running = Some(cmd.spawn()?);
-    Ok(true)
-}
-
 #[cfg(test)]
 mod process_tests {
-    use super::spawn_if_idle;
-    use std::process::{Child, Command, Stdio};
-    use std::time::{Duration, Instant};
 
     #[test]
     fn picker_wheel_scrolls_but_navigation_keys_keep_the_old_mapping() {
@@ -1073,29 +1048,6 @@ mod process_tests {
         assert!(log.contains("\"reason\":\"panic\""));
         assert!(!log.contains("panic payload"));
     }
-
-    #[test]
-    fn reconcile_skips_a_running_child_and_reaps_it_before_restarting() {
-        // stdin keeps cat alive without sleeps or a live Zellij session.
-        let mut cmd = Command::new("cat");
-        cmd.stdin(Stdio::piped()).stdout(Stdio::null());
-        let mut running: Option<Child> = None;
-        assert!(spawn_if_idle(&mut running, &mut cmd).unwrap());
-        let first = running.as_ref().expect("retain the child for reaping").id();
-        assert!(!spawn_if_idle(&mut running, &mut cmd).unwrap());
-        assert_eq!(running.as_ref().unwrap().id(), first);
-
-        drop(running.as_mut().unwrap().stdin.take());
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !spawn_if_idle(&mut running, &mut cmd).unwrap() {
-            assert!(Instant::now() < deadline, "finished child was not reaped");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let mut next = running.take().unwrap();
-        assert_ne!(next.id(), first);
-        drop(next.stdin.take());
-        assert!(next.wait().unwrap().success());
-    }
 }
 
 /// C-e / C-y: the view-scroll pair. Positive reveals later rows.
@@ -1307,16 +1259,6 @@ fn draw(terminal: &mut HostTerminal, board: &Board, home: &str) -> io::Result<()
         render_board(board, home, area, frame.buffer_mut());
     })?;
     Ok(())
-}
-
-fn file_changed(path: &Path, seen: &mut Option<SystemTime>) -> bool {
-    let mtime = fs::metadata(path).and_then(|meta| meta.modified()).ok();
-    if mtime != *seen {
-        *seen = mtime;
-        mtime.is_some()
-    } else {
-        false
-    }
 }
 
 fn dir_changed(path: &Path, seen: &mut Option<SystemTime>) -> bool {

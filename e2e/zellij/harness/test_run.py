@@ -26,6 +26,22 @@ from harness.scenario import load_recipe
 
 
 class RunSetup(unittest.TestCase):
+    def test_failed_intermediate_phase_prevents_later_actions(self):
+        from harness.run import _run_once
+        experiment = load_recipe("native-cross-session-switch")
+        world = Mock()
+        world.materialize.return_value = None
+        world.disturb.return_value = None
+        world.wait_held.return_value = SimpleNamespace(
+            kind=Verdict.BROKEN, hold="on_session", evidence="origin")
+        with patch("harness.run.LiveWorld", return_value=world):
+            report = _run_once(experiment, "zellij", Path("x"), Path("x"), Path("x"), 1)
+        world.disturb.assert_called_once_with(experiment.checkpoints[0].disturb)
+        self.assertEqual(report.repeats_held, 0)
+        self.assertIn("switch-away", report.evidence)
+        self.assertIn('"dest"', report.expectation)
+        world.teardown.assert_called_once()
+
     def test_missing_zellij_is_setup_failed(self) -> None:
         experiment = load_recipe("native-cross-session-switch")
         report = run(experiment, zellij="/no/such/zellij")

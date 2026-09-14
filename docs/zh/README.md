@@ -58,9 +58,13 @@ Picker 支持鼠标滚轮，以及右侧滑块的点击和拖动滚动；键盘�
 
 ## 运行状态
 
-TUI 首先读取扫描缓存，随后约每两秒请求一次后台 reconcile。每个 TUI 同时保留一个子进程，回收后才启动下一轮；进程锁保证多个看板之间只有一个 reconcile 写入。扫描和标题快照通过原子替换发布。首帧缺失的当前会话标题只补到内存中。
+TUI 自动启动或连接本地 `board-tui --daemon`，通过 Unix socket 上的 HTTP 接口读取已提交快照。只有 daemon 打开 redb，数据库缓存限制为 4 MiB；扫描和标题在同一个事务中可靠落盘。daemon 同时最多执行一轮后台扫描，多个看板共享结果，慢扫描不会阻塞快照读取。打开看板时约每两秒请求刷新；关闭后 daemon 保持可用，但不会自行持续扫描。
 
-标题、上次扫描及 seen/started 标记，按优先级存放在 `$ZAB_STATE_DIR`、`$XDG_CACHE_HOME/zellij-agent-board` 或 `~/.cache/zellij-agent-board`。本次打开前的焦点直接传给对应的 TUI。Hook 将最近一条通知写入 `$TMPDIR/zellij-agent-board-spool`，并单独维护本轮开始时间，不启动 WASM 插件。未读完成状态可以发出终端通知。
+`state.redb` 按优先级存放在 `$ZAB_STATE_DIR`、`$XDG_DATA_HOME/zellij-agent-board` 或 `~/.local/share/zellij-agent-board`。首次初始化时，事务导入旧缓存目录的 `scan`、`places` 和 `places.host`。旧文件保留供回退使用，初始化后不再导入。数据库损坏或 schema 不受支持时明确报错，不会重建空库。
+
+focus 和 seen/started 标记仍存放在 `$ZAB_STATE_DIR`、`$XDG_CACHE_HOME/zellij-agent-board` 或 `~/.cache/zellij-agent-board`。本次打开前的焦点直接传给对应的 TUI。Hook 继续通过 `$TMPDIR/zellij-agent-board-spool` 上报通知，不直接打开数据库；未读完成仍可发送终端通知。
+
+`board-tui --snapshot` 输出已提交快照的 JSON，也可通过 `curl --unix-socket` 请求 `GET /v1/snapshot`；`--reconcile` 请求后台刷新，成功只表示已接收请求。升级二进制后，关闭看板并运行 `board-tui --daemon-stop`，再打开看板以启动新版 daemon。详见 [存储设计](../design/host-state.md)。
 
 Codex `Interrupt` 以及 Cursor `stop`/`afterAgentResponse` 且 `status=aborted` 时显示为 `■ stopped`。Cursor `status=error`、Claude/CodeBuddy `StopFailure`、OpenCode `session.error` 显示为 `✗ failed`。两者都清除本轮计时，不标记为完成，也不发送完成通知。授权提示（`PermissionRequest`、CodeBuddy `Notification` 的 `permission_prompt`、OpenCode `permission.asked`）显示为 `● waiting`，并保留本轮起点，以便恢复后继续计时。Claude/CodeBuddy `Notification` 的 `idle_prompt` 显示为 `◑ idle-wait`，清回合且不发完成通知。升级后对所用 CLI 重新运行 `make install-hooks`，并重启这些会话。安装这些 hook 之前发出的通知无法追溯恢复。
 

@@ -79,6 +79,13 @@ class Hold:
 
 
 @dataclass(frozen=True)
+class Phase:
+    name: str
+    disturb: tuple[Disturb, ...]
+    also: tuple[Hold, ...]
+
+
+@dataclass(frozen=True)
 class Experiment:
     name: str
     world: World
@@ -86,6 +93,11 @@ class Experiment:
     description: str = ""
     also: tuple[Hold, ...] = ()
     repeat: int = 1
+    phases: tuple[Phase, ...] = ()
+
+    @property
+    def checkpoints(self) -> tuple[Phase, ...]:
+        return self.phases or (Phase("result", self.disturb, self.also),)
 
 
 SCENARIO_DIR = Path(__file__).resolve().parent.parent / "scenarios"
@@ -142,7 +154,7 @@ def load_experiments(source: str | Path) -> tuple[Experiment, ...]:
 def _from_case(row: dict[str, Any]) -> Experiment:
     _known_keys(
         row,
-        {"name", "description", "repeat", "given", "target", "targets", "when", "then"},
+        {"name", "description", "repeat", "given", "target", "targets", "when", "then", "phase"},
         "case",
     )
     given = row.get("given") or {}
@@ -179,18 +191,33 @@ def _from_case(row: dict[str, Any]) -> Experiment:
             )
         )
 
-    disturb = _disturb(when)
-    if disturb.kind == "switch":
-        add_session(str(disturb.session or ""))
-    elif disturb.target is not None:
-        add_session(disturb.target.session)
-
-    holds: list[Hold] = []
-    if then.get("attached") is not None:
-        holds.append(Hold.on_session(str(then["attached"])))
-    sees = then.get("sees")
-    for value in sees if isinstance(sees, list) else ([sees] if sees is not None else []):
-        holds.append(Hold.sees(_agent_ref(value)))
+    phase_rows = row.get("phase")
+    if phase_rows is not None:
+        if "when" in row or "then" in row:
+            raise ValueError("case cannot mix phase with when/then")
+        if not isinstance(phase_rows, list) or not phase_rows:
+            raise ValueError("case.phase must be a nonempty list")
+    else:
+        phase_rows = [{"name": "result", "when": when, "then": then}]
+    phases = []
+    for index, phase in enumerate(phase_rows, 1):
+        _known_keys(phase, {"name", "when", "then"}, "case.phase")
+        expectation = phase.get("then") or {}
+        _known_keys(expectation, {"attached", "sees"}, "case.phase.then")
+        action = _disturb(phase.get("when") or {})
+        if action.kind == "switch":
+            add_session(str(action.session or ""))
+        elif action.target is not None:
+            add_session(action.target.session)
+        holds = []
+        if expectation.get("attached") is not None:
+            holds.append(Hold.on_session(str(expectation["attached"])))
+        sees = expectation.get("sees")
+        for value in sees if isinstance(sees, list) else ([sees] if sees is not None else []):
+            holds.append(Hold.sees(_agent_ref(value)))
+        phases.append(Phase(str(phase.get("name") or f"phase-{index}"), (action,), tuple(holds)))
+    if len({phase.name for phase in phases}) != len(phases):
+        raise ValueError("phase names must be unique")
 
     sessions = tuple(
         Session(
@@ -208,8 +235,9 @@ def _from_case(row: dict[str, Any]) -> Experiment:
             sessions=sessions,
             focus=_agent_ref(given["focus"]) if "focus" in given else None,
         ),
-        disturb=(disturb,),
-        also=tuple(holds),
+        disturb=tuple(action for phase in phases for action in phase.disturb),
+        also=phases[-1].also,
+        phases=tuple(phases) if "phase" in row else (),
         repeat=int(row.get("repeat") or 1),
     )
 
@@ -297,10 +325,17 @@ def _agent_ref(value: Any) -> AgentRef:
     raise ValueError("Agent reference must be session.role or a table")
 
 
+def _return(value: Any) -> Disturb:
+    if value is not True:
+        raise ValueError("return must be true")
+    return Disturb(kind="return")
+
+
 # A new declarative kind needs a loader here, an adapter in run.py, and any
 # per-kind facts the runner reads (see `_check_world`, `_needs_board`,
 # `_explains_reconnect`, and `_write_config`).
 _DISTURB_LOADERS = {
+    "return": lambda value: _return(value),
     "switch": lambda value: Disturb.switch(str(value)),
     "go": lambda value: Disturb.go(_agent_ref(value)),
 }
@@ -328,6 +363,9 @@ def _check_world(experiment: Experiment) -> None:
             raise ValueError("focus must name a declared pane") from None
     if not experiment.disturb:
         raise ValueError("disturb must not be empty")
+    destinations = {step.session for step in experiment.disturb if step.kind == "switch"}
+    if len(destinations) > 1:
+        raise ValueError("native switch supports one destination; use return for the origin")
     attach = experiment.world.session(experiment.world.attach)
     for step in experiment.disturb:
         if step.kind == "go" and not attach.board:
@@ -338,7 +376,7 @@ def _check_world(experiment: Experiment) -> None:
                 raise ValueError("Go target must name an Agent pane")
         if step.kind == "switch" and step.session not in names:
             raise ValueError("Switch target must be a declared session")
-    for hold in experiment.also:
+    for hold in (hold for phase in experiment.checkpoints for hold in phase.also):
         if hold.kind == "on_session" and hold.session not in names:
             raise ValueError(
                 f"Hold::OnSession must name a declared session: {hold.session}"

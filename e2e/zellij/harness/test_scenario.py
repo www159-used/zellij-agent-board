@@ -254,6 +254,22 @@ go = { session = "home", role = "target" }
             with self.assertRaisesRegex(ValueError, "focus"):
                 load_experiment(source.replace('focus = "home.current"', f'focus = "{target}"'))
 
+    def test_phase_checks_do_not_collapse_into_final_expectations(self):
+        from harness.scenario import load_recipe
+        experiment = load_recipe("native-cross-session-switch")
+        self.assertEqual([p.name for p in experiment.checkpoints],
+                         ["switch-away", "return-to-origin"])
+        self.assertEqual(experiment.checkpoints[0].also[0], Hold.on_session("dest"))
+        self.assertEqual(experiment.checkpoints[1].also, (Hold.on_session("origin"),))
+
+    def test_phase_rejects_mixed_syntax_and_invalid_intermediate_target(self):
+        from harness.scenario import SCENARIO_DIR
+        text = (SCENARIO_DIR / "native-cross-session-switch.toml").read_text()
+        with self.assertRaisesRegex(ValueError, "cannot mix"):
+            load_experiment(text.replace('given =', 'when = { switch = "dest" }\ngiven ='))
+        with self.assertRaisesRegex(ValueError, "Hold::Sees"):
+            load_experiment(text.replace('sees = "dest.target"', 'sees = "dest.missing"'))
+
     def test_load_path_reads_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "one.toml"

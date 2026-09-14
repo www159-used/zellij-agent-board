@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in names:
         try:
             experiments = load_recipe_cases(name)
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, ValueError) as exc:
             print(f"e2e-zellij: {exc}", file=sys.stderr)
             return 2
         for experiment in experiments:

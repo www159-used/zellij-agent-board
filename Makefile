@@ -43,7 +43,7 @@ check: fmt-check lint test ## Run formatting, lint, and all unit tests
 test: test-rust test-hooks test-harness ## Run Rust, hook, and Zellij harness unit tests
 
 test-rust: ## Run Rust unit tests and board scenes
-	$(CARGO) test --locked --lib --bin board-tui
+	$(CARGO) test --locked --lib --bin board-tui --test daemon
 
 test-hooks: ## Test hook scripts with isolated state
 	$(PYTHON) -B scripts/test-hooks.py
