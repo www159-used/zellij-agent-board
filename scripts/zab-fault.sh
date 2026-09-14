@@ -11,6 +11,7 @@ if [[ -z "$zellij" || ! -x "$zellij" ]]; then
   exit 2
 fi
 export ZAB_FAULT_ZELLIJ="$zellij"
+export ZAB_E2E_ZELLIJ="$zellij"
 
 export PYTHONPATH="$root/e2e/zellij"
 exec python3 -m harness "$@"

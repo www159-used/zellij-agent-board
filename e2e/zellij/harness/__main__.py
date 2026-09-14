@@ -15,7 +15,7 @@ def main(argv: list[str] | None = None) -> int:
     if args and args[-1].isdigit():
         repeats = int(args.pop())
         if repeats < 1:
-            print("zab-fault: repeats must be >= 1", file=sys.stderr)
+            print("e2e-zellij: repeats must be >= 1", file=sys.stderr)
             return 2
     if args:
         names = args
@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             experiments = load_recipe_cases(name)
         except FileNotFoundError as exc:
-            print(f"zab-fault: {exc}", file=sys.stderr)
+            print(f"e2e-zellij: {exc}", file=sys.stderr)
             return 2
         for experiment in experiments:
             report = run(experiment, repeats=repeats)
