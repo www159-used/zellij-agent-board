@@ -662,6 +662,7 @@ impl Board {
     }
 
     pub fn set_list_geometry(&mut self, width: u16, height: u16) {
+        let layout_changed = self.wide_list != (width >= 50);
         self.wide_list = width >= 50;
         let content = if height >= 3 {
             height.saturating_sub(1)
@@ -674,6 +675,11 @@ impl Board {
         // so the scroll window must be derived from `content`, not `height`.
         self.picker_page_len = crate::render::picker_result_rows(content);
         self.ensure_picker_visible();
+        // Activity rows change document offsets when crossing the width
+        // threshold. An old title offset can now point at a session header.
+        if layout_changed {
+            self.scroll_anchor = self.agent_title_line(self.selected, self.wide_list);
+        }
         // A resize may leave the cursor outside the now-smaller window.
         self.clamp_view();
     }

@@ -696,6 +696,29 @@ mod process_tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn launch_focus_reveals_agent_below_session_header_with_activity() {
+        use super::*;
+        for activity_rows in 1..=2 {
+            let mut app = App::new();
+            app.board.ingest(
+                "META hooks=1\nSCAN first 1 agent agent\nSCAN first 2 agent agent\nSCAN home 0 agent agent --workspace /tmp/launch-current\n",
+            );
+            for pane in 1..=activity_rows {
+                app.board
+                    .ingest_notice(&format!("HOOK first {pane} preToolUse Shell cargo test\n"));
+            }
+            app.launch_focus = Some(parse_launch_focus(&["home".into(), "0".into()]).unwrap());
+            assert!(app.apply_launch_focus());
+            app.board.set_list_geometry(100, 4);
+            let screen = app.board.lines_for(4).join("\n");
+            assert!(
+                screen.contains("launch-current"),
+                "{activity_rows} activity rows: {screen}"
+            );
+        }
+    }
+
+    #[test]
     fn launch_focus_selects_the_matching_session_and_reveals_it_on_first_paint() {
         use super::*;
         let mut app = App::new();
