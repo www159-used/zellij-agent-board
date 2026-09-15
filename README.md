@@ -39,6 +39,8 @@ shared {
 
 `Alt+q` opens the board; press again to close. Change it if it conflicts.
 
+Opening selects the Agent in the pane you opened the board from and scrolls it into view. If that pane has no Agent, selection starts at the first row. Keyboard navigation and mouse clicks or scrolling take over from automatic selection.
+
 `skip_plugin_cache true` is only for developing the plugin. Leave it off day to day — each Alt+q otherwise reloads WASM from disk and the host occupancy climbs.
 
 The WASM pane hides itself and opens `board-tui` with `new-pane --floating --close-on-exit`. Jump is `zellij pipe --name zellij-agent-board -- JUMP <session> <pane>` to the already-running bridge.
@@ -58,7 +60,7 @@ The WASM pane hides itself and opens `board-tui` with `new-pane --floating --clo
 
 The TUI first loads the cached scan, then requests a background reconcile about every two seconds. Each TUI keeps one child at a time and reaps it before starting another; a process lock permits only one reconciler across boards. Reconcile publishes scan/title snapshots with atomic file replacement. Missing home-session titles are filled in memory before the first paint.
 
-Titles, the last scan, focus, and seen/started markers live in `$ZAB_STATE_DIR`, `$XDG_CACHE_HOME/zellij-agent-board`, or `~/.cache/zellij-agent-board`, in that order. Hooks publish their latest notice under `$TMPDIR/zellij-agent-board-spool` and separately maintain the turn-start marker. Hooks never launch a WASM plugin. Unread completion can emit a terminal notification.
+Titles, the last scan, and seen/started markers live in `$ZAB_STATE_DIR`, `$XDG_CACHE_HOME/zellij-agent-board`, or `~/.cache/zellij-agent-board`, in that order. Launch focus is passed directly to each TUI. Hooks publish their latest notice under `$TMPDIR/zellij-agent-board-spool` and separately maintain the turn-start marker. Hooks never launch a WASM plugin. Unread completion can emit a terminal notification.
 
 Codex `Interrupt` and Cursor `stop`/`afterAgentResponse` with `status=aborted` appear as `■ stopped`. Cursor `status=error`, Claude/CodeBuddy `StopFailure`, and OpenCode `session.error` appear as `✗ failed`. Both clear the working timer without marking the turn done or sending a completion notification. Permission prompts (`PermissionRequest`, CodeBuddy `Notification` `permission_prompt`, OpenCode `permission.asked`) appear as `● waiting` and keep the turn start so elapsed time resumes. Claude/CodeBuddy `Notification` `idle_prompt` appears as `◑ idle-wait` and clears the turn without a completion notice. After upgrading, rerun `./scripts/install-hooks.sh` for the CLIs you use and restart those sessions. Notices from before the new hooks were installed cannot be recovered.
 

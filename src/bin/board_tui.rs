@@ -31,9 +31,9 @@ use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use serde_json::json;
 use zellij_agent_board::{
-    focus_path, format_jump, load_places, load_scan, now_ms, parse_focus, persist_seen,
-    places_path, reconcile_once, render_board, run_reconcile, runtime_dir, scan_path,
-    scan_places_for, spool_dir, stats, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
+    format_jump, load_places, load_scan, now_ms, persist_seen, places_path, reconcile_once,
+    render_board, run_reconcile, runtime_dir, scan_path, scan_places_for, spool_dir, stats,
+    zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -45,6 +45,8 @@ const TICK_EVERY: Duration = Duration::from_secs(1);
 struct App {
     board: Board,
     home: String,
+    /// Consume once the launching pane appears; user input cancels a pending selection.
+    launch_focus: Option<AgentId>,
     /// Last pane size, so clicks can be resolved against the painted frame.
     view: Size,
     /// Last pointer position. Scrolling slides rows under a still pointer,
@@ -186,7 +188,7 @@ fn prune_board_log_gz(dir: &Path, keep: usize) {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
+    let launch_focus = match args.first().map(String::as_str) {
         Some("--stats") => {
             print!(
                 "{}",
@@ -200,6 +202,7 @@ fn main() -> io::Result<()> {
 board-tui — host dashboard for zellij-agent-board
 
   board-tui                         live board (needs a TTY)
+  board-tui --focus SESSION PANE    select the launching agent on open
   board-tui --stats                 show local usage summary
   board-tui --reconcile             write the host store once and exit
   board-tui --replay FILE.scene     run an e2e scene; no TTY
@@ -225,16 +228,18 @@ Log: {}
             };
             return replay(path);
         }
+        Some("--focus") => Some(parse_launch_focus(&args[1..])?),
         Some(other) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unknown argument {other}"),
             ));
         }
-        None => {}
-    }
+        None => None,
+    };
     init_logging();
     let mut app = App::new();
+    app.launch_focus = launch_focus;
     app.bootstrap();
     log::info!(
         "open session={} agents={}",
@@ -252,6 +257,25 @@ Log: {}
         Ok(ok) => ok,
         Err(panic) => std::panic::resume_unwind(panic),
     }
+}
+
+fn parse_launch_focus(args: &[String]) -> io::Result<AgentId> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "board-tui --focus SESSION PANE",
+        )
+    };
+    let [session, pane] = args else {
+        return Err(invalid());
+    };
+    if session.is_empty() {
+        return Err(invalid());
+    }
+    Ok(AgentId {
+        session: session.clone(),
+        pane_id: pane.parse().map_err(|_| invalid())?,
+    })
 }
 
 fn replay(path: &str) -> io::Result<()> {
@@ -273,6 +297,7 @@ impl App {
         Self {
             board: Board::default(),
             home: std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default(),
+            launch_focus: None,
             view: Size::new(0, 0),
             pointer: None,
             last_reconcile: now - SCAN_EVERY,
@@ -303,7 +328,7 @@ impl App {
         self.reload_places();
         self.fill_home_titles();
         self.reload_spool();
-        self.mark_launch_focus();
+        self.apply_launch_focus();
         log::info!(
             "bootstrap session={} cache={} agents={}",
             self.home,
@@ -404,6 +429,7 @@ impl App {
     }
 
     fn handle_key(&mut self, event: KeyEvent) -> Loop {
+        self.launch_focus = None;
         // C-e / C-y: same move-together scroll as the wheel (spotlight holds
         // its screen line; the list flows under it).
         if let Some(delta) = view_scroll_delta(event) {
@@ -464,6 +490,8 @@ impl App {
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Loop {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // A press commits to a row, so the launch hint is spent.
+                self.launch_focus = None;
                 self.usage
                     .snapshot(&self.board, self.view.width, self.view.height);
                 self.usage.record(
@@ -507,6 +535,7 @@ impl App {
             // `mousescroll=ver:3` — a trackpad quantizes smooth swipes into
             // discrete wheel ticks, and one line a tick is easy to miss.
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.launch_focus = None;
                 let delta = if mouse.kind == MouseEventKind::ScrollUp {
                     -3
                 } else {
@@ -568,6 +597,7 @@ impl App {
             dirty = true;
             log::info!("places_reload");
         }
+        dirty |= self.apply_launch_focus();
         dirty
     }
 
@@ -597,18 +627,19 @@ impl App {
         changed
     }
 
-    fn mark_launch_focus(&mut self) {
-        let text = fs::read_to_string(focus_path()).unwrap_or_default();
-        let Some((session, pane_id)) = parse_focus(&text) else {
-            return;
+    fn apply_launch_focus(&mut self) -> bool {
+        let Some(id) = self.launch_focus.clone() else {
+            return false;
         };
-        let id = AgentId {
-            session: session.clone(),
-            pane_id,
-        };
-        if self.board.mark_visited(&id) {
-            persist_done_seen(&self.board, &session, pane_id);
+        // A missing agent stays pending: the next scan may bring it in.
+        if !self.board.select_agent(&id) {
+            return false;
         }
+        self.launch_focus = None;
+        if self.board.mark_visited(&id) {
+            persist_done_seen(&self.board, &id.session, id.pane_id);
+        }
+        true
     }
 }
 
@@ -663,6 +694,119 @@ mod process_tests {
     use super::spawn_if_idle;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn launch_focus_selects_the_matching_session_and_reveals_it_on_first_paint() {
+        use super::*;
+        let mut app = App::new();
+        let mut scan = String::new();
+        for pane in 0..25 {
+            scan.push_str(&format!("SCAN first {pane} agent agent\n"));
+        }
+        scan.push_str("SCAN home 0 agent agent --workspace /tmp/current\n");
+        app.board.ingest(&scan);
+        app.launch_focus = Some(parse_launch_focus(&["home".into(), "0".into()]).unwrap());
+        assert!(app.apply_launch_focus());
+        assert_eq!(app.board.selected, 25);
+        // Startup selects before the terminal dimensions are available.
+        app.board.set_list_geometry(100, 10);
+        let (start, end) = app.board.visible_range();
+        assert!((start..end).contains(&25));
+        assert!(app.board.topline() > 0);
+        assert!(app.board.lines_for(10).join("\n").contains("current"));
+        assert_eq!(
+            app.board.decide(Key::Confirm),
+            Action::Jump {
+                session: "home".into(),
+                pane_id: 0
+            }
+        );
+        // Reconciliation preserves the selected identity without reapplying startup focus.
+        app.board
+            .ingest(&format!("SCAN before 1 agent agent\n{scan}"));
+        assert_eq!(app.board.agents[app.board.selected].id.session, "home");
+        assert!(!app.apply_launch_focus());
+    }
+
+    #[test]
+    fn launch_focus_waits_for_a_missing_agent_without_changing_the_fallback() {
+        use super::*;
+        let mut app = App::new();
+        app.launch_focus = Some(AgentId {
+            session: "home".into(),
+            pane_id: 9,
+        });
+        assert!(!app.apply_launch_focus());
+        app.board.ingest("SCAN home 1 agent agent\n");
+        assert!(!app.apply_launch_focus());
+        assert_eq!(app.board.selected, 0);
+        app.board
+            .ingest("SCAN home 1 agent agent\nSCAN home 9 agent agent\n");
+        assert!(app.apply_launch_focus());
+        assert_eq!(app.board.agents[app.board.selected].id.pane_id, 9);
+        app.board.decide(Key::Up);
+        assert!(!app.apply_launch_focus());
+        assert_eq!(app.board.agents[app.board.selected].id.pane_id, 1);
+    }
+
+    #[test]
+    fn user_navigation_cancels_pending_launch_focus_but_pointer_motion_does_not() {
+        use super::*;
+        for mouse in [
+            None,
+            Some(MouseEventKind::ScrollDown),
+            Some(MouseEventKind::Down(MouseButton::Left)),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = test_app(&dir.path().join("usage.jsonl"));
+            app.launch_focus = Some(AgentId {
+                session: "private".into(),
+                pane_id: 9,
+            });
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert!(app.launch_focus.is_some());
+            if let Some(kind) = mouse {
+                app.handle_mouse(MouseEvent {
+                    kind,
+                    column: 0,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                });
+            } else {
+                app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            }
+            app.board
+                .ingest("SCAN private 3 agent agent\nSCAN private 9 agent agent\n");
+            assert!(!app.apply_launch_focus());
+            assert_eq!(app.board.agents[app.board.selected].id.pane_id, 3);
+        }
+    }
+
+    #[test]
+    fn missing_launch_focus_keeps_the_first_row_and_invalid_arguments_are_rejected() {
+        use super::*;
+        let mut app = App::new();
+        app.board
+            .ingest("SCAN home 1 agent agent\nSCAN home 9 agent agent\n");
+        assert!(!app.apply_launch_focus());
+        assert_eq!(app.board.selected, 0);
+        for args in [
+            vec![],
+            vec!["home"],
+            vec!["", "0"],
+            vec!["home", "oops"],
+            vec!["home", "-1"],
+            vec!["home", "0", "extra"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert!(parse_launch_focus(&args).is_err(), "{args:?}");
+        }
+    }
 
     fn test_app(path: &std::path::Path) -> super::App {
         let mut app = super::App::new();

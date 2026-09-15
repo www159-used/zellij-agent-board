@@ -150,23 +150,23 @@ fn command_invokes_board_tui(command: &str) -> bool {
 }
 
 /// The real board is a regular terminal. Command-pane exits are the
-/// launcher / places / focus writers — never a user quit.
+/// launcher / places writers — never a user quit.
 pub fn is_host_tui_exit(tui_id: Option<u32>, closed_id: u32, command_pane: bool) -> bool {
     !command_pane && tui_id == Some(closed_id)
 }
 
 /// The empty plugin is not the board. Open only after the current session
-/// is known, once. Later `SessionUpdate`s / `PaneUpdate`s must not spawn
-/// another pane; only the Timer retries a failed launch.
+/// and launch focus have been captured. Later session/pane updates must not
+/// spawn another pane; only the Timer retries a failed launch.
 pub fn should_open_tui(
     permissions: bool,
     dying: bool,
     tui_up: bool,
     attempts: u8,
     from_timer: bool,
-    session_known: bool,
+    launch_context_ready: bool,
 ) -> bool {
-    if !permissions || dying || tui_up || !session_known {
+    if !permissions || dying || tui_up || !launch_context_ready {
         return false;
     }
     if attempts == 0 {
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn tui_does_not_open_before_the_session_is_known() {
+    fn tui_does_not_open_before_the_launch_context_is_known() {
         use super::should_open_tui;
         assert!(!should_open_tui(true, false, false, 0, false, false));
         assert!(should_open_tui(true, false, false, 0, false, true));

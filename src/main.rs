@@ -8,9 +8,9 @@ use std::path::PathBuf;
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use zellij_agent_board::{
-    bridge_close_plan, float_size_from_config, format_focus, format_places, is_host_tui_exit,
-    jump_steps, looks_like_board_tui, now_ms, parse_jump, plugin_ids_to_close_explicitly,
-    runtime_dir, should_abandon_empty_bridge, should_also_close_self, should_hide_bridge_keep_tui,
+    bridge_close_plan, float_size_from_config, format_places, is_host_tui_exit, jump_steps,
+    looks_like_board_tui, now_ms, parse_jump, plugin_ids_to_close_explicitly,
+    should_abandon_empty_bridge, should_also_close_self, should_hide_bridge_keep_tui,
     should_open_tui, should_park_bridge_keep_tui, should_shutdown_on_tui_close,
     should_unsuppress_before_close, AgentId, BridgeClosePlan, FloatSize, FloatingLayerState,
     JumpStep, PanePlace,
@@ -39,14 +39,6 @@ fn init_logging() {
     static LOGGER: ZellijLog = ZellijLog;
     let _ = log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info));
 }
-const FOCUS_WRITER: &str = r#"
-dir="${ZAB_STATE_DIR:?}"
-mkdir -p "$dir/.pending" || exit 1
-tmp="$(mktemp "$dir/.pending/focus.XXXXXX")" || exit 1
-trap 'rm -f "$tmp"' EXIT
-printf '%s' "${ZAB_FOCUS}" >"$tmp" && mv -f "$tmp" "$dir/focus"
-"#;
-
 /// `bash -c` (not `-l`) keeps ZAB_* env. The zellij binary is probed here —
 /// the plugin env has no user PATH — mirroring zellij_candidates in
 /// src/scan.rs; keep the two lists in sync. Regular `new-pane`, not a
@@ -85,6 +77,9 @@ if [ -n "${ZAB_TAB:-}" ]; then
   cmd+=(--tab-id "$ZAB_TAB")
 fi
 cmd+=(-- "$ZAB_TUI")
+if [ -n "${ZAB_FOCUS_PANE:-}" ]; then
+  cmd+=(--focus "$ZAB_SESSION" "$ZAB_FOCUS_PANE")
+fi
 "${cmd[@]}"
 "#;
 
@@ -108,7 +103,8 @@ struct State {
     tui_id: Option<u32>,
     tui_visible: bool,
     tui_attempts: u8,
-    launch_focus_written: bool,
+    launch_context_received: bool,
+    launch_focus: Option<u32>,
     bridge_hidden: bool,
     skip_redundant_self_close: bool,
     skip_own_explicit_close: bool,
@@ -364,7 +360,7 @@ impl State {
             self.tui_up(),
             self.tui_attempts,
             from_timer,
-            self.session_known(),
+            self.session_known() && self.launch_context_received,
         ) {
             return;
         }
@@ -417,6 +413,9 @@ impl State {
         env.insert("ZAB_X".to_string(), self.float_size.x.clone());
         env.insert("ZAB_Y".to_string(), self.float_size.y.clone());
         env.insert("ZAB_SESSION".to_string(), session);
+        if let Some(pane_id) = self.launch_focus {
+            env.insert("ZAB_FOCUS_PANE".to_string(), pane_id.to_string());
+        }
         if let Some(tab_id) = self.own_tab_id {
             env.insert("ZAB_TAB".to_string(), tab_id.to_string());
         }
@@ -625,14 +624,13 @@ impl State {
     }
 
     fn remember_launch_focus(&mut self, session: &SessionInfo) {
-        if self.launch_focus_written || session.name.is_empty() {
+        if self.launch_context_received || session.name.is_empty() {
             return;
         }
-        let Some(pane_id) = self.previous_terminal_pane(session) else {
-            return;
-        };
-        self.flush_focus(&session.name, pane_id);
-        self.launch_focus_written = true;
+        // Capture before creating the TUI, which would otherwise become the
+        // newest terminal in pane_history. No terminal is a valid fallback.
+        self.launch_focus = self.previous_terminal_pane(session);
+        self.launch_context_received = true;
     }
 
     fn previous_terminal_pane(&self, session: &SessionInfo) -> Option<u32> {
@@ -651,23 +649,6 @@ impl State {
                     PaneId::Plugin(_) => None,
                 }
             })
-    }
-
-    fn flush_focus(&self, session: &str, pane_id: u32) {
-        let mut env = BTreeMap::new();
-        env.insert("ZAB_FOCUS".to_string(), format_focus(session, pane_id));
-        env.insert(
-            "ZAB_STATE_DIR".to_string(),
-            runtime_dir().to_string_lossy().into_owned(),
-        );
-        let mut context = BTreeMap::new();
-        context.insert("zellij_agent_board".to_string(), "focus".to_string());
-        run_command_with_env_variables_and_cwd(
-            &["/bin/bash", "-c", FOCUS_WRITER],
-            env,
-            PathBuf::from("."),
-            context,
-        );
     }
 
     fn previous_pane_was_floating(&self, session: &SessionInfo) -> Option<bool> {

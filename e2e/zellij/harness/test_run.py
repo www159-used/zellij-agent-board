@@ -17,6 +17,7 @@ from harness.run import (
     LiveWorld,
     PtyClient,
     Report,
+    client_terminal_panes,
     focused_sentinels,
     list_clients_present,
     run,
@@ -173,6 +174,29 @@ class RunSetup(unittest.TestCase):
         self.assertFalse(
             list_clients_present("CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n")
         )
+
+    def test_client_focus_comes_from_connected_clients(self) -> None:
+        self.assertEqual(
+            client_terminal_panes(
+                "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n"
+                "1         terminal_0     /bin/zsh\n"
+                "3         terminal_8     agent\n"
+                "4         plugin_5       board\n"
+            ),
+            frozenset({0, 8}),
+        )
+
+    def test_stale_pane_focus_is_not_an_attached_clients_focus(self) -> None:
+        world = LiveWorld.__new__(LiveWorld)
+        world.real_names = {"home": "test-home"}
+        world.sentinels = frozenset({"FIRST", "CURRENT"})
+        world._zj = Mock(return_value=SimpleNamespace(stdout="1 terminal_1 agent\n"))
+        world._panes = Mock(return_value=[
+            {"id": 1, "is_plugin": False, "is_focused": True},
+            {"id": 2, "is_plugin": False, "is_focused": True},
+        ])
+        world._dump = lambda session, pane: {1: "FIRST", 2: "CURRENT"}[pane]
+        self.assertEqual(world._visible_sentinels("home"), frozenset({"FIRST"}))
 
 
 if __name__ == "__main__":

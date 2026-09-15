@@ -33,6 +33,7 @@ class Session:
 class World:
     attach: str
     sessions: tuple[Session, ...]
+    focus: AgentRef | None = None
 
     def session(self, name: str) -> Session:
         for session in self.sessions:
@@ -147,7 +148,7 @@ def _from_case(row: dict[str, Any]) -> Experiment:
     given = row.get("given") or {}
     when = row.get("when") or {}
     then = row.get("then") or {}
-    _known_keys(given, {"attached", "board"}, "case.given")
+    _known_keys(given, {"attached", "board", "focus"}, "case.given")
     _known_keys(then, {"attached", "sees"}, "case.then")
 
     attached = str(given.get("attached") or "")
@@ -202,7 +203,11 @@ def _from_case(row: dict[str, Any]) -> Experiment:
     return Experiment(
         name=str(row.get("name") or ""),
         description=str(row.get("description") or ""),
-        world=World(attach=attached, sessions=sessions),
+        world=World(
+            attach=attached,
+            sessions=sessions,
+            focus=_agent_ref(given["focus"]) if "focus" in given else None,
+        ),
         disturb=(disturb,),
         also=tuple(holds),
         repeat=int(row.get("repeat") or 1),
@@ -314,6 +319,13 @@ def _check_world(experiment: Experiment) -> None:
         raise ValueError("session names must be unique")
     if experiment.world.attach not in names:
         raise ValueError("attach must name a declared session")
+    if focus := experiment.world.focus:
+        if focus.session != experiment.world.attach:
+            raise ValueError("focus must name a pane in the attached session")
+        try:
+            experiment.world.pane(focus.session, focus.role)
+        except KeyError:
+            raise ValueError("focus must name a declared pane") from None
     if not experiment.disturb:
         raise ValueError("disturb must not be empty")
     attach = experiment.world.session(experiment.world.attach)

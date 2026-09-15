@@ -36,9 +36,8 @@ pub use protocol::{
     replace_session_places, scan_path,
 };
 pub use protocol::{
-    focus_path, format_focus, format_jump, format_places, format_seen, format_started,
-    merge_places, parse_focus, parse_jump, parse_places, places_path, seen_dir, spool_dir,
-    started_dir, PIPE_NAME,
+    format_jump, format_places, format_seen, format_started, merge_places, parse_jump,
+    parse_places, places_path, seen_dir, spool_dir, started_dir, PIPE_NAME,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use reconcile::{
@@ -446,8 +445,7 @@ impl Board {
         let before = self.selected;
         let action = self.decide_key(key);
         if self.selected != before {
-            self.scroll_anchor = self.agent_title_line(self.selected, self.wide_list);
-            self.clamp_view();
+            self.reveal();
         }
         action
     }
@@ -1625,6 +1623,30 @@ impl Board {
         };
     }
 
+    /// Index of the agent with this identity, if the board still holds it.
+    fn index_of(&self, id: &AgentId) -> Option<usize> {
+        self.agents.iter().position(|agent| agent.id == *id)
+    }
+
+    /// Keep the view on the cursor after `selected` moves: re-anchor to the
+    /// new row's title line, then clamp. Every path that moves the cursor
+    /// calls this, so the view cannot drift from the selection.
+    fn reveal(&mut self) {
+        self.scroll_anchor = self.agent_title_line(self.selected, self.wide_list);
+        self.clamp_view();
+    }
+
+    /// Select an agent by identity and reveal its row without changing list order.
+    /// A missing agent leaves the current selection and view alone.
+    pub fn select_agent(&mut self, id: &AgentId) -> bool {
+        let Some(index) = self.index_of(id) else {
+            return false;
+        };
+        self.selected = index;
+        self.reveal();
+        true
+    }
+
     pub fn mark_visited(&mut self, id: &AgentId) -> bool {
         let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == *id) else {
             return false;
@@ -1750,10 +1772,8 @@ impl Board {
     }
 
     fn restore_selection(&mut self, selected_id: Option<AgentId>) {
-        self.selected = selected_id
-            .and_then(|id| self.agents.iter().position(|agent| agent.id == id))
-            .unwrap_or(0)
-            .min(self.agents.len().saturating_sub(1));
+        let index = selected_id.and_then(|id| self.index_of(&id));
+        self.selected = index.unwrap_or(0).min(self.agents.len().saturating_sub(1));
         self.clamp_view();
         if self.is_hinting() {
             self.recompute_hint_labels();
@@ -1761,8 +1781,7 @@ impl Board {
     }
 
     fn restore_hover(&mut self, hovered_id: Option<AgentId>) {
-        self.hovered =
-            hovered_id.and_then(|id| self.agents.iter().position(|agent| agent.id == id));
+        self.hovered = hovered_id.and_then(|id| self.index_of(&id));
     }
 }
 

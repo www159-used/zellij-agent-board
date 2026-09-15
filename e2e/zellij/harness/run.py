@@ -23,7 +23,7 @@ from functools import cached_property
 from pathlib import Path
 
 from harness.oracle import Observation, Verdict, judge
-from harness.scenario import Disturb, Experiment
+from harness.scenario import AgentRef, Disturb, Experiment
 
 REPO = Path(__file__).resolve().parents[3]
 DEFAULT_WASM = REPO / "target/wasm32-wasip1/release/zellij-agent-board.wasm"
@@ -418,6 +418,10 @@ class LiveWorld:
             return "world_never_quiet"
         if not self._wait(lambda: self._attached_logical() == self.experiment.world.attach, 8):
             return "world_never_quiet"
+        if focus := self.experiment.world.focus:
+            failure = self._focus_launch_pane(focus)
+            if failure is not None:
+                return failure
         self.server_cookie = self._server_cookie()
         if self.needs_board:
             opened = self._open_board()
@@ -435,6 +439,31 @@ class LiveWorld:
             failed = getattr(self, adapter_name)(step)
             if failed is not None:
                 return failed
+        return None
+
+    def _focus_launch_pane(self, focus: AgentRef) -> str | None:
+        """Click the launching pane, so the attached client starts focused on it.
+
+        Sent as raw SGR input rather than `action focus-pane-id`, which can
+        leave a separate focus entry without moving this client's focus.
+        """
+        pane_id = self.pane_ids[(focus.session, focus.role)]
+        pane = next(
+            pane
+            for pane in self._panes(focus.session)
+            if not pane.get("is_plugin") and pane["id"] == pane_id
+        )
+        column = pane["pane_content_x"] + pane["pane_content_columns"] // 2 + 1
+        row = pane["pane_content_y"] + pane["pane_content_rows"] // 2 + 1
+        clicked = self.pty.write(
+            f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m".encode()
+        )
+        sentinel = self.experiment.world.pane(focus.session, focus.role).sentinel
+        if not clicked or not self._wait(
+            lambda: sentinel in self._visible_sentinels(focus.session), 5
+        ):
+            return "world_never_quiet"
+        self.notes.append(f"initial focus: {focus.session}.{focus.role} (pane {pane_id})")
         return None
 
     def _disturb_switch(self, step: Disturb) -> str | None:
@@ -507,8 +536,8 @@ class LiveWorld:
                 pane = self.experiment.world.pane(hold.target.session, hold.target.role)
                 required_sentinels.add(pane.sentinel)
         # Resolve the attached session once: it is the most expensive fact to
-        # read and both the observation and the sentinel scan need it.
-        attached = self._attached_logical()
+        # read, and the sentinel scan needs both it and its focus set.
+        attached, focused = self._attached()
         return Observation(
             client_alive=self.pty is not None and self.pty.alive(),
             sessions=self._live_logical(),
@@ -516,7 +545,7 @@ class LiveWorld:
             control_alive=self._control_alive(),
             attached_session=attached,
             required_session=required_session,
-            visible_sentinels=self._visible_sentinels(attached),
+            visible_sentinels=self._visible_sentinels(attached, focused),
             required_sentinels=frozenset(required_sentinels),
             server_restarted=self._server_restarted(),
             explained_reconnect=self.explained_reconnect,
@@ -802,11 +831,18 @@ class LiveWorld:
                 live.add(logical)
         return frozenset(live)
 
-    def _attached_logical(self) -> str | None:
+    def _attached(self) -> tuple[str | None, frozenset[int]]:
+        """Attached logical session, and the terminal panes its clients focus.
+
+        One `list-clients` read answers both: the callers that need the
+        session almost always need the focus set too. The `pty` and
+        `list-sessions` fallbacks cannot name a focused pane, so they report
+        an empty set.
+        """
         for logical, real in self.real_names.items():
             clients = self._zj("action", "list-clients", session=real)
             if clients.returncode == 0 and list_clients_present(clients.stdout):
-                return logical
+                return logical, client_terminal_panes(clients.stdout)
         if self.pty is not None:
             text = _strip_ansi(self.pty.transcript())
             matches = re.findall(r"Zellij \(([^)]+)\)", text)
@@ -814,7 +850,7 @@ class LiveWorld:
                 current = matches[-1]
                 for logical, real in self.real_names.items():
                     if current == real:
-                        return logical
+                        return logical, frozenset()
         for flags in (["-n"], []):
             text = self._zj("list-sessions", *flags).stdout
             for line in text.splitlines():
@@ -823,8 +859,11 @@ class LiveWorld:
                 head = line.split()[0] if line.split() else ""
                 for logical, real in self.real_names.items():
                     if head == real or real in line:
-                        return logical
-        return None
+                        return logical, frozenset()
+        return None, frozenset()
+
+    def _attached_logical(self) -> str | None:
+        return self._attached()[0]
 
     def _control_alive(self) -> bool:
         # After a switch the origin session may still answer; any mapped session
@@ -834,11 +873,19 @@ class LiveWorld:
                 return True
         return False
 
-    def _visible_sentinels(self, logical: str | None) -> frozenset[str]:
+    def _visible_sentinels(
+        self, logical: str | None, focused: frozenset[int] | None = None
+    ) -> frozenset[str]:
         if logical is None:
             return frozenset()
+        if focused is None:
+            clients = self._zj("action", "list-clients", session=self.real_names[logical])
+            focused = client_terminal_panes(clients.stdout)
+        panes = self._panes(logical)
+        for pane in panes:
+            pane["is_focused"] = not pane.get("is_plugin") and pane.get("id") in focused
         return focused_sentinels(
-            self._panes(logical, "--state"),
+            panes,
             lambda pane_id: self._dump(logical, pane_id),
             self.sentinels,
         )
@@ -848,7 +895,8 @@ class LiveWorld:
 
     def _panes_in(self, real: str, *extra: str) -> list[dict]:
         """Tolerant `list-panes --json` for one real session name. `extra`
-        selects the reported pane fields (`--state`, `--command`)."""
+        selects extra pane fields (`--command`); the base fields already
+        carry the geometry and `is_plugin` the harness reads."""
         result = self._zj(
             "action",
             "list-panes",
@@ -978,6 +1026,14 @@ def focused_sentinels(
             continue
         seen.update(token for token in candidates if token in screen)
     return frozenset(seen)
+
+
+def client_terminal_panes(text: str) -> frozenset[int]:
+    return frozenset(
+        int(match.group(1))
+        for line in text.splitlines()
+        if (match := re.match(r"^\s*\d+\s+terminal_(\d+)\b", line))
+    )
 
 
 def list_clients_present(text: str) -> bool:

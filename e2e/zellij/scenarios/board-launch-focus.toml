@@ -1,0 +1,11 @@
+[[case]]
+name = "board-launch-focus"
+description = "Open from the second Agent and press Enter to return to that pane."
+repeat = 5
+given = { attached = "home", board = "home", focus = "home.current" }
+targets = [
+    { ref = "home.first", agent = "cursor", shows = "ZAB-SENTINEL-FIRST" },
+    { ref = "home.current", agent = "cursor", shows = "ZAB-SENTINEL-CURRENT" },
+]
+when = { go = "home.current" }
+then = { attached = "home", sees = "home.current" }

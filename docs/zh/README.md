@@ -37,6 +37,8 @@ shared {
 
 `Alt+q` 打开；再按一次关掉。若与现有快捷键冲突，可自行修改。
 
+打开时自动选中当前 pane 对应的 Agent，并滚动到它的位置；当前 pane 没有 Agent 时，默认选中第一行。开始键盘操作、鼠标点击或滚动后，停止自动定位。
+
 日常不要加 `skip_plugin_cache true`，否则每次 Alt+q 都从磁盘重载 WASM，占用会往上叠。只有改插件本身时才打开。
 
 WASM 会隐藏自身，通过 `new-pane --floating --close-on-exit` 打开 `board-tui`。跳转使用 `zellij pipe --name zellij-agent-board -- JUMP <session> <pane>`，只投给已经运行的桥。
@@ -56,7 +58,7 @@ WASM 会隐藏自身，通过 `new-pane --floating --close-on-exit` 打开 `boar
 
 TUI 首先读取扫描缓存，随后约每两秒请求一次后台 reconcile。每个 TUI 同时保留一个子进程，回收后才启动下一轮；进程锁保证多个看板之间只有一个 reconcile 写入。扫描和标题快照通过原子替换发布。首帧缺失的当前会话标题只补到内存中。
 
-标题、上次扫描、焦点及 seen/started 标记，按优先级存放在 `$ZAB_STATE_DIR`、`$XDG_CACHE_HOME/zellij-agent-board` 或 `~/.cache/zellij-agent-board`。Hook 将最近一条通知写入 `$TMPDIR/zellij-agent-board-spool`，并单独维护本轮开始时间，不启动 WASM 插件。未读完成状态可以发出终端通知。
+标题、上次扫描及 seen/started 标记，按优先级存放在 `$ZAB_STATE_DIR`、`$XDG_CACHE_HOME/zellij-agent-board` 或 `~/.cache/zellij-agent-board`。本次打开前的焦点直接传给对应的 TUI。Hook 将最近一条通知写入 `$TMPDIR/zellij-agent-board-spool`，并单独维护本轮开始时间，不启动 WASM 插件。未读完成状态可以发出终端通知。
 
 Codex `Interrupt` 以及 Cursor `stop`/`afterAgentResponse` 且 `status=aborted` 时显示为 `■ stopped`。Cursor `status=error`、Claude/CodeBuddy `StopFailure`、OpenCode `session.error` 显示为 `✗ failed`。两者都清除本轮计时，不标记为完成，也不发送完成通知。授权提示（`PermissionRequest`、CodeBuddy `Notification` 的 `permission_prompt`、OpenCode `permission.asked`）显示为 `● waiting`，并保留本轮起点，以便恢复后继续计时。Claude/CodeBuddy `Notification` 的 `idle_prompt` 显示为 `◑ idle-wait`，清回合且不发完成通知。升级后对所用 CLI 重新运行 `./scripts/install-hooks.sh`，并重启这些会话。安装这些 hook 之前发出的通知无法追溯恢复。
 

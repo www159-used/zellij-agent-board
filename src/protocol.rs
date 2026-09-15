@@ -1,7 +1,7 @@
 //! File / pipe protocol between the WASM bridge and the host TUI.
 //!
 //! Durable host state lives in `~/.cache/zellij-agent-board`: titles, seen,
-//! started, focus, and the last SCAN snapshot. First paint reads the
+//! started, and the last SCAN snapshot. First paint reads the
 //! snapshot; a live scan only patches rows. Hook spool stays in `$TMPDIR`.
 
 use std::path::{Path, PathBuf};
@@ -57,10 +57,6 @@ pub fn places_path() -> PathBuf {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn host_places_path() -> PathBuf {
     runtime_dir().join("places.host")
-}
-
-pub fn focus_path() -> PathBuf {
-    runtime_dir().join("focus")
 }
 
 pub fn spool_dir() -> PathBuf {
@@ -192,10 +188,6 @@ pub fn format_started(session: &str, pane_id: u32, started_at: u64) -> String {
     format!("STARTED {session} {pane_id} {started_at}")
 }
 
-pub fn format_focus(session: &str, pane_id: u32) -> String {
-    format!("FOCUS {session} {pane_id}")
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 fn ensure_migrated() {
     static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -209,7 +201,6 @@ fn migrate_tmpdir_state() {
     if src == dest || !src.is_dir() {
         return;
     }
-    copy_if_absent(&src.join("focus"), &dest.join("focus"));
     copy_if_absent(&src.join("scan"), &dest.join("scan"));
     copy_if_absent(&src.join("scan.host"), &dest.join("scan"));
     copy_dir_if_absent(&src.join("seen"), &dest.join("seen"));
@@ -339,16 +330,6 @@ pub fn clear_started(session: &str, pane_id: u32) {
     let _ = std::fs::remove_file(path);
 }
 
-pub fn parse_focus(text: &str) -> Option<(String, u32)> {
-    let mut parts = text.split_whitespace();
-    if parts.next()? != "FOCUS" {
-        return None;
-    }
-    let session = parts.next()?.to_string();
-    let pane_id = parts.next()?.parse().ok()?;
-    Some((session, pane_id))
-}
-
 pub fn parse_jump(payload: &str) -> Option<(String, u32)> {
     let mut parts = payload.split_whitespace();
     if parts.next()? != "JUMP" {
@@ -362,8 +343,8 @@ pub fn parse_jump(payload: &str) -> Option<(String, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_focus, format_jump, format_place_line, format_seen, merge_places, parse_focus,
-        parse_jump, parse_place_line, parse_places, state_dir_from,
+        format_jump, format_place_line, format_seen, merge_places, parse_jump, parse_place_line,
+        parse_places, state_dir_from,
     };
     use crate::discover::parse_host_line;
     use crate::{AgentId, PanePlace};
@@ -390,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn seen_and_focus_lines_round_trip() {
+    fn seen_lines_round_trip() {
         let seen = format_seen("ww", 3, 1_700_000_000);
         assert_eq!(
             parse_host_line(&seen),
@@ -402,11 +383,6 @@ mod tests {
                 finished_at: 1_700_000_000,
             })
         );
-        assert_eq!(
-            parse_focus(&format_focus("mysql_syncer", 2)),
-            Some(("mysql_syncer".into(), 2))
-        );
-        assert_eq!(parse_focus("PLACE ww 3"), None);
     }
 
     #[test]

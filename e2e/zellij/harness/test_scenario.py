@@ -234,6 +234,7 @@ go = { session = "home", role = "target" }
                 "native-cross-session-switch",
                 "board-same-session-focus",
                 "board-cross-session-jump",
+                "board-launch-focus",
             },
         )
         jump = load_recipe("board-cross-session-jump")
@@ -242,6 +243,16 @@ go = { session = "home", role = "target" }
         self.assertEqual(jump.repeat, 40)
         self.assertEqual(load_recipe("board-same-session-focus").repeat, 40)
         self.assertEqual(load_recipe("native-cross-session-switch").repeat, 40)
+
+    def test_launch_focus_names_a_pane_in_the_attached_session(self) -> None:
+        from harness.scenario import load_recipe, SCENARIO_DIR
+
+        recipe = load_recipe("board-launch-focus")
+        self.assertEqual(recipe.world.focus, AgentRef("home", "current"))
+        source = (SCENARIO_DIR / "board-launch-focus.toml").read_text()
+        for target in ["home.missing", "elsewhere.current"]:
+            with self.assertRaisesRegex(ValueError, "focus"):
+                load_experiment(source.replace('focus = "home.current"', f'focus = "{target}"'))
 
     def test_load_path_reads_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
