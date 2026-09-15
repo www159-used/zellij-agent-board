@@ -829,7 +829,7 @@ fn agent_row(
     }
     spans.push(Span::styled(format!("{} ", row_icon(agent)), status_style));
     spans.push(Span::styled(
-        pad_right(agent.status.label(), 9),
+        pad_right(agent.status.label(), Status::LABEL_WIDTH),
         status_style,
     ));
 
@@ -1559,46 +1559,34 @@ mod tests {
         assert!(text.contains("ww"));
     }
 
+    /// Paint each status on its own, so a label wider than `LABEL_WIDTH`
+    /// fails here instead of silently shifting every row's place column.
     #[test]
-    fn columns_share_a_gutter_across_statuses() {
-        let mut board = Board {
-            hooks_installed: true,
-            now: 134,
-            wall_now: 1_700_000_134,
-            ..Board::default()
-        };
-        board.agents.push(agent());
-        let mut done = agent();
-        done.id.pane_id = 9;
-        done.status = Status::Done;
-        done.started_at = None;
-        done.finished_at = Some(1_700_000_000);
-        done.pane_title = "Ship it".into();
-        done.visited = true;
-        board.agents.push(done);
-        let mut idle_wait = agent();
-        idle_wait.id.pane_id = 10;
-        idle_wait.status = Status::IdleWait;
-        idle_wait.started_at = None;
-        board.agents.push(idle_wait);
-        let text = painted(&board, 20, 110, "ww");
-        let working = text
-            .lines()
-            .find(|line| line.contains("working") && line.contains("2m14s"))
-            .expect("working row");
-        let finished = text
-            .lines()
-            .find(|line| line.contains("2m14s ago"))
-            .expect("done row");
-        let w = display_index(working, "api").expect("working place");
-        let d = display_index(finished, "api").expect("done place");
-        assert_eq!(w, d, "place column drifted:\n{working}\n{finished}");
-        let waiting = text
-            .lines()
-            .find(|line| line.contains("idle-wait") && line.contains("api"))
-            .expect("idle-wait row");
-        let i = display_index(waiting, "api").expect("idle-wait place");
-        assert_eq!(w, i, "place column drifted:\n{working}\n{waiting}");
+    fn columns_share_a_gutter_across_every_status() {
+        let mut places = Vec::new();
+        for status in Status::ALL {
+            let mut board = Board {
+                hooks_installed: true,
+                now: 134,
+                wall_now: 1_700_000_134,
+                ..Board::default()
+            };
+            let mut row = agent();
+            row.status = status;
+            row.started_at = None;
+            board.agents.push(row);
+            let text = painted(&board, 20, 110, "ww");
+            let line = text
+                .lines()
+                .find(|line| line.contains(status.label()) && line.contains("api"))
+                .unwrap_or_else(|| panic!("{} row missing:\n{text}", status.label()));
+            let place = display_index(line, "api").expect("place column");
+            places.push((status.label(), place));
+        }
+        let expected = places[0].1;
+        for (label, place) in &places {
+            assert_eq!(*place, expected, "{label} place column drifted: {places:?}");
+        }
     }
 
     #[test]

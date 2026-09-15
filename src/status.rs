@@ -17,7 +17,39 @@ pub enum Status {
 }
 
 impl Status {
-    pub fn label(self) -> &'static str {
+    /// Every variant — add new ones here too, so column widths and the
+    /// render drift test cannot miss them.
+    pub const ALL: [Status; 11] = [
+        Self::Failed,
+        Self::Waiting,
+        Self::IdleWait,
+        Self::Done,
+        Self::Compact,
+        Self::Working,
+        Self::Interrupted,
+        Self::Idle,
+        Self::Found,
+        Self::Unknown,
+        Self::Ended,
+    ];
+
+    /// Widest [`label`](Self::label), so the status column pads every row to
+    /// the same width and the columns after it line up. Derived rather than
+    /// literal: a longer label pushes this up instead of shifting the board.
+    pub const LABEL_WIDTH: usize = {
+        let mut width = 0;
+        let mut i = 0;
+        while i < Self::ALL.len() {
+            let len = Self::ALL[i].label().len();
+            if len > width {
+                width = len;
+            }
+            i += 1;
+        }
+        width
+    };
+
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Failed => "failed",
             Self::Waiting => "waiting",
