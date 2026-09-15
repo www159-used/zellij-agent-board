@@ -39,7 +39,7 @@ shared {
 
 `Alt+q` opens the board; press again to close. Change it if it conflicts.
 
-Opening selects the Agent in the pane you opened the board from and scrolls it into view. If that pane has no Agent, selection starts at the first row. Keyboard navigation and mouse clicks or scrolling take over from automatic selection.
+Opening selects the Agent in the pane you opened the board from and scrolls it into view. If that pane has no Agent, selection returns to the most recent Agent jumped to through the board, including across sessions and board reopenings. If that Agent is gone or there is no history, selection starts at the first row. Keyboard navigation and mouse clicks or scrolling take over from automatic selection.
 
 `skip_plugin_cache true` is only for developing the plugin. Leave it off day to day — each Alt+q otherwise reloads WASM from disk and the host occupancy climbs.
 

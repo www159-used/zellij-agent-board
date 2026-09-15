@@ -31,9 +31,9 @@ use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use serde_json::json;
 use zellij_agent_board::{
-    format_jump, load_places, load_scan, now_ms, persist_seen, places_path, reconcile_once,
-    render_board, run_reconcile, runtime_dir, scan_path, scan_places_for, spool_dir, stats,
-    zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
+    format_jump, load_last_jump, load_places, load_scan, now_ms, persist_last_jump, persist_seen,
+    places_path, reconcile_once, render_board, run_reconcile, runtime_dir, scan_path,
+    scan_places_for, spool_dir, stats, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -47,6 +47,7 @@ struct App {
     home: String,
     /// Consume once the launching pane appears; user input cancels a pending selection.
     launch_focus: Option<AgentId>,
+    jump_history: PathBuf,
     /// Last pane size, so clicks can be resolved against the painted frame.
     view: Size,
     /// Last pointer position. Scrolling slides rows under a still pointer,
@@ -298,6 +299,7 @@ impl App {
             board: Board::default(),
             home: std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default(),
             launch_focus: None,
+            jump_history: runtime_dir().join("last-jump.json"),
             view: Size::new(0, 0),
             pointer: None,
             last_reconcile: now - SCAN_EVERY,
@@ -328,7 +330,7 @@ impl App {
         self.reload_places();
         self.fill_home_titles();
         self.reload_spool();
-        self.apply_launch_focus();
+        self.restore_open_selection();
         log::info!(
             "bootstrap session={} cache={} agents={}",
             self.home,
@@ -467,7 +469,24 @@ impl App {
 
     fn dispatch_jump(&mut self, session: &str, pane_id: u32, via: &str) {
         let request_seq = self.usage.jump(session, pane_id);
+        let previous = load_last_jump(&self.jump_history);
+        // The bridge closes this TUI while handling the pipe; save before
+        // dispatch so history survives even if this process never returns.
+        persist_last_jump(&self.jump_history, session, pane_id);
         let outcome = (self.jump_sender)(session, pane_id, via);
+        if outcome != "ok"
+            && load_last_jump(&self.jump_history)
+                == Some(AgentId {
+                    session: session.into(),
+                    pane_id,
+                })
+        {
+            if let Some(id) = previous {
+                persist_last_jump(&self.jump_history, &id.session, id.pane_id);
+            } else {
+                let _ = fs::remove_file(&self.jump_history);
+            }
+        }
         self.usage.record(
             "jump_result",
             &[
@@ -627,6 +646,14 @@ impl App {
         changed
     }
 
+    fn restore_open_selection(&mut self) {
+        if !self.apply_launch_focus() {
+            if let Some(id) = load_last_jump(&self.jump_history) {
+                self.board.select_agent(&id);
+            }
+        }
+    }
+
     fn apply_launch_focus(&mut self) -> bool {
         let Some(id) = self.launch_focus.clone() else {
             return false;
@@ -694,6 +721,52 @@ mod process_tests {
     use super::spawn_if_idle;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn reopening_restores_last_jump_with_current_agent_taking_priority() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let history = dir.path().join("last-jump.json");
+        let mut previous = App::new();
+        previous.jump_history = history.clone();
+        previous.jump_sender = |_, _, _| "ok";
+        previous.dispatch_jump("remote", 8, "key");
+        previous.jump_sender = |_, _, _| "exit_error";
+        previous.dispatch_jump("remote", 9, "click");
+
+        for (origin, expected) in [(None, 2), (Some(99), 2), (Some(1), 1)] {
+            let mut app = App::new();
+            app.jump_history = history.clone();
+            app.board.ingest("SCAN home 0 agent agent\nSCAN home 1 agent agent\nSCAN remote 8 agent agent --workspace /tmp/recent-target\n");
+            app.launch_focus = origin.map(|pane_id| AgentId {
+                session: "home".into(),
+                pane_id,
+            });
+            app.restore_open_selection();
+            assert_eq!(app.board.selected, expected);
+            app.board.set_list_geometry(100, 4);
+            if expected == 2 {
+                assert!(app.board.lines_for(4).join("\n").contains("recent-target"));
+            }
+            // Ordinary navigation must not reapply history during refreshes.
+            app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+            assert!(!app.apply_launch_focus());
+            assert_eq!(app.board.selected, 0);
+        }
+
+        // A departed target and a malformed history both keep the first row.
+        for malformed in [false, true] {
+            if malformed {
+                fs::write(&history, "incomplete").unwrap();
+            }
+            let mut app = App::new();
+            app.jump_history = history.clone();
+            app.board
+                .ingest("SCAN home 0 agent agent\nSCAN home 1 agent agent\n");
+            app.restore_open_selection();
+            assert_eq!(app.board.selected, 0);
+        }
+    }
 
     #[test]
     fn launch_focus_reveals_agent_below_session_header_with_activity() {
@@ -833,6 +906,7 @@ mod process_tests {
 
     fn test_app(path: &std::path::Path) -> super::App {
         let mut app = super::App::new();
+        app.jump_history = path.with_file_name("last-jump.json");
         app.usage = zellij_agent_board::stats::Visit::new(Some(path.into()));
         app.usage.record("open", &[]);
         app.view = ratatui::layout::Size::new(100, 30);

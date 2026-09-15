@@ -32,8 +32,8 @@ pub use protocol::persist_seen;
 pub use protocol::runtime_dir;
 #[cfg(not(target_arch = "wasm32"))]
 pub use protocol::{
-    ensure_state, host_places_path, load_places, load_scan, persist_places, persist_scan,
-    replace_session_places, scan_path,
+    ensure_state, host_places_path, load_last_jump, load_places, load_scan, persist_last_jump,
+    persist_places, persist_scan, replace_session_places, scan_path,
 };
 pub use protocol::{
     format_jump, format_places, format_seen, format_started, merge_places, parse_jump,

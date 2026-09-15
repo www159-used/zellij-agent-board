@@ -53,6 +53,18 @@ pub fn places_path() -> PathBuf {
     runtime_dir().join("places")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_last_jump(path: &Path) -> Option<AgentId> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let (session, pane_id) = serde_json::from_str::<(String, u32)>(&text).ok()?;
+    Some(AgentId { session, pane_id })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn persist_last_jump(path: &Path, session: &str, pane_id: u32) {
+    publish_snapshot(path, serde_json::to_vec(&(session, pane_id)).unwrap());
+}
+
 /// Leftover TUI-only file. Read on migrate, then stop writing it.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn host_places_path() -> PathBuf {
