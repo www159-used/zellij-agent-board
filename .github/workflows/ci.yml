@@ -19,16 +19,11 @@ jobs:
           components: clippy, rustfmt
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo lint
-      - run: cargo test --locked --lib --bin board-tui
-      - run: python3 scripts/test-hooks.py
-      - run: cargo wasm
-      - run: cargo build --release --bin board-tui
+      - run: make check
       - name: Install zellij
         run: |
           mkdir -p "$HOME/.local/bin"
           curl -fsSL https://github.com/zellij-org/zellij/releases/download/v0.45.0/zellij-x86_64-unknown-linux-musl.tar.gz \
             | tar -xz -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: ZAB_E2E_ZELLIJ_REQUIRED=1 ./scripts/e2e-zellij.sh
+      - run: ZAB_E2E_ZELLIJ_REQUIRED=1 make e2e-zellij

@@ -7,17 +7,18 @@ in-process.
 ## Run
 
 ```bash
-./scripts/zab-fault.sh
-./scripts/zab-fault.sh native-cross-session-switch 20
-./scripts/zab-fault.sh board-same-session-focus 20
-./scripts/zab-fault.sh board-cross-session-jump 40
+make fault
+make fault SCENARIO=native-cross-session-switch REPEAT=20
+make fault SCENARIO=board-same-session-focus REPEAT=20
+make fault SCENARIO=board-launch-focus REPEAT=5
+make fault SCENARIO=board-cross-session-jump REPEAT=40
 ```
 
 Set `ZAB_FAULT_ZELLIJ` to test an exact binary:
 
 ```bash
 ZAB_FAULT_ZELLIJ=/path/to/zellij-0.45.0 \
-  ./scripts/zab-fault.sh board-cross-session-jump 40
+  make fault SCENARIO=board-cross-session-jump REPEAT=40
 ```
 
 Exit `0` means every Hold held, `1` means a lifecycle Hold broke, and `2`
@@ -49,7 +50,7 @@ then = { attached = "dest", sees = "dest.target" }
 One document may contain multiple `[[case]]` entries. The loader derives the
 internal World, Disturb, and Holds from each Case:
 
-- `given`: initial attachment and optional board location
+- `given`: initial attachment, optional board location, and optional `focus = "session.role"` before opening the board
 - `target` or `targets`: coupled Agent identity and visible sentinel
 - `when`: native session switch or board go-to-Agent
 - `then`: destination attachment and visible target facts

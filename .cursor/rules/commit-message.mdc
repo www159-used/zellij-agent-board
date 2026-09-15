@@ -30,5 +30,5 @@ alwaysApply: true
 
 ## Before committing
 
-- Run `cargo fmt` locally — CI runs `cargo fmt --check` and rejects any
+- Run `make fmt` locally — CI runs `make fmt-check` and rejects any
   diff, including import rewraps.

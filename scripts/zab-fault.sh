@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Ensure board artifacts exist, then run Experiments. Whether a scenario
-# actually needs them is the harness's rule (`_needs_board`), not ours.
+# Run Experiments with the artifacts built by make fault.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -12,9 +11,6 @@ if [[ -z "$zellij" || ! -x "$zellij" ]]; then
   exit 2
 fi
 export ZAB_FAULT_ZELLIJ="$zellij"
-
-cargo wasm
-cargo build --release --bin board-tui
 
 export PYTHONPATH="$root/e2e/zellij"
 exec python3 -m harness "$@"

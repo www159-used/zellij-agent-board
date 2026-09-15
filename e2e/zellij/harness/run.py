@@ -83,8 +83,8 @@ def run(
     binary = _resolve_zellij(zellij or os.environ.get("ZAB_FAULT_ZELLIJ"))
     if binary is None:
         return _report(experiment, Verdict.SETUP_FAILED, cycles=tries, setup="zellij_missing")
-    wasm = wasm or DEFAULT_WASM
-    tui = tui or DEFAULT_TUI
+    wasm = (wasm or Path(os.environ.get("ZAB_FAULT_WASM") or DEFAULT_WASM)).resolve()
+    tui = (tui or Path(os.environ.get("ZAB_FAULT_TUI") or DEFAULT_TUI)).resolve()
     if _needs_board(experiment) and (not wasm.is_file() or not tui.is_file()):
         return _report(experiment, Verdict.SETUP_FAILED, cycles=tries, setup="artifact_missing")
     root = Path(artifacts) if artifacts else REPO / "target" / "zab-fault" / experiment.name

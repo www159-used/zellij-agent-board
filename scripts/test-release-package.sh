@@ -8,11 +8,11 @@ trap 'rm -rf "$work_dir"' EXIT
 tar -xzf "$archive" -C "$work_dir"
 bundle="$work_dir/$(basename "$archive" .tar.gz)"
 dest="$work_dir/plugins/zellij-agent-board.wasm"
-ZELLIJ_AGENT_BOARD_PLUGIN_PATH="$dest" bash "$bundle/scripts/install.sh"
+ZELLIJ_AGENT_BOARD_PLUGIN_PATH="$dest" make -C "$bundle" install
 cmp "$bundle/zellij-agent-board.wasm" "$dest"
 cmp "$bundle/board-tui" "$work_dir/plugins/board-tui"
 "$work_dir/plugins/board-tui" --help
-for resource in adapters/catalog.toml scripts/install-hooks.py scripts/install-hooks.sh \
+for resource in Makefile adapters/catalog.toml scripts/install-hooks.py scripts/install-hooks.sh \
   scripts/zellij-agent-board-hook.sh scripts/event-map.txt scripts/opencode-plugin.js \
   scripts/lib/catalog.py scripts/lib/__init__.py; do
   test -f "$bundle/$resource"

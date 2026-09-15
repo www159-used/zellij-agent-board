@@ -20,14 +20,17 @@ fi
 
 echo "e2e-zellij: $(zellij --version)"
 
-cargo wasm
-cargo build --release --bin board-tui
-
+wasm="${1:-$root/target/wasm32-wasip1/release/zellij-agent-board.wasm}"
+tui="${2:-$root/target/release/board-tui}"
+if [[ ! -f "$wasm" || ! -x "$tui" ]]; then
+  echo 'missing binaries; run make e2e-zellij from the project directory' >&2
+  exit 2
+fi
+wasm="$(cd "$(dirname "$wasm")" && pwd)/$(basename "$wasm")"
+tui="$(cd "$(dirname "$tui")" && pwd)/$(basename "$tui")"
 session="zab-e2e-$$"
 tmp="/tmp/$session"
 mkdir -p "$tmp"
-wasm="$root/target/wasm32-wasip1/release/zellij-agent-board.wasm"
-tui="$root/target/release/board-tui"
 cleanup() {
   zellij delete-session --force -- "$session" >/dev/null 2>&1 || true
   rm -rf "$tmp"
