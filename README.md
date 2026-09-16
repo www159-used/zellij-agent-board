@@ -77,13 +77,13 @@ make help
 make check
 make build
 make e2e
-make replay SCENE=e2e/scenes/slash-search-moves.scene
+make replay SCENE=crates/e2e-scenes/scenes/slash-search-moves.scene
 make e2e-zellij
 ```
 
-`make check` runs Rust formatting, Clippy, Rust tests (including board scenes and the daemon suite), and hook tests. `make fmt` formats Rust. `make run`, `make stats`, `make scan`, `make reconcile`, and `make catalog` expose the host tools. Hook payloads can be replayed with `make hook EVENT=stop < payload.json`.
+`make check` runs Rust formatting, Clippy, product tests (including the daemon suite), in-process scene replay, and hook tests. `make fmt` formats Rust. `make run`, `make stats`, `make scan`, `make reconcile`, and `make catalog` expose the host tools. Hook payloads can be replayed with `make hook EVENT=stop < payload.json`.
 
-`e2e/scenes/` are host scenes: each input paints a frame at the declared size; `expect` checkpoints read that frame. `board-tui --replay` runs them without a TTY. `make e2e-zellij` (`cargo test -p e2e-zellij`) runs real attached-PTY Zellij scenarios. Missing Zellij or failed setup is an error. See [the E2E guide](e2e/zellij/README.md).
+`crates/e2e-scenes/` replays Board behavior in-process: each input paints a frame at the declared size and `expect` checks it. `board-tui --replay` runs without a TTY. `make e2e-zellij` (`cargo test -p e2e-zellij`) runs real attached-PTY Zellij scenarios. Missing Zellij or failed setup is an error. See [scene E2E](crates/e2e-scenes/README.md) and [Zellij E2E](crates/e2e-zellij/README.md).
 
 To package a release locally, build for the desired Rust target and then package the binaries:
 

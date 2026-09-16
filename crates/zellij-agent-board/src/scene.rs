@@ -715,28 +715,6 @@ fn parse_num<T: std::str::FromStr>(
 #[cfg(test)]
 mod tests {
     use super::run_scene;
-    use std::fs;
-    use std::path::PathBuf;
-
-    #[test]
-    fn scenes_in_e2e_pass() {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("e2e/scenes");
-        let mut files: Vec<_> = fs::read_dir(&dir)
-            .unwrap_or_else(|err| panic!("{}: {err}", dir.display()))
-            .map(|entry| entry.expect("scene entry").path())
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("scene"))
-            .collect();
-        files.sort();
-        assert!(!files.is_empty(), "no .scene files in {}", dir.display());
-        for path in files {
-            let source = fs::read_to_string(&path).unwrap_or_else(|err| {
-                panic!("{}: {err}", path.display());
-            });
-            if let Err(err) = run_scene(&source) {
-                panic!("{}: {err}", path.display());
-            }
-        }
-    }
 
     #[test]
     fn bare_expect_is_an_error() {

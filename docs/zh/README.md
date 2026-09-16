@@ -75,13 +75,13 @@ make help
 make check
 make build
 make e2e
-make replay SCENE=e2e/scenes/slash-search-moves.scene
+make replay SCENE=crates/e2e-scenes/scenes/slash-search-moves.scene
 make e2e-zellij
 ```
 
-`make check` 运行 Rust 格式检查、Clippy、Rust 测试（含面板场景与 daemon 套件）和 hook 测试。`make fmt` 格式化 Rust。宿主工具对应 `make run`、`make stats`、`make scan`、`make reconcile` 和 `make catalog`；可用 `make hook EVENT=stop < payload.json` 回放 hook。
+`make check` 运行 Rust 格式检查、Clippy、产品测试（含 daemon 套件）、进程内场景回放和 hook 测试。`make fmt` 格式化 Rust。宿主工具对应 `make run`、`make stats`、`make scan`、`make reconcile` 和 `make catalog`；可用 `make hook EVENT=stop < payload.json` 回放 hook。
 
-`e2e/scenes/` 是宿主场景：每步按声明尺寸绘制当前帧，`expect` 检查点只看这一帧。`board-tui --replay` 不需要 TTY。`make e2e-zellij`（`cargo test -p e2e-zellij`）跑真实附着 PTY 的 Zellij 场景。缺少 Zellij 或环境启动失败都会报错。见 [E2E 指南](../../e2e/zellij/README.md)。
+`crates/e2e-scenes/` 在进程内回放 Board 行为：每步按声明尺寸绘制当前帧，`expect` 检查结果；`board-tui --replay` 不需要 TTY。`make e2e-zellij`（`cargo test -p e2e-zellij`）跑真实附着 PTY 的 Zellij 场景。缺少 Zellij 或环境启动失败都会报错。见 [scene E2E](../../crates/e2e-scenes/README.md) 与 [Zellij E2E](../../crates/e2e-zellij/README.md)。
 
 本地打包先按 Rust target 构建，再打包并验证：
 

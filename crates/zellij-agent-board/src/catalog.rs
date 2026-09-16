@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const BUILTIN_TOML: &str = include_str!("../adapters/catalog.toml");
+const BUILTIN_TOML: &str = include_str!("../../../adapters/catalog.toml");
 
 /// Shared install fingerprint. The OpenCode plugin file embeds this
 /// because it shells out to `zellij-agent-board-hook.sh`.
@@ -551,7 +551,7 @@ hook_dir = "~/.mycli/hooks"
     #[test]
     fn event_map_file_matches_catalog() {
         let catalog = Catalog::builtin();
-        let text = include_str!("../scripts/event-map.txt");
+        let text = include_str!("../../../scripts/event-map.txt");
         let mut file = std::collections::BTreeMap::new();
         for line in text.lines() {
             let line = line.trim();
@@ -566,7 +566,7 @@ hook_dir = "~/.mycli/hooks"
 
     #[test]
     fn opencode_plugin_embeds_the_hook_marker() {
-        let plugin = include_str!("../scripts/opencode-plugin.js");
+        let plugin = include_str!("../../../scripts/opencode-plugin.js");
         assert!(plugin.contains(super::HOOK_MARKER));
         assert!(plugin.contains("\"session.compacted\": \"postCompact\""));
         assert!(plugin.contains("\"permission.asked\""));
@@ -592,7 +592,7 @@ hook_dir = "~/.mycli/hooks"
         assert!(!catalog.hook_installed(&dir));
         fs::write(
             dir.join(".config/opencode/plugins/zellij-agent-board.js"),
-            include_str!("../scripts/opencode-plugin.js"),
+            include_str!("../../../scripts/opencode-plugin.js"),
         )
         .unwrap();
         assert!(catalog.hook_installed(&dir));

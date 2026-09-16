@@ -6,17 +6,11 @@ publish = false
 description = "Real Zellij E2E scenarios for zellij-agent-board"
 license = "AGPL-3.0-only"
 
-[[bin]]
-name = "mock-agent"
-path = "src/bin/mock_agent.rs"
-
 [dependencies]
-fs2 = "0.4"
 nix = { version = "0.29", default-features = false, features = ["term", "fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
-uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 serial_test = "3"

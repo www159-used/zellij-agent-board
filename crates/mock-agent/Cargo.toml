@@ -1,0 +1,16 @@
+[package]
+name = "mock-agent"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Deterministic mock coding-agent CLI for lifecycle tests"
+license = "AGPL-3.0-only"
+
+[dependencies]
+fs2 = "0.4"
+serde_json = "1"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

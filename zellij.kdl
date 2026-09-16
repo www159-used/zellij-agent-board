@@ -3,7 +3,7 @@ layout {
     pane size=1 borderless=true {
         plugin location="zellij:tab-bar"
     }
-    pane edit="src/main.rs" size="70%"
+    pane edit="crates/zellij-agent-board/src/main.rs" size="70%"
     pane
     pane size=1 borderless=true {
         plugin location="zellij:status-bar"

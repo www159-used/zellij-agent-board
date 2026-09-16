@@ -1,60 +1,9 @@
 [workspace]
-members = [".", "e2e/zellij"]
+members = [
+    "crates/zellij-agent-board",
+    "crates/e2e-zellij",
+    "crates/e2e-scenes",
+    "crates/mock-agent",
+]
+default-members = ["crates/zellij-agent-board"]
 resolver = "2"
-
-[package]
-name = "zellij-agent-board"
-version = "0.9.0"
-edition = "2021"
-description = "Floating dashboard of running coding agents for Zellij"
-license = "AGPL-3.0-only"
-
-[dependencies]
-log = { version = "0.4", features = ["std"] }
-ratatui = { version = "0.30.2", default-features = false }
-serde = { version = "1", features = ["derive"] }
-toml = { version = "0.8", default-features = false, features = ["parse"] }
-zellij-tile = { version = "0.44", optional = true }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-crossterm = "0.28"
-flate2 = "1"
-fs2 = "0.4"
-getrandom = "0.4"
-http-body-util = "0.1"
-hyper = { version = "1", default-features = false, features = ["client", "server", "http1"] }
-hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
-redb = "4"
-serde_json = "1"
-tempfile = "3"
-tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros"] }
-
-[features]
-default = []
-plugin = ["dep:zellij-tile"]
-
-[lib]
-name = "zellij_agent_board"
-path = "src/lib.rs"
-
-[[bin]]
-name = "zellij-agent-board"
-path = "src/main.rs"
-required-features = ["plugin"]
-test = false
-doctest = false
-
-[[bin]]
-name = "board-tui"
-path = "src/bin/board_tui.rs"
-
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-all = { level = "warn", priority = -1 }
-
-[[bin]]
-name = "agent-supervisor"
-path = "src/bin/agent_supervisor.rs"

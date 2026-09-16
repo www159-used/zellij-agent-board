@@ -552,16 +552,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "e2e-scenes"
+version = "0.1.0"
+dependencies = [
+ "zellij-agent-board",
+]
+
+[[package]]
 name = "e2e-zellij"
 version = "0.1.0"
 dependencies = [
- "fs2",
  "nix 0.29.0",
  "serde",
  "serde_json",
  "serial_test",
  "tempfile",
- "uuid",
 ]
 
 [[package]]
@@ -1513,6 +1518,16 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mock-agent"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "serde_json",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]

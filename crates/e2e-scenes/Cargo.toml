@@ -1,0 +1,13 @@
+[package]
+name = "e2e-scenes"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "In-process Board scene replay tests for zellij-agent-board"
+license = "AGPL-3.0-only"
+
+[dependencies]
+zellij-agent-board = { path = "../zellij-agent-board" }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

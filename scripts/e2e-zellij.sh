@@ -17,5 +17,6 @@ if [[ -z "$zellij" || ! -x "$zellij" ]]; then
 fi
 export ZAB_E2E_ZELLIJ="$zellij"
 
-cargo build --bin agent-supervisor
+cargo build -p zellij-agent-board --bin agent-supervisor
+cargo build -p mock-agent
 exec cargo test -p e2e-zellij "$@"
