@@ -13,17 +13,24 @@ Related crates:
 
 ```bash
 ./scripts/e2e-zellij.sh
-./scripts/e2e-zellij.sh -- --test sleep_then_resume
+./scripts/e2e-zellij.sh --test sleep_then_resume
 # or:
-cargo build -p zellij-agent-board --bin agent-supervisor
+cargo build -p zellij-agent-board --bin board-tui --bin agent-supervisor
 cargo build -p mock-agent
 cargo test -p e2e-zellij
 ```
 
-`ZAB_E2E_ZELLIJ` selects the Zellij binary. Failure artifacts land under
-`target/e2e-zellij/` when a case records them.
+`ZAB_E2E_ZELLIJ` selects the Zellij binary. Failing cases keep isolates under
+`target/e2e-zellij/`.
 
 ## Current coverage
 
 - `sleep_then_resume`: idle mock sleeps (process gone, pane/supervisor kept),
   then resumes the exact conversation id and messages.
+- `busy_agent_rejects_sleep` / `pending_confirmation_rejects_sleep` /
+  `unsent_draft_rejects_sleep`: non-idle or draft state returns
+  `not_sleepable` without killing the process.
+- `ignored_exit_does_not_kill_agent`: exit ignore yields `sleep_timeout`,
+  keeps the agent, and blocks duplicate resume with `agent_still_running`.
+- `crash_does_not_count_as_sleep`: crash during exit is `failed` /
+  `unexpected_agent_exit`, not a successful sleep.

@@ -54,6 +54,16 @@ impl MockAgentOptions {
             ..Self::default()
         }
     }
+
+    pub fn with_state(mut self, state: impl Into<String>) -> Self {
+        self.state = state.into();
+        self
+    }
+
+    pub fn with_exit_behavior(mut self, exit_behavior: impl Into<String>) -> Self {
+        self.exit_behavior = exit_behavior.into();
+        self
+    }
 }
 
 pub struct MockAgent {

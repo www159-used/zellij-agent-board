@@ -34,6 +34,8 @@ pub use discover::{parse_host_line, parse_scan_line, Found, HookNotice, HostLine
 pub use float_size::{float_size_from_config, FloatSize};
 pub use floating_state::FloatingLayerState;
 #[cfg(not(target_arch = "wasm32"))]
+pub use protocol::persist_hook;
+#[cfg(not(target_arch = "wasm32"))]
 pub use protocol::persist_seen;
 pub use protocol::runtime_dir;
 #[cfg(not(target_arch = "wasm32"))]
@@ -42,7 +44,7 @@ pub use protocol::{
     replace_session_places, scan_path,
 };
 pub use protocol::{
-    focus_path, format_focus, format_jump, format_places, format_seen, format_started,
+    focus_path, format_focus, format_hook, format_jump, format_places, format_seen, format_started,
     merge_places, parse_focus, parse_jump, parse_places, places_path, seen_dir, spool_dir,
     started_dir, PIPE_NAME,
 };
@@ -357,7 +359,11 @@ impl Board {
                         agent.detail = detail.to_string();
                     }
                 }
-                Status::Idle | Status::IdleWait | Status::Ended | Status::Interrupted => {
+                Status::Idle
+                | Status::IdleWait
+                | Status::Ended
+                | Status::Interrupted
+                | Status::Sleeping => {
                     clear_turn_start(&agent.id);
                     agent.detail.clear();
                     agent.finished_at = None;
@@ -1816,10 +1822,17 @@ impl Board {
                 continue;
             }
             let prior = previous.iter().find(|agent| agent.id == row.id);
+            let status = match prior.map(|agent| agent.status) {
+                // Process is back; sleep ends at the scan layer until a hook
+                // names the live status again.
+                Some(Status::Sleeping) => Status::Found,
+                Some(other) => other,
+                None => Status::Found,
+            };
             next.push(Agent {
                 id: row.id,
                 tool: row.tool,
-                status: prior.map(|agent| agent.status).unwrap_or(Status::Found),
+                status,
                 workspace: workspace_from_argv(&argv),
                 tab_name: prior
                     .map(|agent| agent.tab_name.clone())
@@ -1834,6 +1847,12 @@ impl Board {
                 finished_at: prior.and_then(|agent| agent.finished_at),
                 visited: prior.is_some_and(|agent| agent.visited),
             });
+        }
+        // Sleep is intentional absence: keep the row when the process is gone.
+        for agent in &previous {
+            if agent.status == Status::Sleeping && !next.iter().any(|row| row.id == agent.id) {
+                next.push(agent.clone());
+            }
         }
         sort_agent_rows(&mut next);
         if next == previous {
@@ -2262,6 +2281,66 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         board.ingest("SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n");
         assert_eq!(board.agents.len(), 1);
         assert_eq!(board.agents[0].id.session, "ww");
+    }
+
+    #[test]
+    fn sleeping_agent_survives_scan_without_its_process() {
+        let mut board = Board::default();
+        board.ingest(
+            "META hooks=1\nSCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n",
+        );
+        board.ingest_notice("HOOK ww 3 agentSleep @100\n");
+        assert_eq!(board.agents.len(), 1);
+        assert_eq!(board.agents[0].status, Status::Sleeping);
+
+        board.ingest("META hooks=1\n");
+        assert_eq!(
+            board.agents.len(),
+            1,
+            "sleep keeps the row after the process exits"
+        );
+        assert_eq!(board.agents[0].status, Status::Sleeping);
+        assert_eq!(board.agents[0].id.pane_id, 3);
+    }
+
+    #[test]
+    fn resumed_process_wakes_sleeping_row_to_found() {
+        let mut board = Board::default();
+        board.ingest(
+            "META hooks=1\nSCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n",
+        );
+        board.ingest_notice("HOOK ww 3 agentSleep @100\n");
+        board.ingest("META hooks=1\n");
+        assert_eq!(board.agents[0].status, Status::Sleeping);
+
+        board.ingest(
+            "META hooks=1\nSCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n",
+        );
+        assert_eq!(board.agents.len(), 1);
+        assert_eq!(board.agents[0].status, Status::Found);
+    }
+
+    #[test]
+    fn sleeping_row_stays_while_sibling_scan_updates() {
+        let mut board = Board::default();
+        ingest_two(&mut board);
+        board.ingest_notice("HOOK ww 3 agentSleep @100\n");
+        board.ingest(
+            "META hooks=1\nSCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp\n",
+        );
+        assert_eq!(board.agents.len(), 2);
+        let sleeping = board
+            .agents
+            .iter()
+            .find(|agent| agent.id.session == "ww")
+            .expect("sleeping ww");
+        assert_eq!(sleeping.status, Status::Sleeping);
+        let live = board
+            .agents
+            .iter()
+            .find(|agent| agent.id.session == "lp")
+            .expect("live lp");
+        assert_eq!(live.status, Status::Found);
     }
 
     #[test]

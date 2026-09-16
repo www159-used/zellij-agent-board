@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use zellij_agent_board::{try_acquire_lock, write_json_durable};
+use zellij_agent_board::{persist_hook, try_acquire_lock, write_json_durable};
 
 /// A live child can emit events or exit at any time, so it is observed often.
 const OBSERVE_TICK: Duration = Duration::from_millis(20);
@@ -184,6 +184,9 @@ impl Supervisor {
             } else {
                 Phase::Failed
             };
+            if self.phase == Phase::Sleeping {
+                notify_board_sleep();
+            }
             self.publish(if self.phase == Phase::Failed {
                 Some("unexpected_agent_exit")
             } else {
@@ -253,6 +256,23 @@ impl Supervisor {
             _ => self.publish(Some("unknown_command")),
         }
     }
+}
+
+fn notify_board_sleep() {
+    let (Ok(session), Ok(pane)) = (
+        std::env::var("ZELLIJ_SESSION_NAME"),
+        std::env::var("ZELLIJ_PANE_ID"),
+    ) else {
+        return;
+    };
+    let Ok(pane_id) = pane.parse::<u32>() else {
+        return;
+    };
+    let at_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    persist_hook(&session, pane_id, "agentSleep", at_epoch);
 }
 
 fn run() -> io::Result<()> {

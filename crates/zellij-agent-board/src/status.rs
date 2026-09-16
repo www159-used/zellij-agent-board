@@ -12,6 +12,7 @@ pub enum Status {
     Interrupted,
     Idle,
     Found,
+    Sleeping,
     Unknown,
     Ended,
 }
@@ -60,6 +61,7 @@ impl Status {
             Self::Interrupted => "stopped",
             Self::Idle => "idle",
             Self::Found => "found",
+            Self::Sleeping => "sleeping",
             Self::Unknown => "unknown",
             Self::Ended => "ended",
         }
@@ -75,6 +77,7 @@ impl Status {
             Self::Compact => "◐",
             Self::Idle => "○",
             Self::Found => "◌",
+            Self::Sleeping => "☾",
             Self::Unknown | Self::Ended => "?",
         }
     }
@@ -88,6 +91,7 @@ impl Status {
             Self::Idle
             | Self::Failed
             | Self::Found
+            | Self::Sleeping
             | Self::Unknown
             | Self::Ended
             | Self::Interrupted => 3,
@@ -116,6 +120,8 @@ impl Status {
             "idleWait" => Self::IdleWait,
             "stopFailure" => Self::Failed,
             "postToolUseFailure" => Self::Working,
+            // Board-owned: supervisor sleep, not a Cursor catalog event.
+            "agentSleep" => Self::Sleeping,
             _ => return None,
         })
     }
@@ -159,10 +165,16 @@ mod tests {
             Status::from_cursor_hook("postCompact"),
             Some(Status::Working)
         );
+        assert_eq!(
+            Status::from_cursor_hook("agentSleep"),
+            Some(Status::Sleeping)
+        );
         assert_eq!(Status::Working.icon(), "●");
         assert_eq!(Status::Working.color_level(), 0);
         assert!(!Status::Working.is_error());
         assert!(Status::Failed.is_error());
+        assert_eq!(Status::Sleeping.icon(), "☾");
+        assert_eq!(Status::Sleeping.label(), "sleeping");
     }
 
     #[test]

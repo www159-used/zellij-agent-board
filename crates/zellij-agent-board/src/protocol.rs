@@ -237,6 +237,10 @@ pub fn format_focus(session: &str, pane_id: u32) -> String {
     format!("FOCUS {session} {pane_id}")
 }
 
+pub fn format_hook(session: &str, pane_id: u32, event: &str, at_epoch: u64) -> String {
+    format!("HOOK {session} {pane_id} {event} @{at_epoch}")
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn ensure_migrated() {
     static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -323,6 +327,17 @@ pub fn persist_started(session: &str, pane_id: u32, started_at: u64) {
     );
 }
 
+/// Board-owned sleep notice. Same spool channel as CLI hooks so the TUI
+/// sees `agentSleep` between daemon scans.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn persist_hook(session: &str, pane_id: u32, event: &str, at_epoch: u64) {
+    let path = spool_dir().join(format!("{session}-{pane_id}"));
+    let _ = publish_snapshot(
+        &path,
+        format!("{}\n", format_hook(session, pane_id, event, at_epoch)),
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn clear_started(session: &str, pane_id: u32) {
     ensure_migrated();
@@ -353,8 +368,8 @@ pub fn parse_jump(payload: &str) -> Option<(String, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_jump, format_place_line, format_seen, merge_places, parse_jump, parse_place_line,
-        parse_places, state_dir_from,
+        format_focus, format_hook, format_jump, format_place_line, format_seen, merge_places,
+        parse_focus, parse_jump, parse_place_line, parse_places, state_dir_from,
     };
     use crate::discover::parse_host_line;
     use crate::{AgentId, PanePlace};
@@ -392,6 +407,24 @@ mod tests {
                 },
                 finished_at: 1_700_000_000,
             })
+        );
+        assert_eq!(
+            parse_focus(&format_focus("mysql_syncer", 2)),
+            Some(("mysql_syncer".into(), 2))
+        );
+        assert_eq!(parse_focus("PLACE ww 3"), None);
+        assert_eq!(
+            parse_host_line(&format_hook("ww", 3, "agentSleep", 100)),
+            Some(crate::HostLine::Hook(crate::HookNotice {
+                id: crate::AgentId {
+                    session: "ww".into(),
+                    pane_id: 3,
+                },
+                event: "agentSleep".into(),
+                detail: String::new(),
+                at_epoch: Some(100),
+                at_stamp: None,
+            }))
         );
     }
 

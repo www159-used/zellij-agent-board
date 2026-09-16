@@ -783,6 +783,7 @@ fn header_line(board: &Board) -> Line<'static> {
     push_count(&mut parts, board, Status::IdleWait, "idle-wait");
     push_count(&mut parts, board, Status::Idle, "idle");
     push_count(&mut parts, board, Status::Found, "found");
+    push_count(&mut parts, board, Status::Sleeping, "sleeping");
     push_count(&mut parts, board, Status::Unknown, "unknown");
 
     if parts.is_empty() {
@@ -1120,9 +1121,12 @@ fn status_color(status: Status) -> ratatui::style::Color {
         Status::Working | Status::Compact => theme().focus,
         Status::Done => theme().match_fg,
         Status::Failed | Status::Waiting | Status::IdleWait => theme().pin_mark,
-        Status::Idle | Status::Found | Status::Unknown | Status::Ended | Status::Interrupted => {
-            theme().muted
-        }
+        Status::Idle
+        | Status::Found
+        | Status::Sleeping
+        | Status::Unknown
+        | Status::Ended
+        | Status::Interrupted => theme().muted,
     }
 }
 
