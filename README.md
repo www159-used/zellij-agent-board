@@ -56,6 +56,8 @@ The WASM pane hides itself and opens `board-tui` with `new-pane --floating --clo
 | `?` | Show help |
 | `Esc`, `q` | Dismiss the board; `Esc` first cancels an active overlay, while `q` remains input during search |
 
+The picker supports mouse-wheel scrolling and a scrollbar on the right: click or drag its thumb to scroll. Keyboard behavior is unchanged.
+
 ## Runtime state
 
 The TUI first loads the cached scan, then requests a background reconcile about every two seconds. Each TUI keeps one child at a time and reaps it before starting another; a process lock permits only one reconciler across boards. Reconcile publishes scan/title snapshots with atomic file replacement. Missing home-session titles are filled in memory before the first paint.

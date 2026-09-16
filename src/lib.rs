@@ -917,21 +917,34 @@ impl Board {
         render::agent_at(self, rows, cols, column, row)
     }
 
-    /// Row the pointer previews, or `None` when an overlay owns the frame.
-    /// The painter reads this; the raw field may still hold a row from before
-    /// the overlay opened.
-    pub fn hovered_row(&self) -> Option<usize> {
-        if self.help_visible || self.is_picking() {
+    /// Row the pointer previews in the list being painted — the picker when
+    /// `picker`, the board otherwise. `None` when help owns the frame or the
+    /// other overlay is up. The painter reads this; the raw field may still
+    /// hold a row from before the overlay changed.
+    pub(crate) fn hovered_in(&self, picker: bool) -> Option<usize> {
+        if self.help_visible || self.is_picking() != picker {
             return None;
         }
         self.hovered
     }
 
+    /// Row the pointer previews, or `None` when an overlay owns the frame.
+    pub fn hovered_row(&self) -> Option<usize> {
+        self.hovered_in(false)
+    }
+
+    pub fn picker_hovered_row(&self) -> Option<usize> {
+        self.hovered_in(true)
+    }
+
     /// Preview the row under the pointer. Chrome, the gutter, and overlays
     /// clear it. Returns whether the preview changed.
     pub fn hover(&mut self, rows: u16, cols: u16, column: u16, row: u16) -> bool {
-        if self.help_visible || self.is_picking() {
+        if self.help_visible {
             return self.set_hovered(None);
+        }
+        if self.is_picking() {
+            return self.set_hovered(render::picker_agent_at(self, rows, cols, column, row));
         }
         if render::scrollbar_at(self, rows, cols, column, row).is_some() {
             return self.set_hovered(None);
@@ -957,8 +970,21 @@ impl Board {
     /// pending flash / search target, so the pointer is never second-guessed.
     /// A click on the scrollbar gutter jumps the view there; chrome does nothing.
     pub fn click(&mut self, rows: u16, cols: u16, column: u16, row: u16) -> Action {
-        // An overlay owns the frame; rows behind it must not take the click.
-        if self.help_visible || self.is_picking() {
+        if self.is_picking() && !self.help_visible {
+            // The picker's page length comes from the geometry, so resolve it
+            // before either hit test reads the window.
+            self.set_list_geometry(cols, rows);
+            if let Some(top) = render::picker_scrollbar_at(self, rows, cols, column, row) {
+                self.set_picker_top(top as usize);
+            } else if let Some(index) = render::picker_agent_at(self, rows, cols, column, row) {
+                self.selected = index;
+                self.reveal();
+                return self.jump_at(index);
+            }
+            return Action::None;
+        }
+        // Help owns the frame; rows behind it must not take the click.
+        if self.help_visible {
             return Action::None;
         }
         if let Some(top) = render::scrollbar_at(self, rows, cols, column, row) {
@@ -1136,6 +1162,7 @@ impl Board {
     }
 
     fn open_picker(&mut self) {
+        self.hovered = None;
         let matches: Vec<usize> = (0..self.agents.len()).collect();
         let selected = self.selected.min(matches.len().saturating_sub(1));
         let cursor = matches
@@ -1156,6 +1183,7 @@ impl Board {
     }
 
     fn close_picker(&mut self) {
+        self.hovered = None;
         self.picker = None;
         self.clear_motion();
     }
@@ -1342,6 +1370,45 @@ impl Board {
         } else {
             self.picker_page_len
         }
+    }
+
+    /// Mouse scrolling moves the picker window without touching the board.
+    pub fn scroll_picker(&mut self, delta: i32) -> bool {
+        let Some(picker) = self.picker.as_ref() else {
+            return false;
+        };
+        let top = picker.window_start.saturating_add_signed(delta as isize);
+        self.set_picker_top(top)
+    }
+
+    pub fn drag_picker_scrollbar(&mut self, rows: u16, cols: u16, column: u16, row: u16) -> bool {
+        if self.help_visible || !self.is_picking() {
+            return false;
+        }
+        self.set_list_geometry(cols, rows);
+        let Some(top) = render::picker_scrollbar_at(self, rows, cols, column, row) else {
+            return false;
+        };
+        self.set_picker_top(top as usize)
+    }
+
+    fn set_picker_top(&mut self, top: usize) -> bool {
+        let height = self.picker_page().max(1);
+        let Some(picker) = self.picker.as_mut() else {
+            return false;
+        };
+        let top = top.min(picker.matches.len().saturating_sub(height));
+        if top == picker.window_start {
+            return false;
+        }
+        picker.window_start = top;
+        picker.selected = picker.selected.clamp(top, top + height - 1);
+        picker.jump_prefix.clear();
+        self.touch_picker_cursor();
+        if self.picker_focus() == PickerFocus::Tips {
+            self.assign_picker_tips();
+        }
+        true
     }
 
     /// Scroll the picker viewport so the cursor row stays on screen.
@@ -3293,6 +3360,103 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(board.picker_focus(), PickerFocus::Query);
         assert_eq!(board.picker_matches().len(), 20);
         assert_eq!(board.picker_position(), 15);
+    }
+
+    #[test]
+    fn picker_hover_matches_click_after_filtering_and_scrolling() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 30);
+        board.set_list_geometry(100, 12);
+        board.decide(Key::StartPicker);
+        board.decide(Key::Input('1'));
+        board.scroll_picker(3);
+        let selected = board.picker_position();
+        assert!(board.hover(12, 100, 4, 3));
+        let index = board.picker_hovered_row().unwrap();
+        assert_eq!(board.agents[index].id.pane_id, 13);
+        assert_eq!(board.picker_position(), selected);
+        assert_eq!(
+            board.hovered_row(),
+            None,
+            "main list must not show picker hover"
+        );
+        assert!(board.hover(12, 100, 4, 1));
+        assert_eq!(board.picker_hovered_row(), None, "query is not a result");
+        board.hover(12, 100, 4, 3);
+        assert_eq!(
+            board.click(12, 100, 4, 3),
+            Action::Jump {
+                session: "ww".into(),
+                pane_id: 13
+            }
+        );
+    }
+
+    #[test]
+    fn picker_click_jumps_to_scrolled_filtered_result() {
+        for tips in [false, true] {
+            let mut board = Board::default();
+            ingest_panes(&mut board, 30);
+            board.set_list_geometry(100, 12);
+            board.decide(Key::StartPicker);
+            board.decide(Key::Input('1'));
+            if tips {
+                board.decide(Key::TogglePickerFocus);
+            }
+            assert!(board.scroll_picker(3));
+            // The picker border is at y=0, query at y=1, results at y=2.
+            assert_eq!(board.click(12, 100, 4, 1), Action::None);
+            assert_eq!(board.click(12, 100, 0, 2), Action::None);
+            assert!(board.is_picking());
+            assert_eq!(
+                board.click(12, 100, 4, 2),
+                Action::Jump {
+                    session: "ww".into(),
+                    pane_id: 12
+                }
+            );
+            assert!(!board.is_picking());
+            assert_eq!(board.agents[board.selected].id.pane_id, 12);
+        }
+    }
+
+    #[test]
+    fn picker_mouse_scrollbar_reaches_both_ends_without_moving_board() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 30);
+        board.set_list_geometry(100, 12);
+        board.decide(Key::StartPicker);
+        let original = (board.selected, board.topline());
+        assert!(board.scroll_picker(3));
+        assert_eq!(board.picker_window(30).0, 3);
+        let mut track = Vec::new();
+        for row in 0..12 {
+            for col in 0..100 {
+                if crate::render::picker_scrollbar_at(&board, 12, 100, col, row).is_some() {
+                    track.push((col, row));
+                }
+            }
+        }
+        let &(col, bottom) = track.last().expect("picker scrollbar");
+        assert_eq!(board.click(12, 100, col, bottom), Action::None);
+        assert_eq!(board.picker_window(30).0, 30 - board.picker_page());
+        assert!(!board.scroll_picker(3));
+        let &(col, top) = track.first().unwrap();
+        assert!(board.drag_picker_scrollbar(12, 100, col, top));
+        assert_eq!(board.picker_window(30).0, 0);
+        assert!(!board.scroll_picker(-3));
+        assert_eq!((board.selected, board.topline()), original);
+        board.decide(Key::TogglePickerFocus);
+        assert!(board.scroll_picker(3));
+        assert!(board.picker_label(0).is_none());
+        assert!(board.picker_label(3).is_some());
+        assert_eq!(
+            board.decide(Key::Confirm),
+            Action::Jump {
+                session: "ww".into(),
+                pane_id: 4
+            }
+        );
     }
 
     #[test]

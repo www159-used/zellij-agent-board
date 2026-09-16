@@ -367,6 +367,7 @@ impl App {
             if dirty {
                 self.board
                     .set_list_geometry(self.view.width, self.view.height);
+                self.refresh_hover();
                 draw(terminal, &self.board, &self.home)?;
                 self.usage
                     .snapshot(&self.board, self.view.width, self.view.height);
@@ -435,7 +436,7 @@ impl App {
         // C-e / C-y: same move-together scroll as the wheel (spotlight holds
         // its screen line; the list flows under it).
         if let Some(delta) = view_scroll_delta(event) {
-            return self.scroll_input("keyboard", delta);
+            return self.scroll_input(ScrollSource::Keyboard, delta);
         }
         let mapped = if self.board.is_picking() {
             map_picker_key(event)
@@ -539,6 +540,18 @@ impl App {
                     }
                 }
             }
+            MouseEventKind::Drag(MouseButton::Left) if self.board.is_picking() => {
+                if self.board.drag_picker_scrollbar(
+                    self.view.height,
+                    self.view.width,
+                    mouse.column,
+                    mouse.row,
+                ) {
+                    Loop::Changed
+                } else {
+                    Loop::Ignored
+                }
+            }
             MouseEventKind::Moved | MouseEventKind::Drag(_) => {
                 self.pointer = Some((mouse.column, mouse.row));
                 if self
@@ -554,13 +567,14 @@ impl App {
             // `mousescroll=ver:3` — a trackpad quantizes smooth swipes into
             // discrete wheel ticks, and one line a tick is easy to miss.
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.pointer = Some((mouse.column, mouse.row));
                 self.launch_focus = None;
                 let delta = if mouse.kind == MouseEventKind::ScrollUp {
                     -3
                 } else {
                     3
                 };
-                self.scroll_input("mouse", delta)
+                self.scroll_input(ScrollSource::Mouse, delta)
             }
             _ => Loop::Ignored,
         }
@@ -578,16 +592,21 @@ impl App {
 
     /// C-e/C-y and the wheel share one path: record the input, slide the
     /// view, re-resolve the hover, then snapshot the changed board.
-    fn scroll_input(&mut self, source: &str, delta: i32) -> Loop {
+    fn scroll_input(&mut self, source: ScrollSource, delta: i32) -> Loop {
         self.usage.record(
             "input",
             &[
-                ("source", json!(source)),
+                ("source", json!(source.label())),
                 ("operation", json!("Scroll")),
                 ("delta", json!(delta)),
             ],
         );
-        let moved = self.board.scroll_view(delta);
+        // Only the wheel scrolls the picker; the keys keep their old meaning.
+        let moved = if source == ScrollSource::Mouse && self.board.is_picking() {
+            self.board.scroll_picker(delta)
+        } else {
+            self.board.scroll_view(delta)
+        };
         let preview = self.refresh_hover();
         self.usage
             .snapshot(&self.board, self.view.width, self.view.height);
@@ -670,6 +689,23 @@ impl App {
     }
 }
 
+/// Where a scroll came from. Keys and the wheel share one path but do not
+/// always scroll the same thing, so the source is typed, not a log label.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScrollSource {
+    Keyboard,
+    Mouse,
+}
+
+impl ScrollSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Keyboard => "keyboard",
+            Self::Mouse => "mouse",
+        }
+    }
+}
+
 enum Loop {
     Changed,
     Quit,
@@ -721,6 +757,48 @@ mod process_tests {
     use super::spawn_if_idle;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn picker_wheel_scrolls_but_navigation_keys_keep_the_old_mapping() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(&dir.path().join("usage.jsonl"));
+        app.board.ingest(
+            &(0..30)
+                .map(|p| format!("SCAN home {p} agent agent\n"))
+                .collect::<String>(),
+        );
+        app.board.set_list_geometry(100, 12);
+        app.board.decide(Key::StartPicker);
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.board.picker_window(30).0, 3);
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            assert_eq!(
+                map_picker_key(KeyEvent::new(code, KeyModifiers::NONE)),
+                None
+            );
+        }
+        assert_eq!(
+            map_picker_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(
+            map_picker_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Some(Key::Input('j'))
+        );
+    }
 
     #[test]
     fn reopening_restores_last_jump_with_current_agent_taking_priority() {

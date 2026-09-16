@@ -344,11 +344,9 @@ fn render_scrollbar(area: Rect, used: usize, total: u32, offset: u32, buffer: &m
         return;
     }
     let used16 = u16::try_from(used).unwrap_or(u16::MAX);
-    let thumb = u16::try_from((used32 * used32).div_ceil(total))
-        .unwrap_or(u16::MAX)
-        .clamp(1, used16);
+    let (thumb, travel) = track_metrics(used32, total);
+    let thumb = u16::try_from(thumb).unwrap_or(u16::MAX);
     let before = offset.min(total - used32);
-    let travel = used32.saturating_sub(u32::from(thumb));
     let top = u16::try_from((u64::from(before) * u64::from(travel)) / u64::from(total - used32))
         .unwrap_or(u16::MAX);
     let x = area.right().saturating_sub(1);
@@ -389,26 +387,83 @@ pub fn agent_at(board: &Board, rows: u16, cols: u16, column: u16, row: u16) -> O
 /// topline. `None` when the bar is not up or the click is outside it.
 pub fn scrollbar_at(board: &Board, rows: u16, cols: u16, column: u16, row: u16) -> Option<u32> {
     let body = list_body(board, rows, cols);
+    let wide = usize::from(body.width) >= 50;
+    scrollbar_offset_at(body, || board.list_lines_total(wide), column, row)
+}
+
+/// Result rows of the painted picker. The painter and both pointer hit tests
+/// come here, so a click lands on the frame the eye saw.
+fn picker_body(rows: u16, cols: u16) -> Rect {
+    let (content, _) = content_and_footer(Rect::new(0, 0, cols, rows));
+    picker_results_area(content)
+}
+
+pub fn picker_scrollbar_at(
+    board: &Board,
+    rows: u16,
+    cols: u16,
+    column: u16,
+    row: u16,
+) -> Option<u32> {
+    let body = picker_body(rows, cols);
+    scrollbar_offset_at(body, || board.picker_matches().len() as u32, column, row)
+}
+
+pub fn picker_agent_at(
+    board: &Board,
+    rows: u16,
+    cols: u16,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    let body = picker_body(rows, cols);
+    if column < body.x || column >= body.right() || row < body.y || row >= body.bottom() {
+        return None;
+    }
+    // A row under the gutter is the scrollbar's, not a result's.
+    if scrollbar_offset_at(body, || board.picker_matches().len() as u32, column, row).is_some() {
+        return None;
+    }
+    let (start, end) = board.picker_window(usize::from(body.height));
+    let position = start + usize::from(row - body.y);
+    if position >= end {
+        return None;
+    }
+    board.picker_matches().get(position).copied()
+}
+
+/// Thumb length and how far its top can travel, for `total` lines shown `used`
+/// at a time. The painter and the click→topline mapping share it, so clicking
+/// the thumb lands the view where the thumb was drawn.
+fn track_metrics(used: u32, total: u32) -> (u32, u32) {
+    let thumb = (used * used).div_ceil(total).clamp(1, used);
+    (thumb, used - thumb)
+}
+
+/// Target topline for a click at `column`,`row` on the gutter of `body`.
+/// `total` is called only once the click is known to be on the gutter, so the
+/// caller can pass its line count lazily.
+fn scrollbar_offset_at(
+    body: Rect,
+    total: impl FnOnce() -> u32,
+    column: u16,
+    row: u16,
+) -> Option<u32> {
     let gutter = body.right().checked_sub(1)?;
     if column != gutter || row < body.y || row >= body.bottom() {
         return None;
     }
-    let wide = usize::from(body.width) >= 50;
-    let total = board.list_lines_total(wide);
     let body_lines = u32::from(body.height);
+    let total = total();
     if total <= body_lines || body_lines < 2 {
         return None;
     }
     let pos = u32::from(row - body.y).min(body_lines - 1);
     let max_top = total - body_lines;
-    // Same thumb geometry as [`render_scrollbar`]: a click places the *thumb
-    // top* at `pos` (clamped to the travel range). Mapping click→topline
-    // linearly left a large dead zone on short tracks — the fat thumb at the
-    // top soaked most clicks and kept topline at 0.
-    let thumb = (body_lines * body_lines)
-        .div_ceil(total)
-        .clamp(1, body_lines);
-    let travel = body_lines.saturating_sub(thumb);
+    // A click places the *thumb top* at `pos` (clamped to the travel range).
+    // Mapping click→topline linearly left a large dead zone on short tracks —
+    // the fat thumb at the top soaked most clicks and kept topline at 0.
+    let (_, travel) = track_metrics(body_lines, total);
     if travel == 0 {
         return Some(max_top);
     }
@@ -438,20 +493,6 @@ pub(crate) fn list_body(board: &Board, rows: u16, cols: u16) -> Rect {
     )
 }
 
-fn render_scroll_arrows(area: Rect, start: usize, end: usize, total: usize, buffer: &mut Buffer) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let style = Style::default().fg(theme().tip_bg);
-    let x = area.right().saturating_sub(1);
-    if start > 0 {
-        buffer.set_string(x, area.y, "↑", style);
-    }
-    if end < total {
-        buffer.set_string(x, area.bottom().saturating_sub(1), "↓", style);
-    }
-}
-
 /// Floating picker geometry: the list pane minus a small inset.
 /// A hard 88×24 cap clipped branch names the board could show, and hid
 /// matches after j/k left the picker.
@@ -474,8 +515,15 @@ pub fn picker_box(area: Rect) -> Rect {
 /// Result rows inside the picker for a pane of `rows` lines.
 /// Box minus top/bottom border minus the query line.
 pub fn picker_result_rows(rows: u16) -> usize {
-    let box_area = picker_box(Rect::new(0, 0, 120, rows));
-    usize::from(box_area.height).saturating_sub(3)
+    usize::from(picker_results_area(Rect::new(0, 0, 120, rows)).height)
+}
+
+fn picker_results_area(area: Rect) -> Rect {
+    let inner = Block::default()
+        .borders(Borders::ALL)
+        .inner(picker_box(area));
+    let [_, results] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+    results
 }
 
 fn render_picker(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
@@ -559,10 +607,15 @@ fn render_picker_results(board: &Board, home: &str, area: Rect, buffer: &mut Buf
             break;
         };
         let selected = position == cursor;
-        if selected {
+        let hovered = board.picker_hovered_row() == Some(index);
+        if selected || hovered {
             buffer.set_style(
                 Rect::new(area.x, y, area.width, 1),
-                Style::default().bg(theme().focus_fill),
+                Style::default().bg(if selected {
+                    theme().focus_fill
+                } else {
+                    theme().hover_fill
+                }),
             );
         }
         // Same `agent_row` / `place_for_match` as the board. `multi` here
@@ -585,7 +638,13 @@ fn render_picker_results(board: &Board, home: &str, area: Rect, buffer: &mut Buf
             break;
         }
     }
-    render_scroll_arrows(area, start, end, matches.len(), buffer);
+    render_scrollbar(
+        area,
+        usize::from(area.height),
+        matches.len() as u32,
+        start as u32,
+        buffer,
+    );
 }
 
 fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
@@ -812,7 +871,7 @@ fn agent_row(
                 .fg(theme().focus)
                 .add_modifier(Modifier::BOLD),
         ));
-    } else if !masked && board.hovered_row() == Some(index) {
+    } else if !masked && board.hovered_in(picker) == Some(index) {
         // Same mark as the cursor, dim: a preview, not the selection.
         spans.push(Span::styled("› ", Style::default().fg(theme().separator)));
     } else {
