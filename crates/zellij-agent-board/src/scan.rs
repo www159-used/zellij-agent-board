@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// `zellij action list-panes` can hang forever on a stuck client IPC.
-/// Without a cap, one reconcile holds `reconcile.lock` and the board
+/// Without a cap, one daemon scan holds the state lock and the board
 /// keeps jumping to stale pane ids (dead pane → focus no-op → master).
 const ZELLIJ_CLI_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -225,7 +225,7 @@ fn list_sessions() -> Vec<String> {
 }
 
 /// Run a command with a wall-clock cap. Zellij IPC can stall; without
-/// this, reconcile holds the store lock and the board jumps with stale
+/// this, a scan holds the store lock and the board jumps with stale
 /// pane ids.
 fn command_output_timeout(
     mut cmd: Command,

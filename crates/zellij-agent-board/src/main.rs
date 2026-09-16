@@ -607,7 +607,7 @@ impl State {
     }
 
     fn flush_places(&mut self) {
-        // The host reconciler owns the store. Writing from this pane
+        // The host daemon owns the store. Writing from this pane
         // raced the TUI and leftover boards.
         let text = format_places(self.places.iter().filter_map(|(id, place)| {
             if place.tab_name.is_empty() && place.pane_title.is_empty() {

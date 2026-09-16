@@ -123,40 +123,64 @@ async fn serve(
     Ok(())
 }
 
+/// The HTTP surface, in one place. Both directions of the wire protocol are
+/// derived from this, so a new verb cannot desync the client from the server.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Snapshot,
+    Refresh,
+    Shutdown,
+}
+
+impl Route {
+    const ALL: [Route; 3] = [Route::Snapshot, Route::Refresh, Route::Shutdown];
+
+    fn path(self) -> &'static str {
+        match self {
+            Route::Snapshot => "/v1/snapshot",
+            Route::Refresh => "/v1/refresh",
+            Route::Shutdown => "/v1/shutdown",
+        }
+    }
+
+    fn method(self) -> Method {
+        match self {
+            Route::Snapshot => Method::GET,
+            Route::Refresh | Route::Shutdown => Method::POST,
+        }
+    }
+
+    fn from_path(path: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|route| route.path() == path)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RefreshBody {
     home: String,
 }
 
+fn is_json(headers: &hyper::HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+}
+
 async fn handle(request: HttpRequest<Incoming>, send: SyncSender<Call>) -> HttpResponse {
-    let expected = match request.uri().path() {
-        "/v1/snapshot" => Method::GET,
-        "/v1/refresh" | "/v1/shutdown" => Method::POST,
-        _ => return error(StatusCode::NOT_FOUND, "unknown route or API version"),
+    let Some(route) = Route::from_path(request.uri().path()) else {
+        return error(StatusCode::NOT_FOUND, "unknown route or API version");
     };
-    if request.method() != expected {
+    if request.method() != route.method() {
         let mut response = error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
         response
             .headers_mut()
-            .insert(ALLOW, expected.as_str().parse().unwrap());
+            .insert(ALLOW, route.method().as_str().parse().unwrap());
         return response;
     }
-    let path = request.uri().path().to_owned();
-    if path == "/v1/refresh"
-        && request
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_none_or(|value| {
-                !value
-                    .split(';')
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .eq_ignore_ascii_case("application/json")
-            })
-    {
+    if route == Route::Refresh && !is_json(request.headers()) {
         return error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "refresh requires application/json",
@@ -178,13 +202,13 @@ async fn handle(request: HttpRequest<Incoming>, send: SyncSender<Call>) -> HttpR
             );
         }
     };
-    let command = match path.as_str() {
-        "/v1/snapshot" | "/v1/shutdown" if !body.is_empty() => {
-            return error(StatusCode::BAD_REQUEST, "this route does not accept a body")
-        }
-        "/v1/snapshot" => Request::Snapshot,
-        "/v1/shutdown" => Request::Shutdown,
-        _ => match serde_json::from_slice::<RefreshBody>(&body) {
+    if route != Route::Refresh && !body.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "this route does not accept a body");
+    }
+    let command = match route {
+        Route::Snapshot => Request::Snapshot,
+        Route::Shutdown => Request::Shutdown,
+        Route::Refresh => match serde_json::from_slice::<RefreshBody>(&body) {
             Ok(body) => Request::Refresh { home: body.home },
             Err(_) => {
                 return error(
@@ -220,20 +244,18 @@ fn error(status: StatusCode, message: &str) -> HttpResponse {
 }
 
 fn json(status: StatusCode, value: &impl serde::Serialize) -> HttpResponse {
-    match serde_json::to_vec(value) {
-        Ok(bytes) if bytes.len() <= RESPONSE_LIMIT => Response::builder()
-            .status(status)
-            .header(CONTENT_TYPE, "application/json")
-            .body(Full::new(Bytes::from(bytes)))
-            .unwrap(),
-        _ => Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .header(CONTENT_TYPE, "application/json")
-            .body(Full::new(Bytes::from_static(
-                b"{\"error\":\"response serialization failed or exceeds limit\"}",
-            )))
-            .unwrap(),
-    }
+    let (status, body) = match serde_json::to_vec(value) {
+        Ok(bytes) if bytes.len() <= RESPONSE_LIMIT => (status, Bytes::from(bytes)),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Bytes::from_static(b"{\"error\":\"response serialization failed or exceeds limit\"}"),
+        ),
+    };
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Full::new(body))
+        .unwrap()
 }
 
 fn runtime() -> io::Result<Runtime> {
@@ -250,7 +272,7 @@ thread_local! {
 }
 
 pub(crate) fn request_at(dir: &Path, command: Request) -> io::Result<Option<Snapshot>> {
-    let socket = fs::read_to_string(dir.join("daemon.endpoint"))?;
+    let socket = fs::read_to_string(crate::daemon::endpoint(dir))?;
     CLIENT.with(|client| {
         let mut runtime_ref = client.borrow_mut();
         if runtime_ref.is_none() {
@@ -274,16 +296,15 @@ impl Drop for Connection {
 }
 
 async fn request(socket: &str, command: Request) -> io::Result<Option<Snapshot>> {
-    let (method, path, body) = match command {
-        Request::Snapshot => (Method::GET, "/v1/snapshot", Vec::new()),
+    let (route, body) = match command {
+        Request::Snapshot => (Route::Snapshot, Vec::new()),
         Request::Refresh { home } => (
-            Method::POST,
-            "/v1/refresh",
+            Route::Refresh,
             serde_json::to_vec(&serde_json::json!({"home": home}))?,
         ),
-        Request::Shutdown => (Method::POST, "/v1/shutdown", Vec::new()),
+        Request::Shutdown => (Route::Shutdown, Vec::new()),
     };
-    let expects_snapshot = path == "/v1/snapshot";
+    let expects_snapshot = route == Route::Snapshot;
     if body.len() > REQUEST_LIMIT {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -298,8 +319,8 @@ async fn request(socket: &str, command: Request) -> io::Result<Option<Snapshot>>
         let _ = connection.await;
     }));
     let request = HttpRequest::builder()
-        .method(method)
-        .uri(path)
+        .method(route.method())
+        .uri(route.path())
         .header("Host", "localhost")
         .header("Connection", "close")
         .header(CONTENT_TYPE, "application/json")

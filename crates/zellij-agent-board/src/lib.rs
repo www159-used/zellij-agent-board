@@ -38,12 +38,13 @@ pub use protocol::persist_seen;
 pub use protocol::runtime_dir;
 #[cfg(not(target_arch = "wasm32"))]
 pub use protocol::{
-    ensure_state, host_places_path, load_last_jump, persist_last_jump, replace_session_places,
-    scan_path,
+    data_dir, ensure_state, host_places_path, load_last_jump, persist_last_jump,
+    replace_session_places, scan_path,
 };
 pub use protocol::{
-    format_jump, format_places, format_seen, format_started, merge_places, parse_jump,
-    parse_places, places_path, seen_dir, spool_dir, started_dir, PIPE_NAME,
+    focus_path, format_focus, format_jump, format_places, format_seen, format_started,
+    merge_places, parse_focus, parse_jump, parse_places, places_path, seen_dir, spool_dir,
+    started_dir, PIPE_NAME,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use reconcile::{refresh_sessions, sessions_from_scan, try_acquire_lock, ReconcileLock};
@@ -56,6 +57,8 @@ pub use scan::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use scene::{run_scene, SceneError};
 pub use status::Status;
+#[cfg(not(target_arch = "wasm32"))]
+pub use store::write_json_durable;
 pub use toggle::{
     bridge_close_plan, closes_the_board, duplicate_close_ids, duplicate_close_ids_with_focus,
     is_host_tui_exit, jump_steps, looks_like_board_tui, now_ms, plugin_ids_to_close_explicitly,

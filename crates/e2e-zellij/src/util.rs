@@ -27,6 +27,18 @@ pub(crate) fn which(name: &str) -> Option<PathBuf> {
     })
 }
 
+/// Prerequisite check for a built artifact. Scenarios fail with a path instead
+/// of an obscure launch error when the workspace was not built first.
+pub(crate) fn require_artifact(path: &std::path::Path, name: &str) -> Result<(), String> {
+    if path.is_file() {
+        return Ok(());
+    }
+    Err(format!(
+        "{name} missing at {}; run ./scripts/e2e-zellij.sh",
+        path.display()
+    ))
+}
+
 pub(crate) fn workspace_target_dir() -> PathBuf {
     env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)

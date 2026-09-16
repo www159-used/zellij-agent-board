@@ -2,7 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,7 +13,8 @@ use crate::agent::{MockAgent, MockAgentOptions};
 use crate::oracle::Observation;
 use crate::pty::PtyClient;
 use crate::util::{
-    err, pane_blob, parse_pane_id, resolve_zellij, shell_quote, strip_ansi, workspace_target_dir,
+    err, pane_blob, parse_pane_id, require_artifact, resolve_zellij, shell_quote, strip_ansi,
+    workspace_target_dir,
 };
 
 const NAMED_PANE_KEYS: &[&str] = &["title", "pane_command", "terminal_command", "name"];
@@ -31,7 +32,8 @@ pub struct Zellij {
     pty: Option<PtyClient>,
     server_cookie: BTreeMap<String, u64>,
     agent_serial: u32,
-    created_agents: Vec<(String, String, i64)>,
+    /// `(session, pane id)` of every planted agent; the role only names the pane.
+    created_agents: Vec<(String, i64)>,
     env_pairs: Vec<(String, String)>,
 }
 
@@ -46,23 +48,14 @@ impl Zellij {
             "release"
         };
         let supervisor = target.join(profile).join("agent-supervisor");
-        let mock_agent = env::var_os("CARGO_BIN_EXE_mock-agent")
-            .map(PathBuf::from)
-            .filter(|path| path.is_file())
-            .or_else(|| {
-                let path = target.join(profile).join("mock-agent");
-                path.is_file().then_some(path)
-            })
-            .ok_or_else(|| "mock-agent binary missing; build e2e-zellij first".to_owned())?;
-        if !supervisor.is_file() {
-            return Err(format!(
-                "agent-supervisor missing at {}; build it first",
-                supervisor.display()
-            ));
-        }
+        require_artifact(&supervisor, "agent-supervisor")?;
+        let mock_agent = target.join(profile).join("mock-agent");
+        require_artifact(&mock_agent, "mock-agent")?;
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let wasm = repo.join("target/wasm32-wasip1/release/zellij-agent-board.wasm");
+        require_artifact(&wasm, "zellij-agent-board.wasm")?;
         let tui = target.join(profile).join("board-tui");
+        require_artifact(&tui, "board-tui")?;
         let isolate = tempfile::Builder::new()
             .prefix("zabf-")
             .tempdir_in("/tmp")
@@ -126,15 +119,21 @@ impl Zellij {
         }
         self.agent_serial += 1;
         let role = format!("agent-{}", self.agent_serial);
-        let pane_id = self.plant(&session, &role, "ZAB-MOCK-AGENT", &exit_behavior)?;
         let directory = self.isolate.join(format!("mock-{session}-{role}"));
+        let pane_id = self.plant(
+            &session,
+            &role,
+            &directory,
+            "ZAB-MOCK-AGENT",
+            &exit_behavior,
+        )?;
         let agent = MockAgent {
             session: session.clone(),
-            role: role.clone(),
+            role,
             pane_id,
             directory,
         };
-        self.created_agents.push((session.clone(), role, pane_id));
+        self.created_agents.push((session.clone(), pane_id));
         let real = self.real_names[&session].clone();
         self.zj(
             &[
@@ -201,13 +200,13 @@ impl Zellij {
             lost_connection: self
                 .pty
                 .as_ref()
-                .is_some_and(|pty| pty.transcript().contains("Lost connection")),
+                .is_some_and(|pty| pty.contains("Lost connection")),
         }
     }
 
     pub fn close_agents(&mut self) {
         let agents = std::mem::take(&mut self.created_agents);
-        for (session, _role, pane_id) in agents {
+        for (session, pane_id) in agents {
             let real = self.real_names[&session].clone();
             let _ = self.zj(
                 &[
@@ -225,11 +224,11 @@ impl Zellij {
         &mut self,
         session: &str,
         role: &str,
+        directory: &Path,
         sentinel: &str,
         exit_mode: &str,
     ) -> Result<i64, String> {
         let real = self.real_names[session].clone();
-        let directory = self.isolate.join(format!("mock-{session}-{role}"));
         let command = format!(
             "printf '%s\\n' {sentinel}; exec {supervisor} --mock-agent {directory} -- {mock} --store {chat} --exit-mode {exit_mode}",
             sentinel = shell_quote(sentinel),
@@ -446,6 +445,7 @@ show_release_notes false
     }
 
     fn teardown(&mut self) {
+        let transcript = self.pty.as_ref().map(PtyClient::transcript);
         self.close_agents();
         if let Some(mut pty) = self.pty.take() {
             pty.close();
@@ -456,8 +456,54 @@ show_release_notes false
                 .envs(self.env_pairs.iter().cloned())
                 .output();
         }
-        let _ = fs::remove_dir_all(&self.isolate);
+        // The board starts a state owner lazily and outlives its pane. Stop it
+        // before the isolate (which holds its database) goes away.
+        let _ = Command::new(&self.tui)
+            .arg("--daemon-stop")
+            .envs(self.env_pairs.iter().cloned())
+            .output();
+        self.keep_or_remove_isolate(transcript);
     }
+
+    /// A failing case keeps its isolate where CI can upload it; a passing one
+    /// cleans up. Drop runs during unwinding, so `panicking` is the failure
+    /// signal available here.
+    fn keep_or_remove_isolate(&self, transcript: Option<String>) {
+        if !thread::panicking() {
+            let _ = fs::remove_dir_all(&self.isolate);
+            return;
+        }
+        if let Some(text) = transcript {
+            let _ = fs::write(self.isolate.join("transcript.txt"), text);
+        }
+        let name = self
+            .isolate
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "zabf".to_owned());
+        let _ = copy_tree(&self.isolate, &failure_artifacts_dir().join(name));
+    }
+}
+
+fn failure_artifacts_dir() -> PathBuf {
+    workspace_target_dir().join("e2e-zellij")
+}
+
+/// Recursive copy of regular files and directories; live sockets and other
+/// special entries are skipped rather than aborting the copy.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }
 
 impl Drop for Zellij {

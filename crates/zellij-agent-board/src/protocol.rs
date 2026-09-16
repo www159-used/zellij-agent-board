@@ -49,6 +49,35 @@ pub fn state_dir_from(
     tmp.join("zellij-agent-board")
 }
 
+/// Durable data directory. Unlike the cache runtime dir, this holds `state.redb`
+/// and the usage log. `ZAB_STATE_DIR` wins so e2e / tests stay isolated.
+pub fn data_dir() -> PathBuf {
+    data_dir_from(
+        std::env::var("ZAB_STATE_DIR").ok().as_deref(),
+        std::env::var("XDG_DATA_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+        &tmp_root(),
+    )
+}
+
+pub fn data_dir_from(
+    zab_state_dir: Option<&str>,
+    xdg_data_home: Option<&str>,
+    home: Option<&str>,
+    tmp: &Path,
+) -> PathBuf {
+    if let Some(dir) = zab_state_dir.filter(|dir| !dir.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    if let Some(xdg) = xdg_data_home.filter(|dir| !dir.is_empty()) {
+        return PathBuf::from(xdg).join("zellij-agent-board");
+    }
+    if let Some(home) = home.filter(|dir| !dir.is_empty()) {
+        return PathBuf::from(home).join(".local/share/zellij-agent-board");
+    }
+    tmp.join("zellij-agent-board")
+}
+
 pub fn places_path() -> PathBuf {
     runtime_dir().join("places")
 }
@@ -71,6 +100,15 @@ pub fn host_places_path() -> PathBuf {
     runtime_dir().join("places.host")
 }
 
+pub fn focus_path() -> PathBuf {
+    runtime_dir().join("focus")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn scan_path() -> PathBuf {
+    runtime_dir().join("scan")
+}
+
 pub fn spool_dir() -> PathBuf {
     tmp_root().join("zellij-agent-board-spool")
 }
@@ -81,11 +119,6 @@ pub fn seen_dir() -> PathBuf {
 
 pub fn started_dir() -> PathBuf {
     runtime_dir().join("started")
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn scan_path() -> PathBuf {
-    runtime_dir().join("scan")
 }
 
 fn tmp_root() -> PathBuf {
@@ -200,6 +233,10 @@ pub fn format_started(session: &str, pane_id: u32, started_at: u64) -> String {
     format!("STARTED {session} {pane_id} {started_at}")
 }
 
+pub fn format_focus(session: &str, pane_id: u32) -> String {
+    format!("FOCUS {session} {pane_id}")
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn ensure_migrated() {
     static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -213,6 +250,7 @@ fn migrate_tmpdir_state() {
     if src == dest || !src.is_dir() {
         return;
     }
+    copy_if_absent(&src.join("focus"), &dest.join("focus"));
     copy_if_absent(&src.join("scan"), &dest.join("scan"));
     copy_if_absent(&src.join("scan.host"), &dest.join("scan"));
     copy_dir_if_absent(&src.join("seen"), &dest.join("seen"));
@@ -290,6 +328,16 @@ pub fn clear_started(session: &str, pane_id: u32) {
     ensure_migrated();
     let path = started_dir().join(format!("{session}-{pane_id}"));
     let _ = std::fs::remove_file(path);
+}
+
+pub fn parse_focus(text: &str) -> Option<(String, u32)> {
+    let mut parts = text.split_whitespace();
+    if parts.next()? != "FOCUS" {
+        return None;
+    }
+    let session = parts.next()?.to_string();
+    let pane_id = parts.next()?.parse().ok()?;
+    Some((session, pane_id))
 }
 
 pub fn parse_jump(payload: &str) -> Option<(String, u32)> {

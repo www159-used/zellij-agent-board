@@ -105,5 +105,6 @@ while other clients leave headers or bodies unfinished. Storage tests cover inte
 migration and preservation of other sessions' titles.
 
 Real Zellij regression scenarios exercise the production board/daemon path.
-Their teardown stops the isolated daemon; failure bundles include a committed
-JSON snapshot rather than copying an open database file.
+Their teardown closes the panes, stops the isolated daemon, and only then
+captures state; a failing case keeps its isolate (PTY transcript, supervisor
+status files, quiesced database) under `target/e2e-zellij/` for CI upload.

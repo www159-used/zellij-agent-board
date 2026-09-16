@@ -12,11 +12,15 @@ use nix::libc::{cfmakeraw, ioctl, winsize, TIOCSWINSZ};
 use nix::pty::{openpty, OpenptyResult, Winsize};
 use nix::unistd::dup;
 
+/// Terminal size every scenario attaches with.
+const ROWS: u16 = 32;
+const COLS: u16 = 120;
+
 pub struct PtyClient {
     child: Child,
-    /// Kept open so the child retains a live PTY master.
-    #[allow(dead_code)]
-    master: File,
+    /// Kept open so the child retains a live PTY master; only the reader
+    /// thread's clone is read from.
+    _master: File,
     buffer: Arc<Mutex<Vec<u8>>>,
     reader: Option<JoinHandle<()>>,
 }
@@ -24,8 +28,8 @@ pub struct PtyClient {
 impl PtyClient {
     pub fn spawn(argv: &[String], env: &[(String, String)]) -> io::Result<Self> {
         let winsize = Winsize {
-            ws_row: 32,
-            ws_col: 120,
+            ws_row: ROWS,
+            ws_col: COLS,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
@@ -39,8 +43,8 @@ impl PtyClient {
                 let _ = nix::libc::tcsetattr(slave.as_raw_fd(), nix::libc::TCSANOW, &termios);
             }
             let size = winsize {
-                ws_row: 32,
-                ws_col: 120,
+                ws_row: ROWS,
+                ws_col: COLS,
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             };
@@ -88,7 +92,7 @@ impl PtyClient {
         });
         Ok(Self {
             child,
-            master,
+            _master: master,
             buffer,
             reader: Some(reader),
         })
@@ -100,6 +104,20 @@ impl PtyClient {
 
     pub fn transcript(&self) -> String {
         String::from_utf8_lossy(&self.buffer.lock().unwrap()).into_owned()
+    }
+
+    /// Substring probe for health checks that run on a repeating tick — the
+    /// transcript only grows, so copying it each time is the expensive part.
+    pub fn contains(&self, needle: &str) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
+        let bytes = needle.as_bytes();
+        self.buffer
+            .lock()
+            .unwrap()
+            .windows(bytes.len())
+            .any(|window| window == bytes)
     }
 
     pub fn close(&mut self) {

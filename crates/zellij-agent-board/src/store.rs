@@ -37,6 +37,24 @@ pub(crate) fn write_snapshot_if_absent(path: &Path, contents: impl AsRef<[u8]>) 
     }
 }
 
+/// Durable replace of a file read by path, with no staging directory: readers
+/// open the target name, so a sibling temp file and a rename are enough. The
+/// parent fsync makes the rename itself survive a crash.
+pub fn write_json_durable(path: &Path, value: &impl serde::Serialize) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "snapshot needs a parent directory",
+        )
+    })?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer(&mut file, value)?;
+    file.write_all(b"\n")?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    std::fs::File::open(parent)?.sync_all()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{write_snapshot, write_snapshot_if_absent};

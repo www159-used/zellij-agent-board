@@ -8,24 +8,25 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::agent::{AgentId, PanePlace};
 use crate::database::{HostDatabase, Snapshot};
 use crate::protocol::{ensure_state, runtime_dir};
 use crate::reconcile::{refresh_sessions, sessions_from_scan, try_acquire_lock};
 use crate::scan::{scan_host_text, scan_places_for};
 use crate::store::write_snapshot;
 
-type ScanResult = (String, Vec<(crate::AgentId, crate::PanePlace)>);
+pub use crate::protocol::data_dir;
 
-pub fn data_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("ZAB_STATE_DIR").filter(|s| !s.is_empty()) {
-        return PathBuf::from(path);
-    }
-    if let Some(path) = std::env::var_os("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
-        return PathBuf::from(path).join("zellij-agent-board");
-    }
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into()))
-        .join(".local/share/zellij-agent-board")
-}
+type ScanResult = (String, Vec<(AgentId, PanePlace)>);
+
+/// A running scan worker is reaped from this tick; an idle daemon only wakes
+/// for client traffic, so it can afford a long one.
+const WORKER_POLL: Duration = Duration::from_millis(20);
+const IDLE_POLL: Duration = Duration::from_secs(1);
+
+/// Minimum spacing between accepted refreshes. Clients pace their own requests
+/// from this too, so the two cannot drift apart.
+pub const SCAN_EVERY: Duration = Duration::from_secs(2);
 
 pub enum Request {
     Snapshot,
@@ -33,7 +34,8 @@ pub enum Request {
     Shutdown,
 }
 
-fn endpoint(dir: &Path) -> PathBuf {
+/// Published socket path clients read. The daemon removes it on clean shutdown.
+pub fn endpoint(dir: &Path) -> PathBuf {
     dir.join("daemon.endpoint")
 }
 
@@ -53,13 +55,26 @@ pub fn shutdown() -> io::Result<()> {
     request_at(&data_dir(), Request::Shutdown).map(|_| ())
 }
 
+/// Wait for a shutdown to unlink the published endpoint.
+pub fn wait_until_stopped(timeout: Duration) -> io::Result<()> {
+    let path = endpoint(&data_dir());
+    let deadline = Instant::now() + timeout;
+    while path.exists() {
+        if Instant::now() >= deadline {
+            return Err(io::Error::other("daemon shutdown timed out"));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
 /// Race-safe auto-start. A waiter reaps candidates while the launcher lives;
 /// a surviving daemon is adopted by the OS when its launching TUI exits.
-pub fn ensure_running(exe: &Path) -> io::Result<()> {
+pub fn ensure_running() -> io::Result<()> {
     if snapshot().is_ok() {
         return Ok(());
     }
-    let mut command = Command::new(exe);
+    let mut command = Command::new(std::env::current_exe()?);
     command
         .arg("--daemon")
         .stdin(Stdio::null())
@@ -102,70 +117,80 @@ pub fn serve_at(dir: &Path, legacy: &Path) -> io::Result<()> {
     write_snapshot(&endpoint(dir), socket.as_os_str().as_encoded_bytes())?;
     let mut worker: Option<thread::JoinHandle<ScanResult>> = None;
     let mut last_refresh: Option<Instant> = None;
-    let result = (|| -> io::Result<()> {
-        loop {
-            if worker.as_ref().is_some_and(|job| job.is_finished()) {
-                let (scan, places) = worker
-                    .take()
-                    .unwrap()
-                    .join()
-                    .map_err(|_| io::Error::other("scan worker panicked"))?;
-                db.publish(&scan, places)?;
-            }
-            match http.incoming.recv_timeout(Duration::from_millis(20)) {
-                Ok(call) => {
-                    // A disconnected client must not leave queued side effects.
-                    if call.reply.is_closed() {
-                        continue;
-                    }
-                    let mut stop = false;
-                    let response = match call.request {
-                        Request::Snapshot => db.snapshot().map(Some),
-                        Request::Refresh { home } => {
-                            if worker.is_none()
-                                && last_refresh
-                                    .is_none_or(|last| last.elapsed() >= Duration::from_secs(2))
-                            {
-                                last_refresh = Some(Instant::now());
-                                worker = Some(thread::spawn(move || {
-                                    let scan = scan_host_text();
-                                    let mut places = Vec::new();
-                                    for session in
-                                        refresh_sessions(&sessions_from_scan(&scan), &home)
-                                    {
-                                        places.extend(scan_places_for(&[session]));
-                                    }
-                                    (scan, places)
-                                }));
-                            }
-                            Ok(None)
-                        }
-                        Request::Shutdown => {
-                            stop = true;
-                            Ok(None)
-                        }
-                    };
-                    let _ = call.reply.send(response);
-                    if stop {
-                        break;
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(io::Error::other("HTTP server stopped"))
-                }
-            }
-        }
-        Ok(())
-    })();
+    let result = pump(&http, &db, &mut worker, &mut last_refresh);
     drop(http);
-    if let Some(worker) = worker {
-        if let Ok((scan, places)) = worker.join() {
-            if result.is_ok() {
-                db.publish(&scan, places)?;
-            }
-        }
+    // An accepted refresh still owes the caller a committed scan. A panicked
+    // worker and a failing loop are already reported by `result`.
+    if let Some(job) = worker.filter(|_| result.is_ok()) {
+        let _ = commit(&db, job);
     }
     let _ = fs::remove_file(endpoint(dir));
     result
+}
+
+/// Serve until shutdown. Only a queued scan worker needs the short tick; with
+/// no worker running, a client request is the only thing that can change state.
+fn pump(
+    http: &crate::daemon_http::Server,
+    db: &HostDatabase,
+    worker: &mut Option<thread::JoinHandle<ScanResult>>,
+    last_refresh: &mut Option<Instant>,
+) -> io::Result<()> {
+    loop {
+        if worker.as_ref().is_some_and(|job| job.is_finished()) {
+            commit(db, worker.take().expect("finished worker was present"))?;
+        }
+        let tick = if worker.is_some() {
+            WORKER_POLL
+        } else {
+            IDLE_POLL
+        };
+        match http.incoming.recv_timeout(tick) {
+            Ok(call) => {
+                // A disconnected client must not leave queued side effects.
+                if call.reply.is_closed() {
+                    continue;
+                }
+                let mut stop = false;
+                let response = match call.request {
+                    Request::Snapshot => db.snapshot().map(Some),
+                    Request::Refresh { home } => {
+                        if worker.is_none()
+                            && last_refresh.is_none_or(|last| last.elapsed() >= SCAN_EVERY)
+                        {
+                            *last_refresh = Some(Instant::now());
+                            *worker = Some(thread::spawn(move || {
+                                let scan = scan_host_text();
+                                let mut places = Vec::new();
+                                for session in refresh_sessions(&sessions_from_scan(&scan), &home) {
+                                    places.extend(scan_places_for(&[session]));
+                                }
+                                (scan, places)
+                            }));
+                        }
+                        Ok(None)
+                    }
+                    Request::Shutdown => {
+                        stop = true;
+                        Ok(None)
+                    }
+                };
+                let _ = call.reply.send(response);
+                if stop {
+                    return Ok(());
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("HTTP server stopped"))
+            }
+        }
+    }
+}
+
+fn commit(db: &HostDatabase, job: thread::JoinHandle<ScanResult>) -> io::Result<()> {
+    let (scan, places) = job
+        .join()
+        .map_err(|_| io::Error::other("scan worker panicked"))?;
+    db.publish(&scan, places)
 }

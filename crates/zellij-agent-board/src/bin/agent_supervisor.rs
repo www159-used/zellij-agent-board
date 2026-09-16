@@ -1,15 +1,19 @@
 //! Manual lifecycle supervisor for the JSON-line mock adapter.
 //! Deliberately not a Codex terminal adapter: no Codex exit protocol is assumed.
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fs2::FileExt;
 use serde_json::{json, Value};
+use zellij_agent_board::{try_acquire_lock, write_json_durable};
+
+/// A live child can emit events or exit at any time, so it is observed often.
+const OBSERVE_TICK: Duration = Duration::from_millis(20);
+const IDLE_TICK: Duration = Duration::from_secs(1);
 
 struct Agent {
     child: Child,
@@ -75,15 +79,16 @@ fn read_lines(reader: impl BufRead, send: Sender<Value>) {
     }
 }
 
-fn save(path: &Path, value: &Value) -> io::Result<()> {
-    // Same durable write pattern as e2e mock-agent `persist`: tempfile, fsync,
-    // rename, then fsync the parent directory.
-    let parent = path.parent().unwrap();
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    writeln!(file, "{value}")?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|error| error.error)?;
-    File::open(parent)?.sync_all()
+/// Published as `status.json`'s `state`. The lowercase spelling is the
+/// observation protocol the Zellij E2E crate reads.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Phase {
+    Starting,
+    Running,
+    Stopping,
+    Sleeping,
+    Failed,
 }
 
 struct Supervisor {
@@ -92,7 +97,7 @@ struct Supervisor {
     cwd: PathBuf,
     session: Option<String>,
     agent: Option<Agent>,
-    phase: &'static str,
+    phase: Phase,
     last: Value,
     clean_exit: bool,
     sleep_requested: bool,
@@ -107,13 +112,13 @@ impl Supervisor {
             "session_id":self.session, "supervisor_pid":std::process::id(),
             "agent_pid":self.agent.as_ref().map(|agent| agent.child.id()),
             "agent":self.last, "error":error});
-        save(&self.directory.join("status.json"), &value)?;
+        write_json_durable(&self.directory.join("status.json"), &value)?;
         println!("{value}");
         Ok(())
     }
     fn start(&mut self) -> io::Result<()> {
         self.agent = Some(Agent::start(&self.command, self.session.as_deref())?);
-        self.phase = "starting";
+        self.phase = Phase::Starting;
         self.last = Value::Null;
         self.clean_exit = false;
         self.sleep_requested = false;
@@ -141,11 +146,11 @@ impl Supervisor {
                 }
                 self.session = Some(id.to_owned());
                 // Exact resume identity is durable before accepting a sleep command.
-                save(
+                write_json_durable(
                     &self.directory.join("resume.json"),
                     &json!({"session_id":id,"command":self.command,"cwd":self.cwd}),
                 )?;
-                self.phase = "running";
+                self.phase = Phase::Running;
             }
             if event["event"] == "exited" {
                 self.clean_exit = true;
@@ -175,11 +180,11 @@ impl Supervisor {
             self.agent = None;
             self.deadline = None;
             self.phase = if self.sleep_requested && status.success() && self.clean_exit {
-                "sleeping"
+                Phase::Sleeping
             } else {
-                "failed"
+                Phase::Failed
             };
-            self.publish(if self.phase == "failed" {
+            self.publish(if self.phase == Phase::Failed {
                 Some("unexpected_agent_exit")
             } else {
                 None
@@ -190,7 +195,7 @@ impl Supervisor {
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
             self.deadline = None;
-            self.phase = "running";
+            self.phase = Phase::Running;
             // Retain the process. A later exit is classified only after wait confirms it.
             self.publish(Some("sleep_timeout"))?;
         }
@@ -199,7 +204,7 @@ impl Supervisor {
     fn command(&mut self, command: Value) -> io::Result<()> {
         match command["op"].as_str() {
             Some("sleep") => {
-                if self.phase != "running"
+                if self.phase != Phase::Running
                     || self.last["status"] != "idle"
                     || self.last["draft"] != ""
                     || self.session.is_none()
@@ -216,7 +221,7 @@ impl Supervisor {
                     return self.publish(Some("agent_input_closed"));
                 }
                 self.sleep_requested = true;
-                self.phase = "stopping";
+                self.phase = Phase::Stopping;
                 self.deadline = Some(Instant::now() + self.timeout);
                 self.publish(None)
             }
@@ -228,7 +233,7 @@ impl Supervisor {
                     return self.publish(Some("missing_session"));
                 }
                 if self.start().is_err() {
-                    self.phase = "failed";
+                    self.phase = Phase::Failed;
                     self.publish(Some("resume_start_failed"))
                 } else {
                     Ok(())
@@ -236,7 +241,7 @@ impl Supervisor {
             }
             Some("inspect") => self.publish(None),
             Some("submit" | "finish" | "draft" | "permission" | "approve") => {
-                if self.phase != "running" || self.sleep_requested {
+                if self.phase != Phase::Running || self.sleep_requested {
                     return self.publish(Some("agent_unavailable"));
                 }
                 if self.agent.as_mut().unwrap().send(&command).is_err() {
@@ -268,9 +273,13 @@ fn run() -> io::Result<()> {
     if command.is_empty() {
         return Err(io::Error::other("missing agent command"));
     }
-    fs::create_dir_all(&directory)?;
-    let lock = File::create(directory.join("supervisor.lock"))?;
-    lock.try_lock_exclusive()?;
+    // Creates the state directory; the flock dies with this process.
+    let _lock = try_acquire_lock(&directory.join("supervisor.lock")).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "another supervisor owns this state directory",
+        )
+    })?;
     let session = match fs::read(directory.join("resume.json")) {
         Ok(bytes) => {
             let saved: Value = serde_json::from_slice(&bytes)?;
@@ -295,7 +304,7 @@ fn run() -> io::Result<()> {
         cwd: std::env::current_dir()?,
         session,
         agent: None,
-        phase: "starting",
+        phase: Phase::Starting,
         last: Value::Null,
         clean_exit: false,
         sleep_requested: false,
@@ -308,7 +317,15 @@ fn run() -> io::Result<()> {
     thread::spawn(move || read_lines(io::stdin().lock(), send));
     loop {
         supervisor.observe()?;
-        match input.recv_timeout(Duration::from_millis(20)) {
+        // With no child to observe, nothing but a command can change state, and
+        // `recv_timeout` still wakes the moment one arrives. A sleeping
+        // supervisor therefore does not need the observability tick.
+        let tick = if supervisor.agent.is_none() {
+            IDLE_TICK
+        } else {
+            OBSERVE_TICK
+        };
+        match input.recv_timeout(tick) {
             Ok(command) => supervisor.command(command)?,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),

@@ -37,7 +37,6 @@ use zellij_agent_board::{
 type HostTerminal = Terminal<PtyBackend>;
 
 const POLL: Duration = Duration::from_millis(200);
-const SCAN_EVERY: Duration = Duration::from_secs(2);
 const TICK_EVERY: Duration = Duration::from_secs(1);
 
 struct App {
@@ -216,8 +215,7 @@ Log: {}
         }
         Some("--reconcile") => {
             init_logging();
-            daemon::ensure_running(&std::env::current_exe()?)?;
-            return daemon::refresh(std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default());
+            return request_refresh(&std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default());
         }
         Some("--daemon") => {
             init_logging();
@@ -227,14 +225,7 @@ Log: {}
         }
         Some("--daemon-stop") => {
             daemon::shutdown()?;
-            let deadline = Instant::now() + Duration::from_secs(30);
-            while daemon::data_dir().join("daemon.endpoint").exists() {
-                if Instant::now() >= deadline {
-                    return Err(io::Error::other("daemon shutdown timed out"));
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            return Ok(());
+            return daemon::wait_until_stopped(Duration::from_secs(30));
         }
         Some("--snapshot") => {
             println!("{}", serde_json::to_string(&daemon::snapshot()?)?);
@@ -322,7 +313,7 @@ impl App {
             jump_history: runtime_dir().join("last-jump.json"),
             view: Size::new(0, 0),
             pointer: None,
-            last_reconcile: now - SCAN_EVERY,
+            last_reconcile: now - daemon::SCAN_EVERY,
             last_tick: now,
             revision: 0,
             spool_mtime: None,
@@ -332,9 +323,10 @@ impl App {
     }
 
     fn bootstrap(&mut self) -> io::Result<()> {
-        daemon::ensure_running(&std::env::current_exe()?)?;
+        // First paint shows the committed snapshot, so the owner starts first.
+        daemon::ensure_running()?;
         self.load_model();
-        daemon::refresh(self.home.clone())?;
+        request_refresh(&self.home)?;
         self.last_reconcile = Instant::now();
         Ok(())
     }
@@ -397,16 +389,8 @@ impl App {
             }
             dirty |= self.take_store();
             let now = Instant::now();
-            if now.duration_since(self.last_reconcile) >= SCAN_EVERY {
-                let refreshed = daemon::refresh(self.home.clone());
-                if let Err(error) = refreshed {
-                    log::warn!("daemon_refresh_fail err={error}");
-                    if let Ok(exe) = std::env::current_exe() {
-                        if daemon::ensure_running(&exe).is_ok() {
-                            let _ = daemon::refresh(self.home.clone());
-                        }
-                    }
-                }
+            if now.duration_since(self.last_reconcile) >= daemon::SCAN_EVERY {
+                let _ = request_refresh(&self.home);
                 self.last_reconcile = Instant::now();
             }
             if dir_changed(&spool_dir(), &mut self.spool_mtime) {
@@ -727,6 +711,19 @@ enum DrainInput {
     Quit,
     Dirty,
     Idle,
+}
+
+/// Ask the owner for a scan. A board outlives the daemon it started, so a
+/// failed request restarts one and retries once.
+fn request_refresh(home: &str) -> io::Result<()> {
+    match daemon::refresh(home.to_owned()) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            log::warn!("daemon_refresh_fail err={error}");
+            daemon::ensure_running()?;
+            daemon::refresh(home.to_owned())
+        }
+    }
 }
 
 #[cfg(test)]

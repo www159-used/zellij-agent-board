@@ -31,19 +31,7 @@ pub fn stats_path() -> PathBuf {
             return PathBuf::from(explicit);
         }
     }
-    data_dir().join("usage.jsonl")
-}
-
-fn data_dir() -> PathBuf {
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("zellij-agent-board");
-        }
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join(".local/share/zellij-agent-board")
+    crate::protocol::data_dir().join("usage.jsonl")
 }
 
 fn append(path: &Path, line: &str) {

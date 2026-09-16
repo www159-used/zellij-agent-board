@@ -23,37 +23,41 @@ fn persist(path: &Path, value: &Value) -> io::Result<()> {
     File::open(parent)?.sync_all()
 }
 
-fn emit(
-    store: &Path,
-    event: &str,
-    session_id: &str,
-    instance: &str,
-    status: &str,
-    draft: &str,
-    extra: Value,
-) -> io::Result<()> {
-    let mut value = json!({
-        "event": event,
-        "session_id": session_id,
-        "instance_id": instance,
-        "pid": process::id(),
-        "status": status,
-        "draft": draft,
-    });
-    if let (Some(object), Some(map)) = (value.as_object_mut(), extra.as_object()) {
-        for (key, item) in map {
-            object.insert(key.clone(), item.clone());
+/// One session's event stream. Every line repeats the same identity and the
+/// current status, so the emitter owns them instead of each call site.
+struct Emitter {
+    store: PathBuf,
+    session_id: String,
+    instance: String,
+    status: String,
+    draft: String,
+}
+
+impl Emitter {
+    fn emit(&self, event: &str, extra: Value) -> io::Result<()> {
+        let mut value = json!({
+            "event": event,
+            "session_id": self.session_id,
+            "instance_id": self.instance,
+            "pid": process::id(),
+            "status": self.status,
+            "draft": self.draft,
+        });
+        if let (Some(object), Some(map)) = (value.as_object_mut(), extra.as_object()) {
+            for (key, item) in map {
+                object.insert(key.clone(), item.clone());
+            }
         }
+        let line = serde_json::to_string(&value)?;
+        let mut events = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.store.join("events.jsonl"))?;
+        writeln!(events, "{line}")?;
+        events.sync_all()?;
+        println!("{line}");
+        Ok(())
     }
-    let line = serde_json::to_string(&value)?;
-    let mut events = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(store.join("events.jsonl"))?;
-    writeln!(events, "{line}")?;
-    events.sync_all()?;
-    println!("{line}");
-    Ok(())
 }
 
 fn usage() -> ! {
@@ -130,15 +134,15 @@ fn run() -> io::Result<()> {
         json!({"session_id": session_id, "messages": []})
     };
     persist(&path, &session)?;
-    let mut status = "idle".to_owned();
-    let mut draft = String::new();
-    emit(
-        &store,
+    let mut emitter = Emitter {
+        store,
+        session_id,
+        instance,
+        status: "idle".to_owned(),
+        draft: String::new(),
+    };
+    emitter.emit(
         "ready",
-        &session_id,
-        &instance,
-        &status,
-        &draft,
         json!({
             "resumed": action == "resume",
             "messages": session["messages"].clone(),
@@ -153,15 +157,7 @@ fn run() -> io::Result<()> {
         let command: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(error) => {
-                emit(
-                    &store,
-                    "error",
-                    &session_id,
-                    &instance,
-                    &status,
-                    &draft,
-                    json!({"error": error.to_string()}),
-                )?;
+                emitter.emit("error", json!({"error": error.to_string()}))?;
                 continue;
             }
         };
@@ -170,54 +166,21 @@ fn run() -> io::Result<()> {
             op,
             &command,
             &mut session,
-            &mut status,
-            &mut draft,
+            &mut emitter,
             &path,
             &exit_mode,
             exit_delay,
         );
         match outcome {
-            OpResult::Emit(event) => emit(
-                &store,
-                event,
-                &session_id,
-                &instance,
-                &status,
-                &draft,
-                json!({}),
-            )?,
-            OpResult::Error(error) => emit(
-                &store,
-                "error",
-                &session_id,
-                &instance,
-                &status,
-                &draft,
-                json!({"error": error}),
-            )?,
-            OpResult::Ignored => emit(
-                &store,
-                "exit_ignored",
-                &session_id,
-                &instance,
-                &status,
-                &draft,
-                json!({}),
-            )?,
+            OpResult::Emit(event) => emitter.emit(event, json!({}))?,
+            OpResult::Error(error) => emitter.emit("error", json!({"error": error}))?,
+            OpResult::Ignored => emitter.emit("exit_ignored", json!({}))?,
             OpResult::Exit => break,
             OpResult::Crash => process::exit(17),
         }
     }
     persist(&path, &session)?;
-    emit(
-        &store,
-        "exited",
-        &session_id,
-        &instance,
-        &status,
-        &draft,
-        json!({}),
-    )?;
+    emitter.emit("exited", json!({}))?;
     Ok(())
 }
 
@@ -233,15 +196,14 @@ fn handle_op(
     op: &str,
     command: &Value,
     session: &mut Value,
-    status: &mut String,
-    draft: &mut String,
+    emitter: &mut Emitter,
     path: &Path,
     exit_mode: &str,
     exit_delay: f64,
 ) -> OpResult {
     match op {
         "submit" => {
-            if status != "idle" {
+            if emitter.status != "idle" {
                 return OpResult::Error("agent is not idle".into());
             }
             let Some(text) = command["text"].as_str() else {
@@ -254,12 +216,12 @@ fn handle_op(
             if let Err(error) = persist(path, session) {
                 return OpResult::Error(error.to_string());
             }
-            draft.clear();
-            *status = "working".into();
+            emitter.draft.clear();
+            emitter.status = "working".into();
             OpResult::Emit("submit")
         }
         "finish" => {
-            if status != "working" {
+            if emitter.status != "working" {
                 return OpResult::Error("agent is not working".into());
             }
             let Some(text) = command["text"].as_str() else {
@@ -272,35 +234,35 @@ fn handle_op(
             if let Err(error) = persist(path, session) {
                 return OpResult::Error(error.to_string());
             }
-            *status = "idle".into();
+            emitter.status = "idle".into();
             OpResult::Emit("finish")
         }
         "permission" => {
-            if status != "working" {
+            if emitter.status != "working" {
                 return OpResult::Error("agent is not working".into());
             }
-            *status = "waiting".into();
+            emitter.status = "waiting".into();
             OpResult::Emit("permission")
         }
         "approve" => {
-            if status != "waiting" {
+            if emitter.status != "waiting" {
                 return OpResult::Error("no pending permission".into());
             }
-            *status = "working".into();
+            emitter.status = "working".into();
             OpResult::Emit("approve")
         }
         "draft" => {
-            if status != "idle" {
+            if emitter.status != "idle" {
                 return OpResult::Error("draft requires idle agent and string text".into());
             }
             let Some(text) = command["text"].as_str() else {
                 return OpResult::Error("draft requires idle agent and string text".into());
             };
-            *draft = text.to_owned();
+            emitter.draft = text.to_owned();
             OpResult::Emit("draft")
         }
         "exit" => {
-            if status != "idle" || !draft.is_empty() {
+            if emitter.status != "idle" || !emitter.draft.is_empty() {
                 return OpResult::Error("exit requires idle agent without a draft".into());
             }
             match exit_mode {
