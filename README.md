@@ -79,12 +79,11 @@ make build
 make e2e
 make replay SCENE=e2e/scenes/slash-search-moves.scene
 make e2e-zellij
-make fault SCENARIO=board-launch-focus REPEAT=5
 ```
 
-`make check` runs Rust formatting, Clippy, Rust tests (including board scenes), hook tests, and the Zellij harness unit tests. `make fmt` formats Rust. `make run`, `make stats`, `make scan`, `make reconcile`, and `make catalog` expose the host tools. Hook payloads can be replayed with `make hook EVENT=stop < payload.json`.
+`make check` runs Rust formatting, Clippy, Rust tests (including board scenes and the daemon suite), and hook tests. `make fmt` formats Rust. `make run`, `make stats`, `make scan`, `make reconcile`, and `make catalog` expose the host tools. Hook payloads can be replayed with `make hook EVENT=stop < payload.json`.
 
-`e2e/scenes/` are host scenes: each input paints a frame at the declared size; `expect` checkpoints read that frame. `board-tui --replay` runs them without a TTY. `make e2e-zellij` starts a throwaway Zellij session, dumps the board footer chrome, and checks that `q` closes `board-tui`. A headless session cannot grant plugin permissions, so the TUI is started directly with `new-pane`; plugin loading is best effort. The script skips if `zellij` is absent; set `ZAB_E2E_ZELLIJ_REQUIRED=1` to fail instead. Permission granting, Alt+q toggling, and cross-session jumps still need interactive verification.
+`e2e/scenes/` are host scenes: each input paints a frame at the declared size; `expect` checkpoints read that frame. `board-tui --replay` runs them without a TTY. `make e2e-zellij` (`cargo test -p e2e-zellij`) runs real attached-PTY Zellij scenarios. Missing Zellij or failed setup is an error. See [the E2E guide](e2e/zellij/README.md).
 
 To package a release locally, build for the desired Rust target and then package the binaries:
 
@@ -108,9 +107,3 @@ board-tui --stats
 Each opening gets a fresh random visit ID. Version 2 records mapped input actions, changed board snapshots, jump requests, pipe results, and normal/error exits. Typed text, titles, paths, and real session/pane identifiers are omitted; temporary row/session IDs only last for that visit. There is no persistent installation ID. Older v1 logs may contain session names; they are not rewritten.
 
 The summary derives mode entries from state transitions and reports operation counts, pipe outcomes, and visits missing a close event. Pipe success does not confirm focus. Logs currently append without rotation. See [the collection and analysis design](docs/design/usage-analytics.md) for fields and limitations.
-
-`make fault` runs repository-local lifecycle experiments through
-a real PTY-attached client. It covers native switching, same-session board
-focus, and the production cross-session jump path. See
-[`e2e/zellij/README.md`](e2e/zellij/README.md) for scenarios, Holds, exact
-Zellij version selection, and failure artifacts.

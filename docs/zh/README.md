@@ -77,12 +77,11 @@ make build
 make e2e
 make replay SCENE=e2e/scenes/slash-search-moves.scene
 make e2e-zellij
-make fault SCENARIO=board-launch-focus REPEAT=5
 ```
 
-`make check` 运行 Rust 格式检查、Clippy、Rust 测试（含面板场景）、hook 测试和 Zellij 测试框架的单元测试。`make fmt` 格式化 Rust。宿主工具对应 `make run`、`make stats`、`make scan`、`make reconcile` 和 `make catalog`；可用 `make hook EVENT=stop < payload.json` 回放 hook。
+`make check` 运行 Rust 格式检查、Clippy、Rust 测试（含面板场景与 daemon 套件）和 hook 测试。`make fmt` 格式化 Rust。宿主工具对应 `make run`、`make stats`、`make scan`、`make reconcile` 和 `make catalog`；可用 `make hook EVENT=stop < payload.json` 回放 hook。
 
-`e2e/scenes/` 是宿主场景：每步按声明尺寸绘制当前帧，`expect` 检查点只看这一帧。`board-tui --replay` 不需要 TTY。`make e2e-zellij` 在一次性 session 中检查底栏绘制，再发 `q` 确认 TUI 关闭。无头 session 无法授予插件权限，因此直接通过 `new-pane` 启动 TUI，WASM 加载允许跳过。没有 `zellij` 时脚本跳过；设 `ZAB_E2E_ZELLIJ_REQUIRED=1` 可强制失败。授权、Alt+q 开关和跨会话跳转仍需交互验证。
+`e2e/scenes/` 是宿主场景：每步按声明尺寸绘制当前帧，`expect` 检查点只看这一帧。`board-tui --replay` 不需要 TTY。`make e2e-zellij`（`cargo test -p e2e-zellij`）跑真实附着 PTY 的 Zellij 场景。缺少 Zellij 或环境启动失败都会报错。见 [E2E 指南](../../e2e/zellij/README.md)。
 
 本地打包先按 Rust target 构建，再打包并验证：
 

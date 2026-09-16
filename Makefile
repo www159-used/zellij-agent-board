@@ -22,9 +22,9 @@ EVENT ?=
 # Pass values through the environment so paths and arguments stay quoted.
 export TARGET VERSION WASM TUI OUT_DIR ASSET_DIR ARCHIVE ADAPTER SCENE SCENARIO REPEAT EVENT
 
-.PHONY: help fmt fmt-check lint check test test-rust test-hooks test-harness \
+.PHONY: help fmt fmt-check lint check test test-rust test-hooks \
 	build wasm tui install install-hooks run stats scan reconcile catalog hook \
-	e2e replay e2e-zellij fault package package-wasm test-package clean
+	e2e replay e2e-zellij package package-wasm test-package clean
 
 help: ## List commands and their parameters
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' Makefile
@@ -40,25 +40,22 @@ lint: ## Run Rust Clippy with warnings as errors
 
 check: fmt-check lint test ## Run formatting, lint, and all unit tests
 
-test: test-rust test-hooks test-harness ## Run Rust, hook, and Zellij harness unit tests
+test: test-rust test-hooks ## Run Rust and hook unit tests
 
-test-rust: ## Run Rust unit tests and board scenes
-	$(CARGO) test --locked --lib --bin board-tui --test daemon
+test-rust: ## Run Rust unit tests, board scenes, and daemon tests
+	$(CARGO) test --locked --lib --bin board-tui --bin agent-supervisor --test daemon
 
 test-hooks: ## Test hook scripts with isolated state
 	$(PYTHON) -B scripts/test-hooks.py
-
-test-harness: ## Test the Zellij harness without launching Zellij
-	PYTHONPATH=e2e/zellij $(PYTHON) -B -m unittest discover -s e2e/zellij/harness -p 'test_*.py'
 
 build: wasm tui ## Build the release WASM bridge and host TUI
 
 wasm: ## Build the WASM bridge
 	$(CARGO) build --locked --target wasm32-wasip1 --release --features plugin --bin zellij-agent-board
 
-tui: ## Build the host TUI (optional TARGET=Rust-triple)
+tui: ## Build the host TUI and agent-supervisor (optional TARGET=Rust-triple)
 	@set --; if [[ -n "$$TARGET" ]]; then set -- --target "$$TARGET"; fi; \
-	$(CARGO) build --locked --release --bin board-tui "$$@"
+	$(CARGO) build --locked --release --bin board-tui --bin agent-supervisor "$$@"
 
 # Release bundles install their own binaries without needing Rust.
 ifeq ($(and $(wildcard zellij-agent-board.wasm),$(wildcard board-tui)),)
@@ -95,13 +92,8 @@ e2e: ## Run all board scenes without a TTY
 replay: ## Replay one board scene (SCENE=path.scene)
 	$(CARGO) run --locked --bin board-tui -- --replay "$$SCENE"
 
-e2e-zellij: build ## Check board startup and dismissal in an isolated Zellij session
-	bash scripts/e2e-zellij.sh "$$WASM" "$$TUI"
-
-fault: build ## Run Zellij lifecycle experiments (optional SCENARIO=name REPEAT=count)
-	@set --; if [[ -n "$$SCENARIO" ]]; then set -- "$$SCENARIO"; fi; \
-	if [[ -n "$$REPEAT" ]]; then set -- "$$@" "$$REPEAT"; fi; \
-	ZAB_FAULT_WASM="$$WASM" ZAB_FAULT_TUI="$$TUI" bash scripts/zab-fault.sh "$$@"
+e2e-zellij: ## Real attached-PTY Zellij scenarios (`cargo test -p e2e-zellij`)
+	bash scripts/e2e-zellij.sh
 
 package: ## Bundle prebuilt binaries (VERSION=vX.Y.Z TARGET=triple, optional WASM/TUI/OUT_DIR)
 	@test -n "$$VERSION" -a -n "$$TARGET" || { echo 'usage: make package VERSION=vX.Y.Z TARGET=triple' >&2; exit 2; }
