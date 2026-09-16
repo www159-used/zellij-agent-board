@@ -8,14 +8,13 @@ if [[ $# -lt 4 || $# -gt 5 ]]; then
 fi
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+. "$root/scripts/lib/release.sh"
 version=$1
 target=$2
 wasm=$3
 tui=$4
 out_dir=${5:-"$root/target/packages"}
-case "$version-$target" in
-  *[!a-zA-Z0-9._-]*) echo "invalid version or target" >&2; exit 2 ;;
-esac
+require_safe_name "$version-$target" || exit 2
 mkdir -p "$out_dir"
 out_dir="$(cd "$out_dir" && pwd)"
 work_dir="$(mktemp -d)"
@@ -36,10 +35,6 @@ chmod +x "$bundle/scripts/"*.sh "$bundle/scripts/install-hooks.py"
 COPYFILE_DISABLE=1 tar -czf "$out_dir/$name.tar.gz" -C "$work_dir" "$name"
 (
   cd "$out_dir"
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$name.tar.gz" >"$name.tar.gz.sha256"
-  else
-    shasum -a 256 "$name.tar.gz" >"$name.tar.gz.sha256"
-  fi
+  sha256_line "$name.tar.gz" >"$name.tar.gz.sha256"
 )
 echo "$out_dir/$name.tar.gz"

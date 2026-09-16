@@ -109,14 +109,12 @@ package: ## Bundle prebuilt binaries (VERSION=vX.Y.Z TARGET=triple, optional WAS
 
 package-wasm: ## Package a prebuilt standalone WASM and checksum (VERSION=vX.Y.Z)
 	@test -n "$$VERSION" || { echo 'usage: make package-wasm VERSION=vX.Y.Z' >&2; exit 2; }
-	@case "$$VERSION" in *[!a-zA-Z0-9._-]*) echo 'invalid version' >&2; exit 2;; esac; \
+	@. "$(CURDIR)/scripts/lib/release.sh"; \
+	require_safe_name "$$VERSION" || exit 2; \
 	mkdir -p "$$ASSET_DIR"; \
 	cp "$$WASM" "$$ASSET_DIR/zellij-agent-board-$$VERSION.wasm" && \
 	cd "$$ASSET_DIR" && \
-	if command -v sha256sum >/dev/null 2>&1; then \
-	  sha256sum "zellij-agent-board-$$VERSION.wasm"; \
-	else shasum -a 256 "zellij-agent-board-$$VERSION.wasm"; fi \
-	> "zellij-agent-board-$$VERSION.wasm.sha256"
+	sha256_line "zellij-agent-board-$$VERSION.wasm" > "zellij-agent-board-$$VERSION.wasm.sha256"
 
 test-package: ## Test installation from an archive (ARCHIVE=path, or VERSION and TARGET)
 	bash scripts/test-release-package.sh "$$ARCHIVE"
