@@ -103,6 +103,8 @@ struct State {
     tui_id: Option<u32>,
     tui_visible: bool,
     tui_attempts: u8,
+    /// Set by `remember_launch_focus`, which every `SessionUpdate` runs right
+    /// after `take_session_name`, so it implies the session name is known.
     launch_context_received: bool,
     launch_focus: Option<u32>,
     bridge_hidden: bool,
@@ -323,12 +325,6 @@ impl State {
         self.tui_id.is_some() || self.find_tui_pane().is_some()
     }
 
-    fn session_known(&self) -> bool {
-        self.current_session
-            .as_deref()
-            .is_some_and(|name| !name.is_empty())
-    }
-
     fn take_session_name(&mut self, name: Option<&str>) {
         let Some(name) = name.filter(|name| !name.is_empty()) else {
             return;
@@ -360,7 +356,7 @@ impl State {
             self.tui_up(),
             self.tui_attempts,
             from_timer,
-            self.session_known() && self.launch_context_received,
+            self.launch_context_received,
         ) {
             return;
         }

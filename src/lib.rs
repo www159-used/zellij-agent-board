@@ -678,10 +678,11 @@ impl Board {
         // Activity rows change document offsets when crossing the width
         // threshold. An old title offset can now point at a session header.
         if layout_changed {
-            self.scroll_anchor = self.agent_title_line(self.selected, self.wide_list);
+            self.reveal();
+        } else {
+            // A resize may leave the cursor outside the now-smaller window.
+            self.clamp_view();
         }
-        // A resize may leave the cursor outside the now-smaller window.
-        self.clamp_view();
     }
 
     /// Agent indices with any line in view, `[start, end)`. Used for hint

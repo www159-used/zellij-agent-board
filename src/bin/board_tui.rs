@@ -475,12 +475,11 @@ impl App {
         // dispatch so history survives even if this process never returns.
         persist_last_jump(&self.jump_history, session, pane_id);
         let outcome = (self.jump_sender)(session, pane_id, via);
+        // Another board may have written its own jump while the pipe was in
+        // flight; only roll back the entry that is still ours.
         if outcome != "ok"
             && load_last_jump(&self.jump_history)
-                == Some(AgentId {
-                    session: session.into(),
-                    pane_id,
-                })
+                .is_some_and(|id| id.session == session && id.pane_id == pane_id)
         {
             if let Some(id) = previous {
                 persist_last_jump(&self.jump_history, &id.session, id.pane_id);
