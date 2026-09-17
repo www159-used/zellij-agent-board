@@ -319,7 +319,8 @@ impl Board {
     }
 
     /// Mark sleeping locally (keeps the row when the process exits) and ask
-    /// the host to send `{"op":"sleep"}` into the supervised pane.
+    /// the host to inject the agent's exit into the pane. The TUI reverts
+    /// this row if the daemon rejects the request.
     pub fn sleep_selected(&mut self) -> Action {
         let Some(agent) = self.agents.get(self.selected) else {
             return Action::None;

@@ -48,14 +48,47 @@ pub fn sessions_dir(config: &Path) -> PathBuf {
 }
 
 /// Load the registry entry for a live Claude pid, if present and valid.
+/// The filename is the live pid; the body `pid` can lag after `/resume`.
 pub fn load_session_for_pid(config: &Path, pid: u32) -> Option<ClaudeSession> {
     let path = sessions_dir(config).join(format!("{pid}.json"));
     let bytes = fs::read(&path).ok()?;
-    let session: ClaudeSession = serde_json::from_slice(&bytes).ok()?;
-    if session.pid != pid || session.session_id.is_empty() {
+    let mut session: ClaudeSession = serde_json::from_slice(&bytes).ok()?;
+    if session.session_id.is_empty() {
         return None;
     }
+    session.pid = pid;
     Some(session)
+}
+
+/// Find a registry row for any of `pids`, including Linux children.
+///
+/// The board scan keeps the lowest pid in a pane (the wrapper). Real Claude
+/// writes `sessions/<node-pid>.json` on the child, so looking at only the
+/// wrapper leaves status empty and `z` used to reject the pane as not
+/// sleepable.
+pub fn load_session_for_pids(config: &Path, pids: &[u32]) -> Option<ClaudeSession> {
+    let mut search: Vec<u32> = pids.to_vec();
+    for pid in pids {
+        search.extend(child_pids(*pid));
+    }
+    search.sort_unstable();
+    search.dedup();
+    search
+        .iter()
+        .find_map(|pid| load_session_for_pid(config, *pid))
+}
+
+/// Direct children of `pid`. Empty on macOS (no `/proc`); the pane's other
+/// scanned pids still cover an `exec -a claude` child.
+fn child_pids(pid: u32) -> Vec<u32> {
+    let path = format!("/proc/{pid}/task/{pid}/children");
+    fs::read_to_string(path)
+        .map(|text| {
+            text.split_whitespace()
+                .filter_map(|word| word.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -93,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_or_mismatched_pid() {
+    fn filename_pid_wins_when_body_lags() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = sessions_dir(dir.path());
         fs::create_dir_all(&sessions).unwrap();
@@ -102,7 +135,25 @@ mod tests {
             r#"{"sessionId":"abc","pid":99,"cwd":"/tmp","status":"idle"}"#,
         )
         .unwrap();
-        assert!(load_session_for_pid(dir.path(), 1).is_none());
-        assert!(load_session_for_pid(dir.path(), 99).is_none());
+        let session = super::load_session_for_pid(dir.path(), 1).unwrap();
+        assert_eq!(session.session_id, "abc");
+        assert_eq!(session.pid, 1);
+        assert!(super::load_session_for_pid(dir.path(), 99).is_none());
+    }
+
+    #[test]
+    fn load_session_for_pids_finds_the_child_registry_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = sessions_dir(dir.path());
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            sessions.join("1010.json"),
+            r#"{"sessionId":"sid-child","pid":1010,"cwd":"/tmp","status":"idle"}"#,
+        )
+        .unwrap();
+        let session = super::load_session_for_pids(dir.path(), &[1000, 1010]).unwrap();
+        assert_eq!(session.session_id, "sid-child");
+        assert_eq!(session.pid, 1010);
+        assert!(super::load_session_for_pids(dir.path(), &[1000]).is_none());
     }
 }

@@ -178,6 +178,11 @@ fn run() -> io::Result<()> {
             break;
         }
         let submit = byte[0] == b'\r' || (submit_on_lf && byte[0] == b'\n');
+        if byte[0] == 0x03 {
+            // Ctrl+C: the daemon clears a draft before typing `/exit`.
+            line.clear();
+            continue;
+        }
         if !submit {
             // Ignore a stray `\n` in raw mode; buffer everything else.
             if byte[0] != b'\n' {

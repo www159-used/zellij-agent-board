@@ -506,12 +506,16 @@ impl App {
             }
             Action::Sleep { session, pane_id } => {
                 log_mode_change(key, &before, &self.board);
-                send_control_op(&session, pane_id, "sleep");
+                if !send_control_op(&session, pane_id, "sleep") {
+                    revert_control_op(&mut self.board, &session, pane_id, "sleep");
+                }
                 Loop::Changed
             }
             Action::Wake { session, pane_id } => {
                 log_mode_change(key, &before, &self.board);
-                send_control_op(&session, pane_id, "resume");
+                if !send_control_op(&session, pane_id, "resume") {
+                    revert_control_op(&mut self.board, &session, pane_id, "resume");
+                }
                 Loop::Changed
             }
             Action::None => {
@@ -586,11 +590,15 @@ impl App {
                         self.finish_jump(&before, &session, pane_id, "click")
                     }
                     Action::Sleep { session, pane_id } => {
-                        send_control_op(&session, pane_id, "sleep");
+                        if !send_control_op(&session, pane_id, "sleep") {
+                            revert_control_op(&mut self.board, &session, pane_id, "sleep");
+                        }
                         Loop::Changed
                     }
                     Action::Wake { session, pane_id } => {
-                        send_control_op(&session, pane_id, "resume");
+                        if !send_control_op(&session, pane_id, "resume") {
+                            revert_control_op(&mut self.board, &session, pane_id, "resume");
+                        }
                         Loop::Changed
                     }
                     Action::None => Loop::Changed,
@@ -1229,9 +1237,9 @@ fn send_jump(session: &str, pane_id: u32, via: &str) -> &'static str {
 
 /// Drive sleep/resume through the daemon, which owns the relationship table
 /// and injects into the agent's pane. A rejection (busy/unknown/no record)
-/// comes back as an error and is logged; the optimistic row already reflects
-/// the request and a later scan reconciles the true phase.
-fn send_control_op(session: &str, pane_id: u32, op: &str) {
+/// comes back as an error; the caller reverts the optimistic row so `z`
+/// cannot leave the board showing sleeping while Claude is still running.
+fn send_control_op(session: &str, pane_id: u32, op: &str) -> bool {
     let id = AgentId {
         session: session.to_owned(),
         pane_id,
@@ -1243,7 +1251,23 @@ fn send_control_op(session: &str, pane_id: u32, op: &str) {
     };
     if let Err(err) = result {
         log::warn!("control_op_fail op={op} session={session} pane={pane_id} err={err}");
+        return false;
     }
+    true
+}
+
+fn revert_control_op(board: &mut Board, session: &str, pane_id: u32, op: &str) {
+    let id = AgentId {
+        session: session.to_owned(),
+        pane_id,
+    };
+    let event = if op == "sleep" {
+        "agentWake"
+    } else {
+        "agentSleep"
+    };
+    let at = (board.wall_now > 0).then_some(board.wall_now);
+    board.apply_hook_event(&id, event, "", at, None);
 }
 
 #[derive(Clone, Copy)]
