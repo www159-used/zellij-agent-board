@@ -9,15 +9,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::agent::{AgentId, PanePlace};
-use crate::database::{HostDatabase, Snapshot};
+use crate::database::{HostDatabase, SleepScan, Snapshot};
 use crate::protocol::{ensure_state, runtime_dir};
 use crate::reconcile::{refresh_sessions, sessions_from_scan, try_acquire_lock};
-use crate::scan::{scan_host_text, scan_places_for};
+use crate::scan::{scan_host_text, scan_places_for, scan_sleep_observations};
 use crate::store::write_snapshot;
 
 pub use crate::protocol::data_dir;
 
-type ScanResult = (String, Vec<(AgentId, PanePlace)>);
+type ScanResult = (String, Vec<(AgentId, PanePlace)>, SleepScan);
 
 /// A running scan worker is reaped from this tick; an idle daemon only wakes
 /// for client traffic, so it can afford a long one.
@@ -31,6 +31,8 @@ pub const SCAN_EVERY: Duration = Duration::from_secs(2);
 pub enum Request {
     Snapshot,
     Refresh { home: String },
+    Sleep { id: AgentId },
+    Resume { id: AgentId },
     Shutdown,
 }
 
@@ -49,6 +51,17 @@ pub fn snapshot() -> io::Result<Snapshot> {
 
 pub fn refresh(home: String) -> io::Result<()> {
     request_at(&data_dir(), Request::Refresh { home }).map(|_| ())
+}
+
+/// Ask the daemon to sleep the agent in `id`'s pane (process out, pane kept).
+/// A rejection (busy/unknown/no record) surfaces as an error.
+pub fn sleep(id: AgentId) -> io::Result<()> {
+    request_at(&data_dir(), Request::Sleep { id }).map(|_| ())
+}
+
+/// Ask the daemon to resume the exact conversation in `id`'s pane.
+pub fn resume(id: AgentId) -> io::Result<()> {
+    request_at(&data_dir(), Request::Resume { id }).map(|_| ())
 }
 
 pub fn shutdown() -> io::Result<()> {
@@ -159,17 +172,23 @@ fn pump(
                             && last_refresh.is_none_or(|last| last.elapsed() >= SCAN_EVERY)
                         {
                             *last_refresh = Some(Instant::now());
+                            // Sessions that hold sleep rows must be re-probed even
+                            // with no live agent, so a closed pane can be pruned.
+                            let record_sessions = record_sessions(db);
                             *worker = Some(thread::spawn(move || {
                                 let scan = scan_host_text();
                                 let mut places = Vec::new();
                                 for session in refresh_sessions(&sessions_from_scan(&scan), &home) {
                                     places.extend(scan_places_for(&[session]));
                                 }
-                                (scan, places)
+                                let sleep = scan_sleep_observations(&record_sessions);
+                                (scan, places, sleep)
                             }));
                         }
                         Ok(None)
                     }
+                    Request::Sleep { id } => control(db, Op::Sleep, &id),
+                    Request::Resume { id } => control(db, Op::Resume, &id),
                     Request::Shutdown => {
                         stop = true;
                         Ok(None)
@@ -188,9 +207,52 @@ fn pump(
     }
 }
 
+enum Op {
+    Sleep,
+    Resume,
+}
+
+/// Run one control op on the database owner thread, injecting into the pane
+/// via the real Zellij seam. A rejection becomes an error carrying its reason
+/// (e.g. `not_sleepable`); acceptance acknowledges with no snapshot.
+fn control(db: &HostDatabase, op: Op, id: &AgentId) -> io::Result<Option<Snapshot>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let inject = &crate::sleep::zellij_injector;
+    let outcome = match op {
+        Op::Sleep => crate::sleep::sleep(db, inject, now, id)?,
+        Op::Resume => crate::sleep::resume(db, inject, now, id)?,
+    };
+    match outcome {
+        crate::sleep::Outcome::Accepted => Ok(None),
+        crate::sleep::Outcome::Rejected(reason) => Err(io::Error::other(reason)),
+    }
+}
+
+/// Unique sessions that currently hold sleep rows; used to probe panes for
+/// agents that have gone to sleep and no longer appear in a live scan.
+fn record_sessions(db: &HostDatabase) -> Vec<String> {
+    let mut sessions: Vec<String> = db
+        .sleep_records()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, _)| id.session)
+        .collect();
+    sessions.sort();
+    sessions.dedup();
+    sessions
+}
+
 fn commit(db: &HostDatabase, job: thread::JoinHandle<ScanResult>) -> io::Result<()> {
-    let (scan, places) = job
+    let (scan, places, sleep) = job
         .join()
         .map_err(|_| io::Error::other("scan worker panicked"))?;
-    db.publish(&scan, places)
+    db.publish(&scan, places)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    db.reconcile_sleep(&sleep, now)
 }

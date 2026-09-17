@@ -120,8 +120,10 @@ impl Status {
             "idleWait" => Self::IdleWait,
             "stopFailure" => Self::Failed,
             "postToolUseFailure" => Self::Working,
-            // Board-owned: supervisor sleep, not a Cursor catalog event.
+            // Board-owned: daemon sleep, not a Cursor catalog event.
             "agentSleep" => Self::Sleeping,
+            // Manual / daemon wake before the next live hook names status.
+            "agentWake" => Self::Found,
             _ => return None,
         })
     }
@@ -169,6 +171,7 @@ mod tests {
             Status::from_cursor_hook("agentSleep"),
             Some(Status::Sleeping)
         );
+        assert_eq!(Status::from_cursor_hook("agentWake"), Some(Status::Found));
         assert_eq!(Status::Working.icon(), "●");
         assert_eq!(Status::Working.color_level(), 0);
         assert!(!Status::Working.is_error());

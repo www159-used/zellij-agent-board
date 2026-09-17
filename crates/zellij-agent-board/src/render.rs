@@ -170,9 +170,13 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
             key("wheel  C-e  C-y"),
             Span::raw("scroll, cursor stays"),
         ]),
-        Line::from(vec![key("s"), Span::raw("search")]),
+        Line::from(vec![key("s"), Span::raw("flash tips")]),
         Line::from(vec![key("/  n  N"), Span::raw("find / next / prev")]),
         Line::from(vec![key("p  Tab"), Span::raw("picker / tip jump")]),
+        Line::from(vec![
+            key("z  Z"),
+            Span::raw("sleep / wake agent (supervised)"),
+        ]),
         Line::from(vec![key("q  Esc"), Span::raw("close")]),
         Line::from(vec![key("Alt+q"), Span::raw("toggle board")]),
         Line::from(vec![key("!"), Span::raw("done, not opened yet")]),
@@ -718,7 +722,8 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
             &[
                 ("j/k", "move"),
                 ("e", "go"),
-                ("s", "search"),
+                ("s", "tips"),
+                ("z", "sleep"),
                 ("/", "find"),
                 ("q", "close"),
                 ("?", "more"),
@@ -1547,7 +1552,8 @@ mod tests {
         let text = painted(&board, 12, 80, "ww");
         assert!(text.contains(" ww "));
         assert!(text.contains(" go "));
-        assert!(text.contains(" search "));
+        assert!(text.contains(" tips "));
+        assert!(text.contains(" sleep "));
         assert!(text.contains(" more "));
         assert!(!text.contains("hjkl"));
         assert!(!text.contains("^d"));

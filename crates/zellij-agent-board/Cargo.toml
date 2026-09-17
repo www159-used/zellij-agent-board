@@ -45,10 +45,6 @@ doctest = false
 name = "board-tui"
 path = "src/bin/board_tui.rs"
 
-[[bin]]
-name = "agent-supervisor"
-path = "src/bin/agent_supervisor.rs"
-
 [lints.rust]
 unsafe_code = "deny"
 

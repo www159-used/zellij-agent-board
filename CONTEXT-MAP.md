@@ -9,6 +9,6 @@
 ## Relationships
 
 - **Scene E2E → Board**: scenes exercise `Board` and paint through `run_scene`
-- **Zellij E2E → Board**: scenarios exercise the board and mock-agent lifecycle
-  through a real Zellij client; existence still comes only from Scan
+- **Zellij E2E → Board**: scenarios exercise the board and daemon-managed
+  claude lifecycle through a real Zellij client; existence still comes only from Scan
 - **Board ↛ E2E crates**: the dashboard does not know about the test harnesses

@@ -106,5 +106,5 @@ migration and preservation of other sessions' titles.
 
 Real Zellij regression scenarios exercise the production board/daemon path.
 Their teardown closes the panes, stops the isolated daemon, and only then
-captures state; a failing case keeps its isolate (PTY transcript, supervisor
-status files, quiesced database) under `target/e2e-zellij/` for CI upload.
+captures state; a failing case keeps its isolate (PTY transcript, claude
+session files, quiesced database) under `target/e2e-zellij/` for CI upload.

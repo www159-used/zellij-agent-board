@@ -204,6 +204,8 @@ board-tui — host dashboard for zellij-agent-board
   board-tui --daemon-stop           stop the state owner
   board-tui --snapshot              print the committed snapshot as JSON
   board-tui --reconcile             request a background refresh
+  board-tui --sleep SESSION PANE    sleep an agent (pane kept, process exits)
+  board-tui --resume SESSION PANE   resume a slept agent in place
   board-tui --replay FILE.scene     run an e2e scene; no TTY
 
 Log: {}
@@ -230,6 +232,23 @@ Log: {}
         Some("--snapshot") => {
             println!("{}", serde_json::to_string(&daemon::snapshot()?)?);
             return Ok(());
+        }
+        Some(op @ ("--sleep" | "--resume")) => {
+            init_logging();
+            let id = parse_control_target(&args[1..])?;
+            let result = if op == "--sleep" {
+                daemon::sleep(id)
+            } else {
+                daemon::resume(id)
+            };
+            // A rejection (busy/unknown/no record) is a normal outcome here.
+            return match result {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    eprintln!("{}: {error}", &op[2..]);
+                    Ok(())
+                }
+            };
         }
         Some("--replay") => {
             let Some(path) = args.get(1) else {
@@ -276,6 +295,25 @@ fn parse_launch_focus(args: &[String]) -> io::Result<AgentId> {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "board-tui --focus SESSION PANE",
+        )
+    };
+    let [session, pane] = args else {
+        return Err(invalid());
+    };
+    if session.is_empty() {
+        return Err(invalid());
+    }
+    Ok(AgentId {
+        session: session.clone(),
+        pane_id: pane.parse().map_err(|_| invalid())?,
+    })
+}
+
+fn parse_control_target(args: &[String]) -> io::Result<AgentId> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "board-tui --sleep|--resume SESSION PANE",
         )
     };
     let [session, pane] = args else {
@@ -466,6 +504,16 @@ impl App {
             Action::Jump { session, pane_id } => {
                 self.finish_jump(&before, &session, pane_id, "key")
             }
+            Action::Sleep { session, pane_id } => {
+                log_mode_change(key, &before, &self.board);
+                send_control_op(&session, pane_id, "sleep");
+                Loop::Changed
+            }
+            Action::Wake { session, pane_id } => {
+                log_mode_change(key, &before, &self.board);
+                send_control_op(&session, pane_id, "resume");
+                Loop::Changed
+            }
             Action::None => {
                 log_mode_change(key, &before, &self.board);
                 Loop::Changed
@@ -536,6 +584,14 @@ impl App {
                 match action {
                     Action::Jump { session, pane_id } => {
                         self.finish_jump(&before, &session, pane_id, "click")
+                    }
+                    Action::Sleep { session, pane_id } => {
+                        send_control_op(&session, pane_id, "sleep");
+                        Loop::Changed
+                    }
+                    Action::Wake { session, pane_id } => {
+                        send_control_op(&session, pane_id, "resume");
+                        Loop::Changed
                     }
                     Action::None => Loop::Changed,
                     Action::Dismiss => {
@@ -1081,6 +1137,8 @@ fn map_key(event: KeyEvent, hinting: bool, searching: bool) -> Option<Key> {
         KeyCode::Char('?') if !typing => Some(Key::ToggleHelp),
         KeyCode::Backspace if typing => Some(Key::Backspace),
         KeyCode::Char('s') if !typing => Some(Key::StartHint),
+        KeyCode::Char('z') if !typing => Some(Key::SleepSelected),
+        KeyCode::Char('Z') if !typing => Some(Key::WakeSelected),
         KeyCode::Char('/') if !typing => Some(Key::StartSearch),
         KeyCode::Char('p') if !typing => Some(Key::StartPicker),
         KeyCode::Char('n') if !typing => Some(Key::NextMatch),
@@ -1166,6 +1224,25 @@ fn send_jump(session: &str, pane_id: u32, via: &str) -> &'static str {
             log::warn!("jump_pipe_fail to={session} pane={pane_id} via={via} err={err}");
             "spawn_error"
         }
+    }
+}
+
+/// Drive sleep/resume through the daemon, which owns the relationship table
+/// and injects into the agent's pane. A rejection (busy/unknown/no record)
+/// comes back as an error and is logged; the optimistic row already reflects
+/// the request and a later scan reconciles the true phase.
+fn send_control_op(session: &str, pane_id: u32, op: &str) {
+    let id = AgentId {
+        session: session.to_owned(),
+        pane_id,
+    };
+    log::info!("control_op op={op} session={session} pane={pane_id}");
+    let result = match op {
+        "sleep" => daemon::sleep(id),
+        _ => daemon::resume(id),
+    };
+    if let Err(err) = result {
+        log::warn!("control_op_fail op={op} session={session} pane={pane_id} err={err}");
     }
 }
 

@@ -2,18 +2,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use crate::agent::{MockAgent, MockAgentOptions};
 use crate::oracle::Observation;
 use crate::pty::PtyClient;
 use crate::util::{
-    err, pane_blob, parse_pane_id, require_artifact, resolve_zellij, shell_quote, strip_ansi,
+    err, pane_blob, parse_pane_id, require_artifact, resolve_zellij, strip_ansi,
     workspace_target_dir,
 };
 
@@ -21,8 +20,7 @@ const NAMED_PANE_KEYS: &[&str] = &["title", "pane_command", "terminal_command", 
 
 pub struct Zellij {
     zellij: PathBuf,
-    supervisor: PathBuf,
-    mock_agent: PathBuf,
+    fake_claude: PathBuf,
     wasm: PathBuf,
     tui: PathBuf,
     isolate: PathBuf,
@@ -47,10 +45,8 @@ impl Zellij {
         } else {
             "release"
         };
-        let supervisor = target.join(profile).join("agent-supervisor");
-        require_artifact(&supervisor, "agent-supervisor")?;
-        let mock_agent = target.join(profile).join("mock-agent");
-        require_artifact(&mock_agent, "mock-agent")?;
+        let fake_claude = target.join(profile).join("fake-claude");
+        require_artifact(&fake_claude, "fake-claude")?;
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let wasm = repo.join("target/wasm32-wasip1/release/zellij-agent-board.wasm");
         require_artifact(&wasm, "zellij-agent-board.wasm")?;
@@ -65,13 +61,13 @@ impl Zellij {
         let state = isolate.join("z");
         fs::create_dir_all(&sock).map_err(err)?;
         fs::create_dir_all(&state).map_err(err)?;
+        fs::create_dir_all(isolate.join("claude-home").join("sessions")).map_err(err)?;
         let token = format!("{:04x}", (std::process::id() ^ 0xa5a5) as u16);
         let session_prefix = format!("z{token}");
         let env_pairs = build_env_pairs(&isolate, &sock, &state, &zellij, &session_prefix, &tui);
         let mut world = Self {
             zellij,
-            supervisor,
-            mock_agent,
+            fake_claude,
             wasm,
             tui,
             isolate: isolate.clone(),
@@ -104,37 +100,26 @@ impl Zellij {
         Ok(world)
     }
 
-    pub fn start_mock_agent(&mut self, options: MockAgentOptions) -> Result<MockAgent, String> {
-        let session = options.session;
-        let state = options.state;
-        let exit_behavior = options.exit_behavior;
-        if !matches!(state.as_str(), "idle" | "working" | "waiting" | "draft") {
-            return Err(format!("unknown initial state: {state}"));
-        }
-        if !matches!(exit_behavior.as_str(), "normal" | "ignore" | "crash") {
-            return Err(format!("unknown exit behavior: {exit_behavior}"));
-        }
-        if !self.real_names.contains_key(&session) {
-            return Err(format!("undeclared session: {session}"));
-        }
+    /// Plant a claude the daemon manages *without* a supervisor: the pane's
+    /// top-level is a plain shell and claude runs inside it, so its exit keeps
+    /// the pane. The fake-claude artifact is run as `claude` so the builtin
+    /// catalog recognises it; it shares the isolate's `CLAUDE_CONFIG_DIR`.
+    pub fn start_daemon_claude_agent(&mut self) -> Result<crate::agent::DaemonClaudeAgent, String> {
+        let session = "work".to_owned();
         self.agent_serial += 1;
-        let role = format!("agent-{}", self.agent_serial);
-        let directory = self.isolate.join(format!("mock-{session}-{role}"));
-        let pane_id = self.plant(
-            &session,
-            &role,
-            &directory,
-            "ZAB-MOCK-AGENT",
-            &exit_behavior,
-        )?;
-        let agent = MockAgent {
-            session: session.clone(),
-            role,
-            pane_id,
-            directory,
-        };
-        self.created_agents.push((session.clone(), pane_id));
+        let role = format!("dclaude-{}", self.agent_serial);
+        let claude = self.claude_named_binary()?;
         let real = self.real_names[&session].clone();
+        // Interactive shell as the pane's top-level process; never close-on-exit.
+        let output = self.zj(
+            &["action", "new-pane", "--name", &role, "--", "bash", "-i"],
+            Some(&real),
+        )?;
+        let pane_id = parse_pane_id(&String::from_utf8_lossy(&output.stdout))
+            .or_else(|| self.find_named_pane_in(&real, &role))
+            .ok_or_else(|| "daemon claude pane created: new-pane returned no pane".to_owned())?;
+        self.created_agents.push((session.clone(), pane_id));
+        // Nudge the shell to a prompt, then start claude as a child of the shell.
         self.zj(
             &[
                 "action",
@@ -146,21 +131,67 @@ impl Zellij {
             ],
             Some(&real),
         )?;
+        self.write_chars(&session, pane_id, &format!("{}\n", claude.display()))?;
+        let agent = crate::agent::DaemonClaudeAgent {
+            session,
+            role,
+            pane_id,
+            sessions_dir: self.isolate.join("claude-home").join("sessions"),
+        };
         agent.wait_until_running(self)?;
-        for message in &options.history {
-            agent.prepare(self, "submit", json!({"text": message}))?;
-            agent.prepare(self, "finish", json!({"text": format!("saved: {message}")}))?;
-        }
-        if matches!(state.as_str(), "working" | "waiting") {
-            agent.prepare(self, "submit", json!({"text": "pending work"}))?;
-        }
-        if state == "waiting" {
-            agent.prepare(self, "permission", json!({}))?;
-        }
-        if state == "draft" {
-            agent.prepare(self, "draft", json!({"text": "unsent text"}))?;
-        }
         Ok(agent)
+    }
+
+    /// The fake-claude artifact copied to a file literally named `claude`, so
+    /// `ps` reports comm `claude` and the catalog's claude adapter matches.
+    fn claude_named_binary(&self) -> Result<PathBuf, String> {
+        let path = self.isolate.join("claude");
+        if !path.exists() {
+            fs::copy(&self.fake_claude, &path).map_err(err)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).map_err(err)?;
+            }
+        }
+        Ok(path)
+    }
+
+    /// Run the host `board-tui` with the isolate environment (daemon client).
+    pub(crate) fn board_tui(&self, args: &[&str]) -> Result<Output, String> {
+        let mut command = Command::new(&self.tui);
+        command.args(args);
+        for (key, value) in &self.env_pairs {
+            command.env(key, value);
+        }
+        command.output().map_err(err)
+    }
+
+    /// Request one scan so the daemon reconciles the relationship table.
+    pub(crate) fn reconcile(&self) -> Result<(), String> {
+        let output = self.board_tui(&["--reconcile"])?;
+        output.status.success().then_some(()).ok_or_else(|| {
+            format!(
+                "reconcile failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+    }
+
+    /// The daemon's committed snapshot, including the `sleep` relationship rows.
+    pub(crate) fn daemon_snapshot(&self) -> Result<Value, String> {
+        let output = self.board_tui(&["--snapshot"])?;
+        if !output.status.success() {
+            return Err(format!(
+                "snapshot failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        serde_json::from_slice(&output.stdout).map_err(err)
+    }
+
+    pub(crate) fn real_name(&self, logical: &str) -> String {
+        self.real_names[logical].clone()
     }
 
     pub fn write_chars(&mut self, session: &str, pane_id: i64, text: &str) -> Result<(), String> {
@@ -218,43 +249,6 @@ impl Zellij {
                 Some(&real),
             );
         }
-    }
-
-    fn plant(
-        &mut self,
-        session: &str,
-        role: &str,
-        directory: &Path,
-        sentinel: &str,
-        exit_mode: &str,
-    ) -> Result<i64, String> {
-        let real = self.real_names[session].clone();
-        let command = format!(
-            "printf '%s\\n' {sentinel}; exec {supervisor} --mock-agent {directory} -- {mock} --store {chat} --exit-mode {exit_mode}",
-            sentinel = shell_quote(sentinel),
-            supervisor = shell_quote(&self.supervisor.to_string_lossy()),
-            directory = shell_quote(&directory.to_string_lossy()),
-            mock = shell_quote(&self.mock_agent.to_string_lossy()),
-            chat = shell_quote(&directory.join("chat").to_string_lossy()),
-            exit_mode = shell_quote(exit_mode),
-        );
-        let output = self.zj(
-            &[
-                "action",
-                "new-pane",
-                "--name",
-                role,
-                "--close-on-exit",
-                "--",
-                "bash",
-                "-c",
-                &command,
-            ],
-            Some(&real),
-        )?;
-        parse_pane_id(&String::from_utf8_lossy(&output.stdout))
-            .or_else(|| self.find_named_pane_in(&real, role))
-            .ok_or_else(|| "agent pane created: new-pane returned no pane".to_owned())
     }
 
     fn find_named_pane_in(&self, real: &str, role: &str) -> Option<i64> {
@@ -531,6 +525,12 @@ fn build_env_pairs(
     ));
     env.push(("ZAB_ZELLIJ".into(), zellij.to_string_lossy().into()));
     env.push(("ZAB_SCAN_SESSION_PREFIX".into(), session_prefix.to_owned()));
+    // The daemon and every claude in this isolate must agree on one registry
+    // so the no-supervisor scan can read each session id from `sessions/<pid>`.
+    env.push((
+        "CLAUDE_CONFIG_DIR".into(),
+        isolate.join("claude-home").to_string_lossy().into(),
+    ));
     env.push((
         "ZELLIJ_AGENT_BOARD_TUI".into(),
         tui.to_string_lossy().into(),

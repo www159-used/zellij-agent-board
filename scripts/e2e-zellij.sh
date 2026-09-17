@@ -20,6 +20,6 @@ export ZAB_E2E_ZELLIJ="$zellij"
 # The scenarios launch four built artifacts. This script is the one place that
 # knows the list.
 cargo wasm
-cargo build -p zellij-agent-board --bin board-tui --bin agent-supervisor
-cargo build -p mock-agent
+cargo build -p zellij-agent-board --bin board-tui
+cargo build -p mock-agent --bin fake-claude
 exec cargo test -p e2e-zellij "$@"

@@ -132,6 +132,117 @@ pub fn scan_places_for(sessions: &[String]) -> Vec<(AgentId, PanePlace)> {
     out
 }
 
+/// Observe supervised-less claude panes for the daemon's relationship table.
+///
+/// `extra_sessions` are sessions that already hold sleep rows but may have no
+/// live agent this pass; their panes are still probed so a closed pane can be
+/// pruned. Detection reuses the same env-blob pid→pane link the SCAN uses, so
+/// any claude started from a shell is managed without a per-pane supervisor.
+pub(crate) fn scan_sleep_observations(extra_sessions: &[String]) -> crate::database::SleepScan {
+    use crate::database::{SleepObservation, SleepScan};
+    let session_prefix = std::env::var("ZAB_SCAN_SESSION_PREFIX").ok();
+    let pids = agent_pids();
+    let args_by_pid = ps_args(&pids);
+    let env_by_pid = ps_env(&pids);
+    let config = crate::claude_session::claude_config_dir();
+    let mut live: Vec<(AgentId, SleepObservation)> = Vec::new();
+    let mut panes: BTreeMap<String, Option<HashSet<u32>>> = BTreeMap::new();
+    let mut live_keys: HashSet<String> = HashSet::new();
+    for pid in &pids {
+        let Some(args) = args_by_pid.get(pid) else {
+            continue;
+        };
+        let argv = split_args(args);
+        let comm = argv
+            .first()
+            .map(|bin| bin.rsplit('/').next().unwrap_or(bin).to_string())
+            .unwrap_or_default();
+        // Only claude has a session registry for exact `-r`; skip other agents.
+        if catalog().adapter_for_bin(&comm).map(|a| a.id.as_str()) != Some("claude") {
+            continue;
+        }
+        let Some(blob) = env_by_pid.get(pid) else {
+            continue;
+        };
+        let Some((session, pane)) = zellij_ids_from_env_blob(blob) else {
+            continue;
+        };
+        if !session_is_in_scope(&session, session_prefix.as_deref()) {
+            continue;
+        }
+        let listed = panes
+            .entry(session.clone())
+            .or_insert_with(|| list_terminal_pane_ids(&session));
+        if !pane_still_open(pane, listed.as_ref()) {
+            continue;
+        }
+        // One agent per pane; ascending pids mean the launcher process wins.
+        if !live_keys.insert(format!("{session}-{pane}")) {
+            continue;
+        }
+        let sess = crate::claude_session::load_session_for_pid(&config, *pid);
+        let session_id = sess
+            .as_ref()
+            .map(|s| s.session_id.clone())
+            .unwrap_or_default();
+        let cwd = sess.as_ref().map(|s| s.cwd.clone()).unwrap_or_default();
+        let status = sess.as_ref().map(|s| s.status.clone()).unwrap_or_default();
+        let resume_cmd = if session_id.is_empty() {
+            Vec::new()
+        } else {
+            claude_resume_cmd(&argv, &session_id)
+        };
+        live.push((
+            AgentId {
+                session,
+                pane_id: pane,
+            },
+            SleepObservation {
+                kind: "claude".into(),
+                cwd,
+                session_id,
+                status,
+                pid: *pid,
+                resume_cmd,
+            },
+        ));
+    }
+    // Probe record-only sessions so reconcile can prune their closed panes.
+    for session in extra_sessions {
+        if session.is_empty() || !session_is_in_scope(session, session_prefix.as_deref()) {
+            continue;
+        }
+        panes
+            .entry(session.clone())
+            .or_insert_with(|| list_terminal_pane_ids(session));
+    }
+    SleepScan { live, panes }
+}
+
+/// Exact relaunch argv: keep how claude was invoked, drop any prior
+/// resume/continue flags, then pin `-r <sessionId>` (never `-c`).
+fn claude_resume_cmd(argv: &[String], session_id: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut skip_value = false;
+    for arg in argv {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        match arg.as_str() {
+            "-r" | "--resume" => skip_value = true,
+            "-c" | "--continue" => {}
+            _ => out.push(arg.clone()),
+        }
+    }
+    if out.is_empty() {
+        out.push("claude".into());
+    }
+    out.push("-r".into());
+    out.push(session_id.into());
+    out
+}
+
 pub fn places_from_list_panes_json(session: &str, json: &str) -> Vec<(AgentId, PanePlace)> {
     let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
         return Vec::new();
@@ -485,12 +596,36 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        agent_pids_from_text, command_output_timeout, pane_still_open, places_from_list_panes_json,
-        ps_command_args, scan_places_for, session_is_in_scope, zellij_bin_from,
-        zellij_ids_from_env_blob,
+        agent_pids_from_text, claude_resume_cmd, command_output_timeout, pane_still_open,
+        places_from_list_panes_json, ps_command_args, scan_places_for, session_is_in_scope,
+        zellij_bin_from, zellij_ids_from_env_blob,
     };
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn claude_resume_cmd_pins_exact_r_and_drops_prior_resume_flags() {
+        // Plain launch → add -r <id>.
+        assert_eq!(
+            claude_resume_cmd(&["claude".into()], "sid"),
+            vec!["claude", "-r", "sid"]
+        );
+        // Preserve user flags, replace an old -r, never keep -c.
+        assert_eq!(
+            claude_resume_cmd(
+                &[
+                    "claude".into(),
+                    "--model".into(),
+                    "opus".into(),
+                    "-r".into(),
+                    "old".into(),
+                    "-c".into(),
+                ],
+                "new"
+            ),
+            vec!["claude", "--model", "opus", "-r", "new"]
+        );
+    }
 
     #[test]
     fn command_output_timeout_kills_a_hung_child() {

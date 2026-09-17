@@ -587,6 +587,20 @@ fn expect_action(actual: &Action, args: &[&str], line: usize) -> Result<(), Scen
                 pane_id: parse_num(args.get(2), line, "pane")?,
             }
         }
+        Some("sleep") => {
+            exact(args, 3, line, "expect action sleep SESSION PANE")?;
+            Action::Sleep {
+                session: need(args.get(1), line, "session")?.to_string(),
+                pane_id: parse_num(args.get(2), line, "pane")?,
+            }
+        }
+        Some("wake") => {
+            exact(args, 3, line, "expect action wake SESSION PANE")?;
+            Action::Wake {
+                session: need(args.get(1), line, "session")?.to_string(),
+                pane_id: parse_num(args.get(2), line, "pane")?,
+            }
+        }
         Some(other) => {
             return Err(SceneError {
                 line,
@@ -596,7 +610,7 @@ fn expect_action(actual: &Action, args: &[&str], line: usize) -> Result<(), Scen
         None => {
             return Err(SceneError {
                 line,
-                message: "expect action none|dismiss|jump".into(),
+                message: "expect action none|dismiss|jump|sleep|wake".into(),
             });
         }
     };

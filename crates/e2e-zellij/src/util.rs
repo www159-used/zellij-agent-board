@@ -45,10 +45,6 @@ pub(crate) fn workspace_target_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
 }
 
-pub(crate) fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 pub(crate) fn parse_pane_id(text: &str) -> Option<i64> {
     for token in text.split_whitespace() {
         if let Some(rest) = token.strip_prefix("terminal_") {

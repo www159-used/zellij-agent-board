@@ -129,16 +129,26 @@ async fn serve(
 enum Route {
     Snapshot,
     Refresh,
+    Sleep,
+    Resume,
     Shutdown,
 }
 
 impl Route {
-    const ALL: [Route; 3] = [Route::Snapshot, Route::Refresh, Route::Shutdown];
+    const ALL: [Route; 5] = [
+        Route::Snapshot,
+        Route::Refresh,
+        Route::Sleep,
+        Route::Resume,
+        Route::Shutdown,
+    ];
 
     fn path(self) -> &'static str {
         match self {
             Route::Snapshot => "/v1/snapshot",
             Route::Refresh => "/v1/refresh",
+            Route::Sleep => "/v1/sleep",
+            Route::Resume => "/v1/resume",
             Route::Shutdown => "/v1/shutdown",
         }
     }
@@ -146,8 +156,13 @@ impl Route {
     fn method(self) -> Method {
         match self {
             Route::Snapshot => Method::GET,
-            Route::Refresh | Route::Shutdown => Method::POST,
+            Route::Refresh | Route::Sleep | Route::Resume | Route::Shutdown => Method::POST,
         }
+    }
+
+    /// Routes that take a JSON body; the rest reject any body.
+    fn wants_json_body(self) -> bool {
+        matches!(self, Route::Refresh | Route::Sleep | Route::Resume)
     }
 
     fn from_path(path: &str) -> Option<Self> {
@@ -159,6 +174,13 @@ impl Route {
 #[serde(deny_unknown_fields)]
 struct RefreshBody {
     home: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ControlBody {
+    session: String,
+    pane_id: u32,
 }
 
 fn is_json(headers: &hyper::HeaderMap) -> bool {
@@ -180,10 +202,10 @@ async fn handle(request: HttpRequest<Incoming>, send: SyncSender<Call>) -> HttpR
             .insert(ALLOW, route.method().as_str().parse().unwrap());
         return response;
     }
-    if route == Route::Refresh && !is_json(request.headers()) {
+    if route.wants_json_body() && !is_json(request.headers()) {
         return error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "refresh requires application/json",
+            "this route requires application/json",
         );
     }
     let body = match Limited::new(request.into_body(), REQUEST_LIMIT)
@@ -202,7 +224,7 @@ async fn handle(request: HttpRequest<Incoming>, send: SyncSender<Call>) -> HttpR
             );
         }
     };
-    if route != Route::Refresh && !body.is_empty() {
+    if !route.wants_json_body() && !body.is_empty() {
         return error(StatusCode::BAD_REQUEST, "this route does not accept a body");
     }
     let command = match route {
@@ -214,6 +236,25 @@ async fn handle(request: HttpRequest<Incoming>, send: SyncSender<Call>) -> HttpR
                 return error(
                     StatusCode::BAD_REQUEST,
                     "expected JSON object with a home string",
+                )
+            }
+        },
+        Route::Sleep | Route::Resume => match serde_json::from_slice::<ControlBody>(&body) {
+            Ok(body) => {
+                let id = crate::AgentId {
+                    session: body.session,
+                    pane_id: body.pane_id,
+                };
+                if route == Route::Sleep {
+                    Request::Sleep { id }
+                } else {
+                    Request::Resume { id }
+                }
+            }
+            Err(_) => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "expected JSON object with session and pane_id",
                 )
             }
         },
@@ -301,6 +342,14 @@ async fn request(socket: &str, command: Request) -> io::Result<Option<Snapshot>>
         Request::Refresh { home } => (
             Route::Refresh,
             serde_json::to_vec(&serde_json::json!({"home": home}))?,
+        ),
+        Request::Sleep { id } => (
+            Route::Sleep,
+            serde_json::to_vec(&serde_json::json!({"session": id.session, "pane_id": id.pane_id}))?,
+        ),
+        Request::Resume { id } => (
+            Route::Resume,
+            serde_json::to_vec(&serde_json::json!({"session": id.session, "pane_id": id.pane_id}))?,
         ),
         Request::Shutdown => (Route::Shutdown, Vec::new()),
     };

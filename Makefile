@@ -41,7 +41,7 @@ check: fmt-check lint test ## Run formatting, lint, and all unit tests
 test: test-rust test-hooks ## Run Rust and hook unit tests
 
 test-rust: ## Run product tests and in-process scene replay
-	$(CARGO) test -p zellij-agent-board --locked --lib --bin board-tui --bin agent-supervisor --test daemon
+	$(CARGO) test -p zellij-agent-board --locked --lib --bin board-tui --test daemon
 	$(CARGO) e2e
 
 test-hooks: ## Test hook scripts with isolated state
@@ -52,9 +52,9 @@ build: wasm tui ## Build the release WASM bridge and host TUI
 wasm: ## Build the WASM bridge
 	$(CARGO) wasm
 
-tui: ## Build the host TUI and agent-supervisor (optional TARGET=Rust-triple)
+tui: ## Build the host TUI (optional TARGET=Rust-triple)
 	@set --; if [[ -n "$$TARGET" ]]; then set -- --target "$$TARGET"; fi; \
-	$(CARGO) build -p zellij-agent-board --locked --release --bin board-tui --bin agent-supervisor "$$@"
+	$(CARGO) build -p zellij-agent-board --locked --release --bin board-tui "$$@"
 
 # Release bundles install their own binaries without needing Rust.
 ifeq ($(and $(wildcard zellij-agent-board.wasm),$(wildcard board-tui)),)

@@ -31,6 +31,14 @@ install_file() {
 install_file "$wasm_src" "$dest"
 tui_dest="$(dirname "$dest")/board-tui"
 install_file "$tui_src" "$tui_dest"
+# A running daemon keeps the previous binary in memory until asked to exit, so
+# a fresh install has no effect until it restarts. Stop it best-effort here; the
+# next board open auto-spawns the just-installed version.
+if "$tui_dest" --daemon-stop >/dev/null 2>&1; then
+  echo "stopped running daemon; it restarts on next board open"
+else
+  echo "no running daemon to restart"
+fi
 chmod +x "$root/scripts/zellij-agent-board-hook.sh" "$root/scripts/install-hooks.sh" \
   "$root/scripts/install-hooks.py"
 # Drop previous short names / scan helper if present.

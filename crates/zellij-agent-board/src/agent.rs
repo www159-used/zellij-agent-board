@@ -2,7 +2,7 @@
 
 use crate::status::Status;
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
 pub struct AgentId {
     pub session: String,
     pub pane_id: u32,

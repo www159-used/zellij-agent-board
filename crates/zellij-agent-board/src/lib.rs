@@ -4,6 +4,8 @@ mod agent;
 mod ansi;
 mod catalog;
 #[cfg(not(target_arch = "wasm32"))]
+mod claude_session;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod daemon;
 #[cfg(not(target_arch = "wasm32"))]
 mod daemon_http;
@@ -21,6 +23,8 @@ mod scan;
 #[cfg(not(target_arch = "wasm32"))]
 mod scene;
 #[cfg(not(target_arch = "wasm32"))]
+mod sleep;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod stats;
 mod status;
 #[cfg(not(target_arch = "wasm32"))]
@@ -30,6 +34,8 @@ mod toggle;
 
 pub use agent::{keep_cursor_agent, workspace_from_argv, Agent, AgentId, PanePlace};
 pub use catalog::{keep_row, Catalog};
+#[cfg(not(target_arch = "wasm32"))]
+pub use claude_session::{claude_config_dir, load_session_for_pid, ClaudeSession};
 pub use discover::{parse_host_line, parse_scan_line, Found, HookNotice, HostLine};
 pub use float_size::{float_size_from_config, FloatSize};
 pub use floating_state::FloatingLayerState;
@@ -92,13 +98,30 @@ pub enum Key {
     GPrefix,
     StartPicker,
     TogglePickerFocus,
+    /// Ask the daemon to sleep the selected agent (pane kept, process exits).
+    SleepSelected,
+    /// Ask the daemon to resume the selected agent after sleep.
+    WakeSelected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     None,
     Dismiss,
-    Jump { session: String, pane_id: u32 },
+    Jump {
+        session: String,
+        pane_id: u32,
+    },
+    /// Inject `{"op":"sleep"}` into the agent's pane (host executes write-chars).
+    Sleep {
+        session: String,
+        pane_id: u32,
+    },
+    /// Inject `{"op":"resume"}` into the agent's pane.
+    Wake {
+        session: String,
+        pane_id: u32,
+    },
 }
 
 /// One painted line of the list. The painter, hit test and scrollbar slice a
@@ -293,6 +316,42 @@ impl Board {
                 }
             }
         }
+    }
+
+    /// Mark sleeping locally (keeps the row when the process exits) and ask
+    /// the host to send `{"op":"sleep"}` into the supervised pane.
+    pub fn sleep_selected(&mut self) -> Action {
+        let Some(agent) = self.agents.get(self.selected) else {
+            return Action::None;
+        };
+        let id = agent.id.clone();
+        let action = Action::Sleep {
+            session: id.session.clone(),
+            pane_id: id.pane_id,
+        };
+        let at = (self.wall_now > 0).then_some(self.wall_now);
+        self.apply_hook_event(&id, "agentSleep", "", at, None);
+        publish_board_hook(&id, "agentSleep", at.unwrap_or(0));
+        action
+    }
+
+    /// Clear sleeping locally and ask the host to send `{"op":"resume"}`.
+    pub fn wake_selected(&mut self) -> Action {
+        let Some(agent) = self.agents.get(self.selected) else {
+            return Action::None;
+        };
+        if agent.status != Status::Sleeping {
+            return Action::None;
+        }
+        let id = agent.id.clone();
+        let action = Action::Wake {
+            session: id.session.clone(),
+            pane_id: id.pane_id,
+        };
+        let at = (self.wall_now > 0).then_some(self.wall_now);
+        self.apply_hook_event(&id, "agentWake", "", at, None);
+        publish_board_hook(&id, "agentWake", at.unwrap_or(0));
+        action
     }
 
     pub fn apply_hook(
@@ -636,6 +695,14 @@ impl Board {
             Key::Confirm => {
                 self.clear_motion();
                 self.jump_at(self.selected)
+            }
+            Key::SleepSelected => {
+                self.clear_motion();
+                self.sleep_selected()
+            }
+            Key::WakeSelected => {
+                self.clear_motion();
+                self.wake_selected()
             }
             Key::StartHint => {
                 self.clear_motion();
@@ -1822,13 +1889,9 @@ impl Board {
                 continue;
             }
             let prior = previous.iter().find(|agent| agent.id == row.id);
-            let status = match prior.map(|agent| agent.status) {
-                // Process is back; sleep ends at the scan layer until a hook
-                // names the live status again.
-                Some(Status::Sleeping) => Status::Found,
-                Some(other) => other,
-                None => Status::Found,
-            };
+            // Sleep sticks until an explicit wake/hook; a still-running process
+            // must not clear a manual sleep used for board testing.
+            let status = prior.map(|agent| agent.status).unwrap_or(Status::Found);
             next.push(Agent {
                 id: row.id,
                 tool: row.tool,
@@ -1888,6 +1951,12 @@ fn persist_turn_start(id: &AgentId, started_at: u64) {
     #[cfg(not(target_arch = "wasm32"))]
     crate::protocol::persist_started(&id.session, id.pane_id, started_at);
     let _ = (id, started_at);
+}
+
+fn publish_board_hook(id: &AgentId, event: &str, at_epoch: u64) {
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::protocol::persist_hook(&id.session, id.pane_id, event, at_epoch);
+    let _ = (id, event, at_epoch);
 }
 
 fn clear_turn_start(id: &AgentId) {
@@ -2304,7 +2373,7 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
     }
 
     #[test]
-    fn resumed_process_wakes_sleeping_row_to_found() {
+    fn resumed_process_keeps_sleeping_until_wake() {
         let mut board = Board::default();
         board.ingest(
             "META hooks=1\nSCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n",
@@ -2317,6 +2386,34 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
             "META hooks=1\nSCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n",
         );
         assert_eq!(board.agents.len(), 1);
+        assert_eq!(board.agents[0].status, Status::Sleeping);
+
+        board.ingest_notice("HOOK ww 3 agentWake @200\n");
+        assert_eq!(board.agents[0].status, Status::Found);
+    }
+
+    #[test]
+    fn sleep_and_wake_keys_toggle_selected_row() {
+        let mut board = Board::default();
+        board.ingest(
+            "META hooks=1\nSCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww\n",
+        );
+        assert_eq!(
+            board.decide(Key::SleepSelected),
+            Action::Sleep {
+                session: "ww".into(),
+                pane_id: 3,
+            }
+        );
+        assert_eq!(board.agents[0].status, Status::Sleeping);
+
+        assert_eq!(
+            board.decide(Key::WakeSelected),
+            Action::Wake {
+                session: "ww".into(),
+                pane_id: 3,
+            }
+        );
         assert_eq!(board.agents[0].status, Status::Found);
     }
 

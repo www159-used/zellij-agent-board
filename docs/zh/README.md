@@ -64,7 +64,7 @@ TUI 自动启动或连接本地 `board-tui --daemon`，通过 Unix socket 上的
 
 focus 和 seen/started 标记仍存放在 `$ZAB_STATE_DIR`、`$XDG_CACHE_HOME/zellij-agent-board` 或 `~/.cache/zellij-agent-board`。本次打开前的焦点直接传给对应的 TUI。Hook 继续通过 `$TMPDIR/zellij-agent-board-spool` 上报通知，不直接打开数据库；未读完成仍可发送终端通知。
 
-`board-tui --snapshot` 输出已提交快照的 JSON，也可通过 `curl --unix-socket` 请求 `GET /v1/snapshot`；`--reconcile` 请求后台刷新，成功只表示已接收请求。升级二进制后，关闭看板并运行 `board-tui --daemon-stop`，再打开看板以启动新版 daemon。详见 [存储设计](../design/host-state.md)。
+`board-tui --snapshot` 输出已提交快照的 JSON，也可通过 `curl --unix-socket` 请求 `GET /v1/snapshot`；`--reconcile` 请求后台刷新，成功只表示已接收请求。`make install` 会停掉正在运行的 daemon，使新装二进制生效；重开看板即可（会自动拉起新版 daemon）。也可手动运行 `board-tui --daemon-stop` 再打开看板。详见 [存储设计](../design/host-state.md)。
 
 Codex `Interrupt` 以及 Cursor `stop`/`afterAgentResponse` 且 `status=aborted` 时显示为 `■ stopped`。Cursor `status=error`、Claude/CodeBuddy `StopFailure`、OpenCode `session.error` 显示为 `✗ failed`。两者都清除本轮计时，不标记为完成，也不发送完成通知。授权提示（`PermissionRequest`、CodeBuddy `Notification` 的 `permission_prompt`、OpenCode `permission.asked`）显示为 `● waiting`，并保留本轮起点，以便恢复后继续计时。Claude/CodeBuddy `Notification` 的 `idle_prompt` 显示为 `◑ idle-wait`，清回合且不发完成通知。升级后对所用 CLI 重新运行 `make install-hooks`，并重启这些会话。安装这些 hook 之前发出的通知无法追溯恢复。
 

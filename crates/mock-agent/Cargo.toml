@@ -3,11 +3,15 @@ name = "mock-agent"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Deterministic mock coding-agent CLI for lifecycle tests"
+description = "Deterministic fake-claude CLI for sleep/resume lifecycle tests"
 license = "AGPL-3.0-only"
 
+[[bin]]
+name = "fake-claude"
+path = "src/bin/fake_claude.rs"
+
 [dependencies]
-fs2 = "0.4"
+libc = "0.2"
 serde_json = "1"
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
