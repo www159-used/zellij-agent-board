@@ -147,7 +147,8 @@ pub(crate) fn scan_sleep_observations(extra_sessions: &[String]) -> crate::datab
     let config = crate::claude_session::claude_config_dir();
     let mut live: Vec<(AgentId, SleepObservation)> = Vec::new();
     let mut panes: BTreeMap<String, Option<HashSet<u32>>> = BTreeMap::new();
-    let mut live_keys: HashSet<String> = HashSet::new();
+    // One pane can hold a wrapper plus the node child that owns the registry.
+    let mut by_pane: BTreeMap<AgentId, Vec<(u32, Vec<String>)>> = BTreeMap::new();
     for pid in &pids {
         let Some(args) = args_by_pid.get(pid) else {
             continue;
@@ -176,33 +177,43 @@ pub(crate) fn scan_sleep_observations(extra_sessions: &[String]) -> crate::datab
         if !pane_still_open(pane, listed.as_ref()) {
             continue;
         }
-        // One agent per pane; ascending pids mean the launcher process wins.
-        if !live_keys.insert(format!("{session}-{pane}")) {
-            continue;
-        }
-        let sess = crate::claude_session::load_session_for_pid(&config, *pid);
+        by_pane
+            .entry(AgentId {
+                session,
+                pane_id: pane,
+            })
+            .or_default()
+            .push((*pid, argv));
+    }
+    for (id, found) in by_pane {
+        let pane_pids: Vec<u32> = found.iter().map(|(pid, _)| *pid).collect();
+        let sess = crate::claude_session::load_session_for_pids(&config, &pane_pids);
+        let argv = &found[0].1;
         let session_id = sess
             .as_ref()
             .map(|s| s.session_id.clone())
             .unwrap_or_default();
         let cwd = sess.as_ref().map(|s| s.cwd.clone()).unwrap_or_default();
         let status = sess.as_ref().map(|s| s.status.clone()).unwrap_or_default();
+        // Prefer the pid that owns the registry: that is the process `/exit`
+        // will take down. Fall back to the last (highest) pid in the pane.
+        let pid = sess
+            .as_ref()
+            .map(|s| s.pid)
+            .unwrap_or(found.last().map(|(pid, _)| *pid).unwrap_or(pane_pids[0]));
         let resume_cmd = if session_id.is_empty() {
             Vec::new()
         } else {
-            claude_resume_cmd(&argv, &session_id)
+            claude_resume_cmd(argv, &session_id)
         };
         live.push((
-            AgentId {
-                session,
-                pane_id: pane,
-            },
+            id,
             SleepObservation {
                 kind: "claude".into(),
                 cwd,
                 session_id,
                 status,
-                pid: *pid,
+                pid,
                 resume_cmd,
             },
         ));

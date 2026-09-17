@@ -1,6 +1,7 @@
 //! No-supervisor sleep/resume: the daemon owns the relationship table and
 //! drives the pane. A plain shell hosts claude, so its exit keeps the pane;
-//! the daemon injects `/exit` to sleep and exact `-r <sessionId>` to resume.
+//! the daemon injects Ctrl+C, `/exit`, then Enter to sleep, and exact
+//! `-r <sessionId>` to resume.
 use e2e_zellij::{process_exists, Zellij};
 use serial_test::serial;
 

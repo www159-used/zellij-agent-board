@@ -187,7 +187,13 @@ fn pump(
                         }
                         Ok(None)
                     }
-                    Request::Sleep { id } => control(db, Op::Sleep, &id),
+                    Request::Sleep { id } => {
+                        // A first `z` often arrives before the background scan
+                        // has written the relationship row. Observe now so a
+                        // live claude is sleepable instead of `no_record`.
+                        prime_sleep_row(db, &id);
+                        control(db, Op::Sleep, &id)
+                    }
                     Request::Resume { id } => control(db, Op::Resume, &id),
                     Request::Shutdown => {
                         stop = true;
@@ -210,6 +216,17 @@ fn pump(
 enum Op {
     Sleep,
     Resume,
+}
+
+/// Fold a just-in-time observation into the relationship table so sleep can
+/// see a live claude that the last background scan has not committed yet.
+fn prime_sleep_row(db: &HostDatabase, id: &AgentId) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let scan = scan_sleep_observations(std::slice::from_ref(&id.session));
+    let _ = db.reconcile_sleep(&scan, now);
 }
 
 /// Run one control op on the database owner thread, injecting into the pane

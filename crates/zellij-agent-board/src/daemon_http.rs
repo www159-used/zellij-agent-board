@@ -26,7 +26,9 @@ use crate::database::Snapshot;
 const REQUEST_LIMIT: usize = 64 * 1024;
 const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 const CLIENT_TIMEOUT: Duration = Duration::from_millis(500);
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
+/// Sleep/resume run a just-in-time scan plus several Zellij writes.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(4);
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONNECTIONS: usize = 32;
 type HttpResponse = Response<Full<Bytes>>;
 
@@ -319,8 +321,12 @@ pub(crate) fn request_at(dir: &Path, command: Request) -> io::Result<Option<Snap
         if runtime_ref.is_none() {
             *runtime_ref = Some(runtime()?);
         }
+        let timeout = match &command {
+            Request::Sleep { .. } | Request::Resume { .. } => CONTROL_TIMEOUT,
+            _ => CLIENT_TIMEOUT,
+        };
         runtime_ref.as_ref().unwrap().block_on(async {
-            tokio::time::timeout(CLIENT_TIMEOUT, request(&socket, command))
+            tokio::time::timeout(timeout, request(&socket, command))
                 .await
                 .map_err(|_| {
                     io::Error::new(io::ErrorKind::TimedOut, "daemon HTTP request timed out")

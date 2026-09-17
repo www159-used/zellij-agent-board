@@ -33,7 +33,8 @@ impl RawMode {
             }
             let saved = term;
             term.c_iflag &= !(libc::ICRNL | libc::INLCR | libc::IGNCR);
-            term.c_lflag &= !(libc::ICANON | libc::ECHO);
+            // ISIG off matches real Claude: Ctrl+C is a key, not SIGINT.
+            term.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
             term.c_cc[libc::VMIN] = 1;
             term.c_cc[libc::VTIME] = 0;
             if libc::tcsetattr(fd, libc::TCSANOW, &term) != 0 {
@@ -178,6 +179,11 @@ fn run() -> io::Result<()> {
             break;
         }
         let submit = byte[0] == b'\r' || (submit_on_lf && byte[0] == b'\n');
+        if byte[0] == 0x03 {
+            // Ctrl+C: the daemon clears a draft before typing `/exit`.
+            line.clear();
+            continue;
+        }
         if !submit {
             // Ignore a stray `\n` in raw mode; buffer everything else.
             if byte[0] != b'\n' {

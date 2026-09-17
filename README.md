@@ -53,6 +53,7 @@ The WASM pane hides itself and opens `board-tui` with `new-pane --floating --clo
 | `s` | Flash labels within the visible list |
 | `p`, then `Tab` | Open the full-list picker, switch between query and labels |
 | `Enter`, mouse click | Jump to the selected Agent |
+| `z` / `Z` | Sleep the selected Claude (process exits, pane kept) / resume it |
 | `?` | Show help |
 | `Esc`, `q` | Dismiss the board; `Esc` first cancels an active overlay, while `q` remains input during search |
 

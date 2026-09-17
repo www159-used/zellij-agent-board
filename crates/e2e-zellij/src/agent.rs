@@ -46,6 +46,7 @@ impl DaemonClaudeAgent {
                     .to_str()
                     .and_then(|name| name.strip_suffix(".json"))
                     .and_then(|pid| pid.parse::<u32>().ok())
+                    .filter(|pid| process_exists(Some(*pid)))
             })
             .collect()
     }

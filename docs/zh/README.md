@@ -51,6 +51,7 @@ WASM 会隐藏自身，通过 `new-pane --floating --close-on-exit` 打开 `boar
 | `s` | 在可见列表内使用 Flash 标签跳转 |
 | `p`，随后 `Tab` | 打开全列表选择器，在查询和标签间切换 |
 | `Enter`、鼠标点击 | 跳转到 Agent |
+| `z` / `Z` | 休眠选中的 Claude（进程退出、pane 保留）/ 唤醒 |
 | `?` | 查看帮助 |
 | `Esc`、`q` | 关闭看板；`Esc` 优先取消当前浮层，搜索时 `q` 仍作为输入 |
 
