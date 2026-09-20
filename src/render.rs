@@ -101,7 +101,10 @@ pub fn render_board(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) 
     if area.width == 0 || area.height == 0 {
         return;
     }
-    buffer.set_style(area, Style::default().fg(theme().text).bg(theme().surface));
+    // Leave the pane on the terminal default background so iTerm2 wallpaper
+    // shows through, same as an agent pane. Only chips, focus, and the
+    // picker card paint an explicit fill.
+    buffer.set_style(area, Style::default().fg(theme().text));
     let (content, footer) = content_and_footer(area);
 
     if board.help_visible {
@@ -1531,6 +1534,28 @@ mod tests {
         assert!(home.contains("api"));
         let away = painted(&board, 16, 110, "lp");
         assert!(away.contains("ww"));
+    }
+
+    #[test]
+    fn list_pane_does_not_paint_surface_fill() {
+        let board = Board {
+            hooks_installed: true,
+            ..Board::default()
+        };
+        let ansi = paint(
+            &board,
+            PaintCtx {
+                rows: 12,
+                cols: 80,
+                home: "ww",
+            },
+        )
+        .lines
+        .join("\n");
+        assert!(
+            !ansi.contains("\u{1b}[48;2;22;19;31m"),
+            "pane fill must stay default or wallpaper is covered:\n{ansi}"
+        );
     }
 
     #[test]
