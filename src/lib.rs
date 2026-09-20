@@ -195,6 +195,9 @@ pub struct Board {
     /// block start, so ±delta would stop inverting and the cursor would creep
     /// toward the top.
     scroll_anchor: u32,
+    /// `select_agent` often runs before the pane size is known. Center on the
+    /// first geometry instead of clamping the row to the bottom of the view.
+    center_pending: bool,
 }
 
 #[derive(Default)]
@@ -677,7 +680,10 @@ impl Board {
         self.ensure_picker_visible();
         // Activity rows change document offsets when crossing the width
         // threshold. An old title offset can now point at a session header.
-        if layout_changed {
+        if self.center_pending && self.list_height > 0 {
+            self.center_pending = false;
+            self.center_view();
+        } else if layout_changed {
             self.reveal();
         } else {
             // A resize may leave the cursor outside the now-smaller window.
@@ -1710,14 +1716,36 @@ impl Board {
         self.clamp_view();
     }
 
-    /// Select an agent by identity and reveal its row without changing list order.
-    /// A missing agent leaves the current selection and view alone.
+    /// Put the selected title on the middle body row. Near the ends the
+    /// usual max_top clamp wins, so the last row still sits at the bottom.
+    fn center_view(&mut self) {
+        if self.list_height == 0 || self.agents.is_empty() {
+            return;
+        }
+        let wide = self.wide_list;
+        let body = u32::from(self.list_height);
+        let max_top = self.list_lines_total(wide).saturating_sub(body);
+        self.scroll_anchor = self.agent_title_line(self.selected, wide);
+        self.topline = self.scroll_anchor.saturating_sub(body / 2).min(max_top);
+        self.clamp_view();
+    }
+
+    /// Select an agent by identity and put its row in the middle of the pane.
+    /// Opening from last-jump / launch-focus uses this so the row is not
+    /// pinned to the bottom by a from-zero clamp. A missing agent leaves
+    /// the current selection and view alone.
     pub fn select_agent(&mut self, id: &AgentId) -> bool {
         let Some(index) = self.index_of(id) else {
             return false;
         };
         self.selected = index;
-        self.reveal();
+        if self.list_height == 0 {
+            self.center_pending = true;
+            self.reveal();
+        } else {
+            self.center_pending = false;
+            self.center_view();
+        }
         true
     }
 
@@ -2570,6 +2598,44 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
             ));
         }
         board.ingest(&scan);
+    }
+
+    #[test]
+    fn select_agent_centers_the_row_when_geometry_arrives() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 40);
+        let id = AgentId {
+            session: "ww".into(),
+            pane_id: 21,
+        };
+        assert!(board.select_agent(&id));
+        assert_eq!(board.selected, 20);
+        assert_eq!(board.topline(), 0);
+
+        board.set_list_geometry(80, 17);
+        // 17-row pane: footer + header → 15 body lines. Title of pane 21
+        // is document line 20; half the body is 7, so topline is 13.
+        assert_eq!(board.topline(), 13);
+        assert_eq!(board.selected, 20);
+
+        board.set_list_geometry(80, 17);
+        assert_eq!(
+            board.topline(),
+            13,
+            "a later geometry pass must not re-center"
+        );
+    }
+
+    #[test]
+    fn select_agent_centers_immediately_when_the_pane_is_sized() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 40);
+        board.set_list_geometry(80, 17);
+        assert!(board.select_agent(&AgentId {
+            session: "ww".into(),
+            pane_id: 21,
+        }));
+        assert_eq!(board.topline(), 13);
     }
 
     #[test]
