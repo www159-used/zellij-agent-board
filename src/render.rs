@@ -1,4 +1,4 @@
-//! Mob two-line rows inside overview chrome: theme, footer pill, help, groups.
+//! Mob two-line rows inside overview chrome: theme, footer, help, groups.
 
 use ratatui::{
     buffer::Buffer,
@@ -558,10 +558,7 @@ fn render_picker(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
 fn render_picker_prompt(board: &Board, focus: PickerFocus, area: Rect, buffer: &mut Buffer) {
     let total = board.picker_matches().len();
     let query = board.picker_query();
-    let mut spans = vec![Span::styled(
-        " / ",
-        Style::default().fg(theme().tip_fg).bg(theme().tip_bg),
-    )];
+    let mut spans = vec![Span::styled(" / ", Style::default().fg(theme().tip_bg))];
     if focus == PickerFocus::Query {
         spans.push(Span::styled(
             format!("{query}█"),
@@ -657,7 +654,9 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         Line::from(vec![
             Span::styled(
                 " PICK ",
-                Style::default().fg(theme().tip_fg).bg(theme().focus),
+                Style::default()
+                    .fg(theme().focus)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 if board.picker_focus() == PickerFocus::Tips {
@@ -670,10 +669,7 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         ])
     } else if board.is_searching() {
         Line::from(vec![
-            Span::styled(
-                " / ",
-                Style::default().fg(theme().tip_fg).bg(theme().tip_bg),
-            ),
+            Span::styled(" / ", Style::default().fg(theme().tip_bg)),
             Span::styled(
                 format!("{}█", board.search_query()),
                 Style::default()
@@ -689,7 +685,9 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         Line::from(vec![
             Span::styled(
                 " FLASH ",
-                Style::default().fg(theme().tip_fg).bg(theme().focus),
+                Style::default()
+                    .fg(theme().focus)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" type to search"),
             Span::styled(
@@ -701,8 +699,7 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
             Span::styled(
                 format!(" tip:{} ", board.hint_jump_prefix()),
                 Style::default()
-                    .fg(theme().tip_mark_fg)
-                    .bg(theme().tip_mark_bg)
+                    .fg(theme().tip_mark_bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -737,10 +734,7 @@ fn footer_hints(width: u16, home: Option<&str>, pairs: &[(&str, &str)]) -> Line<
     if let Some(name) = home {
         let pill = format!(" {name} ");
         used += pill.chars().count() + 2;
-        spans.push(Span::styled(
-            pill,
-            Style::default().fg(theme().tip_fg).bg(theme().session),
-        ));
+        spans.push(Span::styled(pill, Style::default().fg(theme().session)));
         spans.push(Span::raw("  "));
     }
     let budget = usize::from(width);
@@ -749,7 +743,6 @@ fn footer_hints(width: u16, home: Option<&str>, pairs: &[(&str, &str)]) -> Line<
         let bare = key.chars().count() + 2;
         let key_style = Style::default()
             .fg(theme().focus)
-            .bg(theme().key_fill)
             .add_modifier(Modifier::BOLD);
         let action_style = Style::default().fg(theme().muted);
         let (chunk, extra) = if used + labeled <= budget {
@@ -1018,12 +1011,10 @@ fn hint_badge(label: &str, prefix_len: usize) -> Vec<Span<'static>> {
     let prefix_len = prefix_len.min(label.len());
     let (typed, remaining) = label.split_at(prefix_len);
     let mark = Style::default()
-        .fg(theme().tip_mark_fg)
-        .bg(theme().tip_mark_bg)
+        .fg(theme().tip_mark_bg)
         .add_modifier(Modifier::BOLD);
     let typed_style = Style::default()
         .fg(theme().tip_typed)
-        .bg(theme().tip_mark_bg)
         .add_modifier(Modifier::BOLD);
     let mut spans = vec![Span::styled(" ", mark)];
     if !typed.is_empty() {
@@ -1583,8 +1574,12 @@ mod tests {
         .lines
         .join("\n");
         assert!(
-            ansi.contains("\u{1b}[48;2;48;40;62m"),
-            "footer keys should use the subdued key surface:\n{ansi}"
+            !ansi.contains("\u{1b}[48;2;48;40;62m"),
+            "footer keys stay on the default background:\n{ansi}"
+        );
+        assert!(
+            ansi.contains("\u{1b}[38;2;228;212;255m"),
+            "footer keys keep the focus lilac foreground:\n{ansi}"
         );
     }
 
@@ -1617,12 +1612,12 @@ mod tests {
             "tip should gain padding so it reads larger:\n{text}"
         );
         assert!(
-            ansi.contains("\u{1b}[48;2;246;213;107m"),
-            "tip pill needs the high-contrast sand background:\n{ansi}"
+            !ansi.contains("\u{1b}[48;2;246;213;107m"),
+            "tip labels are not sand-filled pills:\n{ansi}"
         );
         assert!(
-            ansi.contains("\u{1b}[38;2;22;26;34m"),
-            "tip letter should stay near-black on sand:\n{ansi}"
+            ansi.contains("\u{1b}[38;2;246;213;107m"),
+            "tip letter uses sand as foreground:\n{ansi}"
         );
     }
 
@@ -1764,8 +1759,8 @@ mod tests {
             "empty flash must still tint the pane:\n{flash_ansi}"
         );
         assert!(
-            flash_ansi.contains("\u{1b}[48;2;228;212;255m"),
-            "FLASH pill should use focus lilac, not tip cool:\n{flash_ansi}"
+            flash_ansi.contains("\u{1b}[38;2;228;212;255m"),
+            "FLASH label uses focus lilac as text, not a fill:\n{flash_ansi}"
         );
 
         board.decide(Key::Dismiss);
@@ -1785,8 +1780,12 @@ mod tests {
             "search must not reuse the flash tint:\n{search_ansi}"
         );
         assert!(
-            search_ansi.contains("\u{1b}[48;2;162;197;206m"),
-            "search pill stays on cool tip-bg:\n{search_ansi}"
+            search_ansi.contains("\u{1b}[38;2;162;197;206m"),
+            "search slash uses cool tip color as text:\n{search_ansi}"
+        );
+        assert!(
+            !search_ansi.contains("\u{1b}[48;2;162;197;206m"),
+            "search slash is not a filled pill:\n{search_ansi}"
         );
     }
 

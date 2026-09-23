@@ -36,12 +36,12 @@
   --card-border: #61687c;
   --separator: var(--card-border);
 
-  /* 底栏药丸；名单里时间列默认 gutter；done 未读/陈旧再叠色 */
+  /* 底栏 / 搜索点缀色；不再当填色药丸，只当字色 */
   --tip-fg: #0d1117;
   --tip-bg: #a2c5ce;
   --tip-typed: #443250;
 
-  /* jump tip：加宽药丸，深色字压亮砂，flash 蒙层上也够跳 */
+  /* jump tip 字色（砂） */
   --tip-mark-fg: #161a22;
   --tip-mark-bg: #f6d56b;
 
