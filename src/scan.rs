@@ -31,6 +31,7 @@ pub fn scan_host_text() -> String {
     let args_by_pid = ps_args(&pids);
     let env_by_pid = ps_env(&pids);
     let mut live_keys: HashSet<String> = HashSet::new();
+    let mut unplaced: Vec<Unplaced> = Vec::new();
     let mut panes_by_session: BTreeMap<String, Option<HashSet<u32>>> = BTreeMap::new();
     for pid in &pids {
         let Some(args) = args_by_pid.get(pid) else {
@@ -54,10 +55,20 @@ pub fn scan_host_text() -> String {
                 }
             }
         }
+        // Node `process.title` overwrites the ps-visible env block, so a live
+        // `pi` has no ZELLIJ_PANE_ID here even though the pane is real.
         let Some(blob) = env_by_pid.get(pid) else {
+            unplaced.push(Unplaced {
+                pid: *pid,
+                bin: comm,
+            });
             continue;
         };
         let Some((session, pane)) = zellij_ids_from_env_blob(blob) else {
+            unplaced.push(Unplaced {
+                pid: *pid,
+                bin: comm,
+            });
             continue;
         };
         if !session_is_in_scope(&session, session_prefix.as_deref()) {
@@ -77,25 +88,14 @@ pub fn scan_host_text() -> String {
             continue;
         }
         out.push_str(&format!("SCAN {session} {pane} {comm} {args}\n"));
-        if let Some(hook) = read_spool(&key) {
-            out.push_str(&hook);
-            if !hook.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-        if let Some(seen) = read_seen(&key) {
-            out.push_str(&seen);
-            if !seen.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-        if let Some(started) = read_started(&key) {
-            out.push_str(&started);
-            if !started.ends_with('\n') {
-                out.push('\n');
-            }
-        }
+        append_saved_lines(&mut out, &key);
     }
+    recover_title_clobbered_panes(
+        &mut out,
+        &mut live_keys,
+        &unplaced,
+        session_prefix.as_deref(),
+    );
     // A failed match (0 live keys) must not wipe hook history.
     if !live_keys.is_empty() {
         prune_spool(&live_keys);
@@ -103,6 +103,222 @@ pub fn scan_host_text() -> String {
         prune_dir(&started_dir(), &live_keys);
     }
     out
+}
+
+struct Unplaced {
+    pid: u32,
+    bin: String,
+}
+
+fn append_saved_lines(out: &mut String, key: &str) {
+    for read in [read_spool, read_seen, read_started] {
+        if let Some(text) = read(key) {
+            out.push_str(&text);
+            if !text.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+}
+
+/// `ps eww` cannot see `ZELLIJ_PANE_ID` after Node sets `process.title`.
+/// The Zellij server process still carries `ZELLIJ_SESSION_NAME`, and
+/// `list-panes` `pane_command` still starts with the CLI name.
+fn recover_title_clobbered_panes(
+    out: &mut String,
+    live_keys: &mut HashSet<String>,
+    unplaced: &[Unplaced],
+    session_prefix: Option<&str>,
+) {
+    if unplaced.is_empty() {
+        return;
+    }
+    let mut by_session: BTreeMap<String, Vec<&Unplaced>> = BTreeMap::new();
+    for row in unplaced {
+        let Some(session) = session_from_ancestors(row.pid) else {
+            continue;
+        };
+        if !session_is_in_scope(&session, session_prefix) {
+            continue;
+        }
+        by_session.entry(session).or_default().push(row);
+    }
+    for (session, rows) in by_session {
+        let Some(json) = list_panes_json(&session) else {
+            continue;
+        };
+        let hits = catalog_panes_from_json(&json);
+        let mut taken: HashSet<u32> = live_keys
+            .iter()
+            .filter_map(|key| pane_id_from_key(key, &session))
+            .collect();
+        for row in rows {
+            let cwd = process_cwd(row.pid);
+            let Some(hit) = pick_pane(&hits, &row.bin, cwd.as_deref(), &taken) else {
+                continue;
+            };
+            let key = format!("{session}-{}", hit.pane_id);
+            if !live_keys.insert(key.clone()) {
+                continue;
+            }
+            taken.insert(hit.pane_id);
+            let args = hit.argv.join(" ");
+            out.push_str(&format!(
+                "SCAN {session} {} {} {args}\n",
+                hit.pane_id, hit.bin
+            ));
+            append_saved_lines(out, &key);
+        }
+    }
+}
+
+fn pane_id_from_key(key: &str, session: &str) -> Option<u32> {
+    let (name, pane) = key.rsplit_once('-')?;
+    (name == session).then(|| pane.parse().ok())?
+}
+
+fn session_from_ancestors(pid: u32) -> Option<String> {
+    let mut current = pid;
+    for _ in 0..8 {
+        let parent = parent_pid(current)?;
+        if let Some(blob) = ps_env(&[parent]).get(&parent) {
+            if let Some(session) = env_value(blob, "ZELLIJ_SESSION_NAME") {
+                if !session.is_empty() {
+                    return Some(session);
+                }
+            }
+        }
+        if parent == 1 {
+            break;
+        }
+        current = parent;
+    }
+    None
+}
+
+fn parent_pid(pid: u32) -> Option<u32> {
+    let output = Command::new(ps_bin())
+        .args(["-p", &pid.to_string(), "-o", "ppid="])
+        .output()
+        .ok()?;
+    let ppid = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()?;
+    (ppid > 0 && ppid != pid).then_some(ppid)
+}
+
+fn process_cwd(pid: u32) -> Option<String> {
+    let output = Command::new(lsof_bin())
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix('n').map(str::to_string))
+}
+
+struct PaneHit {
+    pane_id: u32,
+    cwd: String,
+    argv: Vec<String>,
+    bin: String,
+}
+
+fn catalog_panes_from_json(json: &str) -> Vec<PaneHit> {
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            if item.get("is_plugin").and_then(serde_json::Value::as_bool) != Some(false) {
+                return None;
+            }
+            if item.get("exited").and_then(serde_json::Value::as_bool) == Some(true) {
+                return None;
+            }
+            let command = item
+                .get("pane_command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let mut argv = argv_before_glued_env(command);
+            if !crate::agent::keep_cursor_agent(&argv) {
+                return None;
+            }
+            let bin = argv
+                .first()?
+                .rsplit('/')
+                .next()
+                .unwrap_or(argv.first()?.as_str())
+                .to_string();
+            let cwd = item
+                .get("pane_cwd")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if crate::agent::workspace_from_argv(&argv).is_none()
+                && !cwd.is_empty()
+                && !cwd.chars().any(char::is_whitespace)
+            {
+                argv.push("--workspace".into());
+                argv.push(cwd.clone());
+            }
+            let pane_id = item.get("id").and_then(serde_json::Value::as_u64)? as u32;
+            Some(PaneHit {
+                pane_id,
+                cwd,
+                argv,
+                bin,
+            })
+        })
+        .collect()
+}
+
+fn pick_pane<'a>(
+    hits: &'a [PaneHit],
+    bin: &str,
+    cwd: Option<&str>,
+    taken: &HashSet<u32>,
+) -> Option<&'a PaneHit> {
+    let mut matched: Vec<&PaneHit> = hits
+        .iter()
+        .filter(|hit| hit.bin == bin && !taken.contains(&hit.pane_id))
+        .collect();
+    if matched.len() > 1 {
+        if let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) {
+            let narrowed: Vec<&PaneHit> = matched
+                .iter()
+                .copied()
+                .filter(|hit| hit.cwd == cwd)
+                .collect();
+            if !narrowed.is_empty() {
+                matched = narrowed;
+            }
+        }
+    }
+    matched.into_iter().next()
+}
+
+/// Node's `process.title` smashes the NUL between argv and env, so Zellij's
+/// `pane_command` looks like `pi CAML_LD_LIBRARY_PATH=/...`.
+fn argv_before_glued_env(command: &str) -> Vec<String> {
+    command
+        .split_whitespace()
+        .take_while(|token| !is_glued_env(token))
+        .map(str::to_string)
+        .collect()
+}
+
+fn is_glued_env(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn session_is_in_scope(session: &str, prefix: Option<&str>) -> bool {
@@ -630,6 +846,62 @@ mod tests {
         if Path::new("/usr/sbin/lsof").is_file() {
             assert_eq!(super::lsof_bin(), "/usr/sbin/lsof");
         }
+    }
+
+    #[test]
+    fn live_scan_keeps_a_pi_whose_ps_env_is_unreadable() {
+        let dump = std::process::Command::new(super::ps_bin())
+            .args(["ax", "-o", "pid=", "-o", "comm="])
+            .output();
+        let has_pi = dump
+            .ok()
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.split_whitespace().nth(1) == Some("pi"))
+            })
+            .unwrap_or(false);
+        if !has_pi {
+            return;
+        }
+        let text = super::scan_host_text();
+        assert!(
+            text.lines()
+                .any(|line| { line.split_whitespace().nth(3) == Some("pi") }),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn pi_pane_command_keeps_the_bin_and_drops_glued_env() {
+        assert_eq!(
+            super::argv_before_glued_env("pi CAML_LD_LIBRARY_PATH=/Users/ww/.opam/lf/lib/ocaml"),
+            vec!["pi".to_string()]
+        );
+        assert_eq!(
+            super::argv_before_glued_env("pi -p hello CAML_LD_LIBRARY_PATH=/tmp"),
+            vec!["pi".to_string(), "-p".into(), "hello".into()]
+        );
+        let json = r#"[
+            {"id":0,"is_plugin":false,"pane_command":"/Users/ww/.local/bin/agent --workspace /tmp/w","pane_cwd":"/tmp/w","exited":false},
+            {"id":1,"is_plugin":false,"pane_command":"pi CAML_LD_LIBRARY_PATH=/Users/ww/.opam/lf/lib/ocaml","pane_cwd":"/tmp/pi","exited":false},
+            {"id":2,"is_plugin":false,"pane_command":"pi -p hello CAML_LD_LIBRARY_PATH=/tmp","pane_cwd":"/tmp/one-shot","exited":false},
+            {"id":3,"is_plugin":false,"pane_command":"/bin/zsh","pane_cwd":"/tmp/sh","exited":false}
+        ]"#;
+        let hits = super::catalog_panes_from_json(json);
+        assert_eq!(hits.len(), 2);
+        let taken = HashSet::from([0]);
+        let hit = super::pick_pane(&hits, "pi", Some("/tmp/pi"), &taken).expect("pi pane");
+        assert_eq!(hit.pane_id, 1);
+        assert_eq!(
+            hit.argv,
+            vec![
+                "pi".to_string(),
+                "--workspace".to_string(),
+                "/tmp/pi".to_string()
+            ]
+        );
+        assert!(super::pick_pane(&hits, "pi", Some("/tmp/missing"), &HashSet::from([1])).is_none());
     }
 
     #[test]

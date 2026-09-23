@@ -109,6 +109,23 @@ PermissionRequest = "permissionRequest"
 PreCompact = "preCompact"
 PostCompact = "postCompact"
 
+# Pi (@earendil-works/pi-coding-agent): no hooks.json. An extension under
+# ~/.pi/agent/extensions observes pi.on() and shells out to the shared hook.
+# tool_call is not used: a throwing handler blocks the tool.
+[protocol.pi]
+install = "pi"
+plugin = "scripts/pi-extension.js"
+
+[protocol.pi.map]
+session_start = "sessionStart"
+session_shutdown = "sessionEnd"
+before_agent_start = "beforeSubmitPrompt"
+tool_execution_start = "preToolUse"
+tool_execution_end = "postToolUse"
+session_before_compact = "preCompact"
+session_compact = "postCompact"
+agent_end = "stop"
+
 # Reasonix (Go CLI): Claude-shaped event names, but settings.json is a flat
 # {command, match} list — not the Claude matcher/hooks tree. Native stdin
 # uses event/toolName/toolArgs/isInterrupt/notificationType.
@@ -292,4 +309,28 @@ skip = [
   "completion",
   "version",
   "help",
+]
+
+[[adapter]]
+id = "pi"
+badge = "PI"
+color = "#e09878"
+bins = ["pi"]
+protocol = "pi"
+settings = "~/.pi/agent/extensions/zellij-agent-board.js"
+hook_dir = "~/.pi/agent/extensions"
+skip = [
+  "--print",
+  "-p",
+  "--export",
+  "--list-models",
+  "--help",
+  "-h",
+  "install",
+  "remove",
+  "uninstall",
+  "update",
+  "list",
+  "config",
+  "auth",
 ]

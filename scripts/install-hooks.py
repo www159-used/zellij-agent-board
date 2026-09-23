@@ -214,7 +214,7 @@ def main(argv: list[str]) -> None:
             install_cc(adapter, protocols, command)
         elif kind == "codex":
             install_codex(adapter, protocols, command)
-        elif kind == "opencode":
+        elif kind in ("opencode", "pi"):
             install_opencode(adapter, protocols, dest_dir)
         elif kind == "reasonix":
             install_reasonix(adapter, protocols, command)

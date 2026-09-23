@@ -379,7 +379,8 @@ mod tests {
                 "claude",
                 "opencode",
                 "codex",
-                "reasonix"
+                "reasonix",
+                "pi"
             ]
         );
         assert!(catalog.wants_bin("agent"));
@@ -388,6 +389,7 @@ mod tests {
         assert!(catalog.wants_bin("opencode"));
         assert!(catalog.wants_bin("codex"));
         assert!(catalog.wants_bin("reasonix"));
+        assert!(catalog.wants_bin("pi"));
         assert!(!catalog.wants_bin("vim"));
     }
 
@@ -462,6 +464,19 @@ mod tests {
             catalog.protocol("reasonix").map(|p| p.install.as_str()),
             Some("reasonix")
         );
+        assert_eq!(
+            catalog
+                .adapter_for_bin("pi")
+                .map(|adapter| adapter.protocol.as_str()),
+            Some("pi")
+        );
+        assert_eq!(
+            catalog.protocol("pi").map(|p| p.install.as_str()),
+            Some("pi")
+        );
+        assert_eq!(catalog.normalize_event("session_start"), "sessionStart");
+        assert_eq!(catalog.normalize_event("agent_end"), "stop");
+        assert_eq!(catalog.normalize_event("tool_execution_end"), "postToolUse");
     }
 
     #[test]
@@ -481,6 +496,10 @@ mod tests {
         assert_eq!(
             catalog.badge_for("reasonix"),
             ("RX".into(), Some("#c4b08a".into()))
+        );
+        assert_eq!(
+            catalog.badge_for("pi"),
+            ("PI".into(), Some("#e09878".into()))
         );
         assert_eq!(
             catalog
@@ -514,6 +533,12 @@ mod tests {
         assert!(keep_process(&argv(&["reasonix", "--continue"])));
         assert!(!keep_process(&argv(&["reasonix", "run", "hello"])));
         assert!(!keep_process(&argv(&["reasonix", "-p", "hello"])));
+        assert!(keep_process(&argv(&["pi"])));
+        assert!(keep_process(&argv(&["pi", "--continue"])));
+        assert!(keep_process(&argv(&["pi", "-c"])));
+        assert!(!keep_process(&argv(&["pi", "-p", "hello"])));
+        assert!(!keep_process(&argv(&["pi", "install", "foo"])));
+        assert!(!keep_process(&argv(&["pi", "--list-models"])));
         assert!(keep_row(&argv(&["opencode-next"])));
         assert!(!keep_row(&argv(&["agent", "status"])));
     }
@@ -565,6 +590,18 @@ hook_dir = "~/.mycli/hooks"
     }
 
     #[test]
+    fn pi_extension_observes_without_blocking_tools() {
+        let plugin = include_str!("../scripts/pi-extension.js");
+        assert!(plugin.contains(super::HOOK_MARKER));
+        assert!(plugin.contains("tool_execution_start"));
+        assert!(plugin.contains("tool_execution_end"));
+        assert!(plugin.contains("postToolUseFailure"));
+        assert!(plugin.contains("agent_settled"));
+        assert!(plugin.contains("reason === \"quit\""));
+        assert!(!plugin.contains("pi.on(\"tool_call\""));
+    }
+
+    #[test]
     fn opencode_plugin_embeds_the_hook_marker() {
         let plugin = include_str!("../scripts/opencode-plugin.js");
         assert!(plugin.contains(super::HOOK_MARKER));
@@ -613,6 +650,9 @@ hook_dir = "~/.mycli/hooks"
         assert!(paths
             .iter()
             .any(|path| path.ends_with(".reasonix/settings.json")));
+        assert!(paths
+            .iter()
+            .any(|path| path.ends_with(".pi/agent/extensions/zellij-agent-board.js")));
         assert!(paths
             .iter()
             .any(|path| path.ends_with("opencode/plugins/zellij-agent-board.js")));

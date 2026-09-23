@@ -4,7 +4,7 @@ English · [中文](docs/zh/README.md)
 
 Floating Zellij dashboard of running coding agents, with live hook status, search, and jump-to-pane across sessions.
 
-Supports Cursor, CodeBuddy, Claude Code, OpenCode, Codex, and Reasonix through a declarative adapter catalog. Process scans create and remove Agents; hooks only update existing Agents. See [ROADMAP.md](ROADMAP.md) for follow-up work.
+Supports Cursor, CodeBuddy, Claude Code, OpenCode, Codex, Reasonix, and Pi through a declarative adapter catalog. Process scans create and remove Agents; hooks only update existing Agents. See [ROADMAP.md](ROADMAP.md) for follow-up work.
 
 This project is the dashboard; the separate `zellij-agent` project provides a floating agent launcher.
 
@@ -21,7 +21,7 @@ make install-hooks
 
 `make install` copies the bundled binaries, or builds both when run from a source checkout, into `~/.config/zellij/plugins/`. Override the WASM path with `ZELLIJ_AGENT_BOARD_PLUGIN_PATH`; the TUI is installed beside it. The runtime TUI path can be overridden with `ZELLIJ_AGENT_BOARD_TUI` or a `tui` plugin config key.
 
-`make install-hooks` registers hooks from `adapters/catalog.toml` (Cursor, CodeBuddy, Claude Code, OpenCode, Codex, Reasonix). Use `make install-hooks ADAPTER=codex` to install one only; the default is `ADAPTER=all`. A new cc-family CLI is a drop-in TOML under `~/.config/zellij-agent-board/adapters/`.
+`make install-hooks` registers hooks from `adapters/catalog.toml` (Cursor, CodeBuddy, Claude Code, OpenCode, Codex, Reasonix, Pi). Use `make install-hooks ADAPTER=codex` to install one only; the default is `ADAPTER=all`. A new cc-family CLI is a drop-in TOML under `~/.config/zellij-agent-board/adapters/`.
 
 ## Keybinding
 
@@ -64,7 +64,7 @@ The TUI first loads the cached scan, then requests a background reconcile about 
 
 Titles, the last scan, and seen/started markers live in `$ZAB_STATE_DIR`, `$XDG_CACHE_HOME/zellij-agent-board`, or `~/.cache/zellij-agent-board`, in that order. Launch focus is passed directly to each TUI. Hooks publish their latest notice under `$TMPDIR/zellij-agent-board-spool` and separately maintain the turn-start marker. Hooks never launch a WASM plugin. Unread completion can emit a terminal notification.
 
-Codex `Interrupt` and Cursor `stop`/`afterAgentResponse` with `status=aborted` appear as `■ stopped`. Cursor `status=error`, Claude/CodeBuddy `StopFailure`, and OpenCode `session.error` appear as `✗ failed`. Both clear the working timer without marking the turn done or sending a completion notification. Permission prompts (`PermissionRequest`, CodeBuddy `Notification` `permission_prompt`, OpenCode `permission.asked`) appear as `● waiting` and keep the turn start so elapsed time resumes. Claude/CodeBuddy `Notification` `idle_prompt` appears as `◑ idle-wait` and clears the turn without a completion notice. After upgrading, rerun `make install-hooks` for the CLIs you use and restart those sessions. Notices from before the new hooks were installed cannot be recovered.
+Codex `Interrupt`, Pi `agent_settled` with `aborted`, and Cursor `stop`/`afterAgentResponse` with `status=aborted` appear as `■ stopped`. Cursor `status=error`, Claude/CodeBuddy `StopFailure`, OpenCode `session.error`, and Pi `agent_settled` with `error` appear as `✗ failed`. Both clear the working timer without marking the turn done or sending a completion notification. Permission prompts (`PermissionRequest`, CodeBuddy `Notification` `permission_prompt`, OpenCode `permission.asked`) appear as `● waiting` and keep the turn start so elapsed time resumes. Claude/CodeBuddy `Notification` `idle_prompt` appears as `◑ idle-wait` and clears the turn without a completion notice. After upgrading, rerun `make install-hooks` for the CLIs you use and restart those sessions. Notices from before the new hooks were installed cannot be recovered.
 
 ## Develop
 
