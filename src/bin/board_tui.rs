@@ -33,7 +33,7 @@ use serde_json::json;
 use zellij_agent_board::{
     format_jump, load_last_jump, load_places, load_scan, now_ms, persist_last_jump, persist_seen,
     places_path, reconcile_once, render_board, run_reconcile, runtime_dir, scan_path,
-    scan_places_for, spool_dir, stats, zellij_bin, Action, AgentId, Board, Key, PIPE_NAME,
+    scan_places_for, spool_dir, stats, zellij_bin, Action, AgentId, Board, Key, Overlay, PIPE_NAME,
 };
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -435,8 +435,10 @@ impl App {
         self.launch_focus = None;
         // C-e / C-y: same move-together scroll as the wheel (spotlight holds
         // its screen line; the list flows under it).
-        if let Some(delta) = view_scroll_delta(event) {
-            return self.scroll_input(ScrollSource::Keyboard, delta);
+        if !self.board.overlay_visible() {
+            if let Some(delta) = view_scroll_delta(event) {
+                return self.scroll_input(ScrollSource::Keyboard, delta);
+            }
         }
         let mapped = if self.board.is_picking() {
             map_picker_key(event)
@@ -601,7 +603,9 @@ impl App {
             ],
         );
         // Only the wheel scrolls the picker; the keys keep their old meaning.
-        let moved = if source == ScrollSource::Mouse && self.board.is_picking() {
+        let moved = if self.board.overlay_visible() {
+            false
+        } else if source == ScrollSource::Mouse && self.board.is_picking() {
             self.board.scroll_picker(delta)
         } else {
             self.board.scroll_view(delta)
@@ -1130,6 +1134,7 @@ fn map_key(event: KeyEvent, hinting: bool, searching: bool) -> Option<Key> {
         KeyCode::Esc => Some(Key::Dismiss),
         KeyCode::Char('q') if !typing => Some(Key::Dismiss),
         KeyCode::Char('?') if !typing => Some(Key::ToggleHelp),
+        KeyCode::Char('S') if !typing => Some(Key::ToggleSettings),
         KeyCode::Backspace if typing => Some(Key::Backspace),
         KeyCode::Char('s') if !typing => Some(Key::StartHint),
         KeyCode::Char('/') if !typing => Some(Key::StartSearch),
@@ -1280,7 +1285,13 @@ fn log_mode_change(key: Key, before: &ModeSnap, board: &Board) {
         log::info!("picker_end reason={reason}");
     }
     if matches!(key, Key::ToggleHelp) {
-        log::info!("help_toggle visible={}", board.help_visible);
+        log::info!("help_toggle visible={}", board.overlay == Overlay::Help);
+    }
+    if matches!(key, Key::ToggleSettings) {
+        log::info!(
+            "settings_toggle visible={}",
+            board.overlay == Overlay::Settings
+        );
     }
 }
 

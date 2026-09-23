@@ -2,7 +2,7 @@
 //! v2 events share a visit ID, sequence and monotonic elapsed time.
 //! Raw input text and real session/pane identifiers are never serialized.
 
-use crate::{AgentId, Board, Key};
+use crate::{AgentId, Board, Key, Overlay};
 use serde_json::json;
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::io::Write;
@@ -166,7 +166,9 @@ impl Visit {
         let state = json!({"rows": rows, "selected": board.selected,
             "width": width, "height": height, "searching": board.is_searching(),
             "hinting": board.is_hinting(), "picking": board.is_picking(),
-            "help": board.help_visible, "search_length": board.search_query().chars().count(),
+            "help": board.overlay == Overlay::Help,
+            "settings": board.overlay == Overlay::Settings,
+            "search_length": board.search_query().chars().count(),
             "picker_length": board.picker_query().chars().count(),
             "picker_focus": format!("{:?}", board.picker_focus()),
             "picker_position": board.picker_position(), "picker_matches": board.picker_matches(),
@@ -310,11 +312,12 @@ pub fn summarize(log: &str) -> Summary {
             }
             "state" => {
                 if let Some(state) = map.get("state").and_then(Value::as_object) {
-                    let active: BTreeSet<String> = ["searching", "hinting", "picking", "help"]
-                        .into_iter()
-                        .filter(|key| state.get(*key).and_then(Value::as_bool) == Some(true))
-                        .map(String::from)
-                        .collect();
+                    let active: BTreeSet<String> =
+                        ["searching", "hinting", "picking", "help", "settings"]
+                            .into_iter()
+                            .filter(|key| state.get(*key).and_then(Value::as_bool) == Some(true))
+                            .map(String::from)
+                            .collect();
                     let previous = modes.entry(visit).or_default();
                     for mode in active.difference(previous) {
                         *summary.mode_entries.entry(mode.clone()).or_default() += 1;

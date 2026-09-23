@@ -54,7 +54,10 @@ The WASM pane hides itself and opens `board-tui` with `new-pane --floating --clo
 | `p`, then `Tab` | Open the full-list picker, switch between query and labels |
 | `Enter`, mouse click | Jump to the selected Agent |
 | `?` | Show help |
+| `S` | Open Settings (empty placeholder for future customization) |
 | `Esc`, `q` | Dismiss the board; `Esc` first cancels an active overlay, while `q` remains input during search |
+
+Settings currently has no options. Press `S`, `Esc`, or `q` to return to the Agent list.
 
 The picker supports mouse-wheel scrolling and a scrollbar on the right: click or drag its thumb to scroll. Keyboard behavior is unchanged.
 

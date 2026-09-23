@@ -5,10 +5,10 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
 };
 
-use crate::{theme::theme, Agent, Board, BodyLine, HintField, PickerFocus, Status};
+use crate::{theme::theme, Agent, Board, BodyLine, HintField, Overlay, PickerFocus, Status};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PaintCtx<'a> {
@@ -107,12 +107,14 @@ pub fn render_board(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) 
     buffer.set_style(area, Style::default().fg(theme().text));
     let (content, footer) = content_and_footer(area);
 
-    if board.help_visible {
-        render_help(content, buffer);
-    } else {
-        render_list(board, home, content, buffer);
-        if board.is_picking() {
-            render_picker(board, home, content, buffer);
+    match board.overlay {
+        Overlay::Settings => render_settings(content, buffer),
+        Overlay::Help => render_help(content, buffer),
+        Overlay::None => {
+            render_list(board, home, content, buffer);
+            if board.is_picking() {
+                render_picker(board, home, content, buffer);
+            }
         }
     }
     if let Some(footer) = footer {
@@ -140,14 +142,20 @@ fn clamp_dim(value: usize, unlimited: u16) -> u16 {
     }
 }
 
+/// The titled frame every card laid over the list shares: help, settings, and
+/// the floating picker.
+fn overlay_block(title: &'static str) -> Block<'static> {
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme().focus))
+}
+
 fn render_help(area: Rect, buffer: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let block = Block::default()
-        .title(" help ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme().focus));
+    let block = overlay_block(" help ");
     let inner = block.inner(area);
     block.render(area, buffer);
     let key = |text: &str| {
@@ -178,10 +186,26 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
         Line::from(vec![key("p  Tab"), Span::raw("picker / tip jump")]),
         Line::from(vec![key("q  Esc"), Span::raw("close")]),
         Line::from(vec![key("Alt+q"), Span::raw("toggle board")]),
+        Line::from(vec![key("S"), Span::raw("settings")]),
         Line::from(vec![key("!"), Span::raw("done, not opened yet")]),
         Line::from(vec![key("?"), Span::raw("close help")]),
     ];
     Paragraph::new(lines).render(inner, buffer);
+}
+
+fn render_settings(area: Rect, buffer: &mut Buffer) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let block = overlay_block(" settings ");
+    let inner = block.inner(area);
+    block.render(area, buffer);
+    Paragraph::new(Line::from(Span::styled(
+        "No settings yet. Customization options will appear here.",
+        Style::default().fg(theme().muted),
+    )))
+    .wrap(Wrap { trim: true })
+    .render(inner, buffer);
 }
 
 fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
@@ -540,10 +564,7 @@ fn render_picker(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         box_area,
         Style::default().fg(theme().text).bg(theme().surface),
     );
-    let block = Block::default()
-        .title(" search ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme().focus));
+    let block = overlay_block(" search ");
     let inner = block.inner(box_area);
     block.render(box_area, buffer);
     if inner.width == 0 || inner.height == 0 {
@@ -648,7 +669,9 @@ fn render_picker_results(board: &Board, home: &str, area: Rect, buffer: &mut Buf
 }
 
 fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
-    let line = if board.help_visible {
+    let line = if board.overlay == Overlay::Settings {
+        footer_hints(area.width, None, &[("Esc  q  S", "back")])
+    } else if board.overlay == Overlay::Help {
         footer_hints(area.width, None, &[("q", "close"), ("?", "close")])
     } else if board.is_picking() {
         Line::from(vec![
@@ -722,6 +745,7 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
                 ("/", "find"),
                 ("q", "close"),
                 ("?", "more"),
+                ("S", "settings"),
             ],
         )
     };
@@ -1246,7 +1270,7 @@ mod tests {
         agent_at, fmt_ago, fmt_elapsed, frame_patch, paint, paint_to_size, picker_box, strip_ansi,
         PaintCtx,
     };
-    use crate::{Action, Agent, AgentId, Board, HintField, Key, Status};
+    use crate::{Action, Agent, AgentId, Board, HintField, Key, Overlay, Status};
     use ratatui::layout::Rect;
 
     fn agent() -> Agent {
@@ -1345,7 +1369,7 @@ mod tests {
         };
         board.agents = (1..=3).map(|pane| plain_agent("ww", pane)).collect();
         board.hovered = Some(1);
-        board.help_visible = true;
+        board.overlay = Overlay::Help;
         let text = painted(&board, 8, 80, "");
         assert_eq!(board.hovered_row(), None);
         assert!(!text.contains('›'), "overlay owns the frame:\n{text}");

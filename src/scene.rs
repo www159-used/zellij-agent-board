@@ -364,6 +364,14 @@ fn parse_key(args: &[&str], line: usize, typing: bool) -> Result<Key, SceneError
             exact(args, 1, line, "key ?")?;
             Ok(Key::ToggleHelp)
         }
+        Some("S") if typing => {
+            exact(args, 1, line, "key S")?;
+            Ok(Key::Input('S'))
+        }
+        Some("S") => {
+            exact(args, 1, line, "key S")?;
+            Ok(Key::ToggleSettings)
+        }
         Some("backspace") => {
             exact(args, 1, line, "key backspace")?;
             Ok(Key::Backspace)

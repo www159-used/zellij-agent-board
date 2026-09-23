@@ -1,0 +1,25 @@
+# Settings is a separate page, including when the board has no agents.
+size 80 12
+key S
+expect screen contains settings
+expect screen contains No settings yet
+expect screen excludes no cursor agents
+key esc
+expect screen contains no cursor agents
+
+meta hooks=1
+scan ww 3 /tmp/ww
+place ww 3 0 notes notes
+expect selected ww 3
+key S
+expect screen contains No settings yet
+expect screen excludes notes
+key enter
+expect action none
+click 2 4
+expect action none
+key q
+expect action none
+expect selected ww 3
+expect screen contains notes
+expect screen excludes No settings yet

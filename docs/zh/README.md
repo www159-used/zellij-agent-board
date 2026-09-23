@@ -52,7 +52,10 @@ WASM 会隐藏自身，通过 `new-pane --floating --close-on-exit` 打开 `boar
 | `p`，随后 `Tab` | 打开全列表选择器，在查询和标签间切换 |
 | `Enter`、鼠标点击 | 跳转到 Agent |
 | `?` | 查看帮助 |
+| `S` | 打开 Settings 页面（目前仅为后续自定义功能预留） |
 | `Esc`、`q` | 关闭看板；`Esc` 优先取消当前浮层，搜索时 `q` 仍作为输入 |
+
+Settings 页面目前没有可调整的选项。按 `S`、`Esc` 或 `q` 返回 Agent 列表。
 
 Picker 支持鼠标滚轮，以及右侧滑块的点击和拖动滚动；键盘操作保持原样。
 

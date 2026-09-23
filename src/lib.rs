@@ -74,6 +74,7 @@ pub enum Key {
     Confirm,
     Dismiss,
     ToggleHelp,
+    ToggleSettings,
     StartHint,
     StartSearch,
     NextMatch,
@@ -160,6 +161,28 @@ struct PickerState {
     jump_prefix: String,
 }
 
+/// Full-page overlay owning the frame. One at a time: opening either
+/// replaces whatever was up, so the painter and the input router only ever
+/// branch on a single value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Overlay {
+    #[default]
+    None,
+    Help,
+    Settings,
+}
+
+impl Overlay {
+    /// The key that opens this overlay, and closes it again.
+    fn toggle_key(self) -> Option<Key> {
+        match self {
+            Overlay::None => None,
+            Overlay::Help => Some(Key::ToggleHelp),
+            Overlay::Settings => Some(Key::ToggleSettings),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Board {
     pub agents: Vec<Agent>,
@@ -173,7 +196,7 @@ pub struct Board {
     pub wall_now: u64,
     /// Frozen host epoch from open; done "ago" uses this and does not tick.
     pub wall_at_open: u64,
-    pub help_visible: bool,
+    pub overlay: Overlay,
     hint: Option<HintState>,
     search: Option<SearchState>,
     picker: Option<PickerState>,
@@ -454,14 +477,13 @@ impl Board {
     }
 
     fn decide_key(&mut self, key: Key) -> Action {
-        if self.help_visible {
-            return match key {
-                Key::ToggleHelp | Key::Dismiss => {
-                    self.help_visible = false;
-                    Action::None
-                }
-                _ => Action::None,
-            };
+        // An overlay owns the frame: its own toggle or Esc closes it and
+        // every other key is swallowed.
+        if self.overlay != Overlay::None {
+            if key == Key::Dismiss || Some(key) == self.overlay.toggle_key() {
+                self.overlay = Overlay::None;
+            }
+            return Action::None;
         }
         if self.is_picking() {
             return match key {
@@ -558,11 +580,8 @@ impl Board {
             };
         }
         match key {
-            Key::ToggleHelp => {
-                self.clear_motion();
-                self.help_visible = true;
-                Action::None
-            }
+            Key::ToggleSettings => self.open_overlay(Overlay::Settings),
+            Key::ToggleHelp => self.open_overlay(Overlay::Help),
             Key::Dismiss => Action::Dismiss,
             Key::Digit(digit) => {
                 self.g_pending = false;
@@ -925,11 +944,11 @@ impl Board {
     }
 
     /// Row the pointer previews in the list being painted — the picker when
-    /// `picker`, the board otherwise. `None` when help owns the frame or the
-    /// other overlay is up. The painter reads this; the raw field may still
-    /// hold a row from before the overlay changed.
+    /// `picker`, the board otherwise. `None` when an overlay owns the frame
+    /// or the other list is up. The painter reads this; the raw field may
+    /// still hold a row from before the overlay changed.
     pub(crate) fn hovered_in(&self, picker: bool) -> Option<usize> {
-        if self.help_visible || self.is_picking() != picker {
+        if self.overlay_visible() || self.is_picking() != picker {
             return None;
         }
         self.hovered
@@ -947,7 +966,7 @@ impl Board {
     /// Preview the row under the pointer. Chrome, the gutter, and overlays
     /// clear it. Returns whether the preview changed.
     pub fn hover(&mut self, rows: u16, cols: u16, column: u16, row: u16) -> bool {
-        if self.help_visible {
+        if self.overlay_visible() {
             return self.set_hovered(None);
         }
         if self.is_picking() {
@@ -977,7 +996,7 @@ impl Board {
     /// pending flash / search target, so the pointer is never second-guessed.
     /// A click on the scrollbar gutter jumps the view there; chrome does nothing.
     pub fn click(&mut self, rows: u16, cols: u16, column: u16, row: u16) -> Action {
-        if self.is_picking() && !self.help_visible {
+        if self.is_picking() && !self.overlay_visible() {
             // The picker's page length comes from the geometry, so resolve it
             // before either hit test reads the window.
             self.set_list_geometry(cols, rows);
@@ -990,8 +1009,8 @@ impl Board {
             }
             return Action::None;
         }
-        // Help owns the frame; rows behind it must not take the click.
-        if self.help_visible {
+        // An overlay owns the frame; rows behind it must not take the click.
+        if self.overlay_visible() {
             return Action::None;
         }
         if let Some(top) = render::scrollbar_at(self, rows, cols, column, row) {
@@ -1032,6 +1051,13 @@ impl Board {
     fn clear_motion(&mut self) {
         self.motion_count = None;
         self.g_pending = false;
+    }
+
+    /// Put a full-page overlay up, dropping any pending count or `g`.
+    fn open_overlay(&mut self, overlay: Overlay) -> Action {
+        self.clear_motion();
+        self.overlay = overlay;
+        Action::None
     }
 
     fn push_count_digit(&mut self, digit: u8) {
@@ -1123,6 +1149,12 @@ impl Board {
 
     pub fn is_picking(&self) -> bool {
         self.picker.is_some()
+    }
+
+    /// A full-page overlay owns the frame: rows behind it take no pointer and
+    /// no click.
+    pub fn overlay_visible(&self) -> bool {
+        self.overlay != Overlay::None
     }
 
     pub fn picker_focus(&self) -> PickerFocus {
@@ -1389,7 +1421,7 @@ impl Board {
     }
 
     pub fn drag_picker_scrollbar(&mut self, rows: u16, cols: u16, column: u16, row: u16) -> bool {
-        if self.help_visible || !self.is_picking() {
+        if self.overlay_visible() || !self.is_picking() {
             return false;
         }
         self.set_list_geometry(cols, rows);
@@ -1987,7 +2019,8 @@ fn labels_for(count: usize, alphabet: &[u8]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        persist_seen, seen_dir, Action, Agent, AgentId, Board, Key, PanePlace, PickerFocus, Status,
+        persist_seen, seen_dir, Action, Agent, AgentId, Board, Key, Overlay, PanePlace,
+        PickerFocus, Status,
     };
 
     fn ingest_two(board: &mut Board) {
@@ -2870,10 +2903,10 @@ SCAN lp 4 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         let mut board = Board::default();
         ingest_two(&mut board);
         assert_eq!(board.decide(Key::ToggleHelp), Action::None);
-        assert!(board.help_visible);
+        assert!(board.overlay_visible());
         assert_eq!(board.decide(Key::Confirm), Action::None);
         assert_eq!(board.decide(Key::Dismiss), Action::None);
-        assert!(!board.help_visible);
+        assert!(!board.overlay_visible());
         assert_eq!(board.decide(Key::Dismiss), Action::Dismiss);
     }
 
@@ -3062,7 +3095,7 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         assert_eq!(board.click(8, 80, 4, 0), Action::None);
         assert_eq!(board.selected, 1);
         // rows behind an overlay take nothing: the pointer is not the frame
-        board.help_visible = true;
+        board.overlay = Overlay::Help;
         assert_eq!(board.click(8, 80, 4, 2), Action::None);
         assert_eq!(board.selected, 1);
     }
@@ -3088,7 +3121,7 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         ingest_panes(&mut board, 8);
         board.set_list_geometry(80, 8);
         assert!(board.hover(8, 80, 4, 2));
-        board.help_visible = true;
+        board.overlay = Overlay::Help;
         assert!(board.hover(8, 80, 4, 2));
         assert_eq!(board.hovered, None);
         assert_eq!(board.selected, 0);
