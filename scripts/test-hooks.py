@@ -208,6 +208,143 @@ class HookTests(unittest.TestCase):
         self.hook("beforeSubmitPrompt")
         self.assertEqual(list(self.root.iterdir()), [])
 
+    def _fake_ps_lsof(self, work, ps_body):
+        bindir = self.root / "bin"
+        bindir.mkdir()
+        (bindir / "ps").write_text("#!/bin/sh\n" + ps_body)
+        (bindir / "lsof").write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"n{work}\"\n"
+        )
+        for name in ("ps", "lsof"):
+            (bindir / name).chmod(0o755)
+        self.env["PATH"] = f"{bindir}{os.pathsep}{self.env['PATH']}"
+
+    def test_codex_daemon_recovers_pane_from_tui_cwd(self):
+        self.env.pop("ZELLIJ_PANE_ID")
+        self.env.pop("ZELLIJ_SESSION_NAME")
+        work = self.root / "work"
+        work.mkdir()
+        self._fake_ps_lsof(
+            work,
+            "if [ \"$1\" = \"-ax\" ]; then\n"
+            "  printf '%s\\n' \"4242 codex\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "printf '%s\\n' \"codex ZELLIJ_PANE_ID=7 ZELLIJ_SESSION_NAME=leecode\"\n",
+        )
+        self.hook("Stop", {"cwd": str(work), "session_id": "01a0e684"})
+        spool = self.root / "zellij-agent-board-spool" / "leecode-7"
+        self.assertIn(" stop ", spool.read_text())
+
+    def test_codex_daemon_wrong_env_prefers_tui_cwd(self):
+        # Daemon born in daily/4 still exports those Zellij ids.
+        self.env["ZELLIJ_SESSION_NAME"] = "daily"
+        self.env["ZELLIJ_PANE_ID"] = "4"
+        work = self.root / "work"
+        work.mkdir()
+        self._fake_ps_lsof(
+            work,
+            "if [ \"$1\" = \"-ax\" ]; then\n"
+            "  printf '%s\\n' \"4242 codex\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "printf '%s\\n' \"codex ZELLIJ_PANE_ID=7 ZELLIJ_SESSION_NAME=leecode\"\n",
+        )
+        self.hook("PostToolUse", {
+            "cwd": str(work),
+            "session_id": "01a0e684",
+            "tool_name": "Bash",
+            "tool_input": {"command": "pwd"},
+        })
+        spool = self.root / "zellij-agent-board-spool" / "leecode-7"
+        self.assertIn(" postToolUse ", spool.read_text())
+        self.assertFalse(
+            (self.root / "zellij-agent-board-spool" / "daily-4").exists()
+        )
+
+    def test_payload_without_identity_keeps_env(self):
+        # Cursor/Claude hooks often omit cwd/session_id; keep inherited pane.
+        self.env["ZELLIJ_SESSION_NAME"] = "daily"
+        self.env["ZELLIJ_PANE_ID"] = "4"
+        self.hook("PreToolUse", {
+            "tool_name": "Bash",
+            "tool_input": {"command": "./gradlew"},
+        })
+        spool = self.root / "zellij-agent-board-spool" / "daily-4"
+        self.assertIn(" preToolUse ", spool.read_text())
+
+    def test_codex_session_id_loads_cwd_from_rollout(self):
+        self.env.pop("ZELLIJ_PANE_ID", None)
+        self.env.pop("ZELLIJ_SESSION_NAME", None)
+        work = self.root / "work"
+        work.mkdir()
+        sid = "01a0ead1-0a1c-7b42-b480-94e0b75e8254"
+        sessions = self.root / "fake-home" / ".codex" / "sessions" / "2026" / "09" / "29"
+        sessions.mkdir(parents=True)
+        (sessions / f"rollout-{sid}.jsonl").write_text(
+            json.dumps({
+                "type": "session_meta",
+                "payload": {"session_id": sid, "cwd": str(work)},
+            })
+            + "\n"
+        )
+        self.env["HOME"] = str(self.root / "fake-home")
+        self._fake_ps_lsof(
+            work,
+            "if [ \"$1\" = \"-ax\" ]; then\n"
+            "  printf '%s\\n' \"4242 codex\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "printf '%s\\n' \"codex ZELLIJ_PANE_ID=252 ZELLIJ_SESSION_NAME=lp\"\n",
+        )
+        self.hook("Stop", {"session_id": sid})
+        spool = self.root / "zellij-agent-board-spool" / "lp-252"
+        self.assertIn(" stop ", spool.read_text())
+
+    def test_env_matching_cwd_keeps_inherited_pane(self):
+        # Cursor / a real TUI already have the right Zellij ids.
+        self.env["ZELLIJ_SESSION_NAME"] = "leecode"
+        self.env["ZELLIJ_PANE_ID"] = "0"
+        work = self.root / "work"
+        work.mkdir()
+        self._fake_ps_lsof(
+            work,
+            "if [ \"$1\" = \"-ax\" ]; then\n"
+            "  printf '%s\\n' \"1111 agent\" \"4242 codex\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "case \"$3\" in\n"
+            "  1111) printf '%s\\n' \"agent ZELLIJ_PANE_ID=0 ZELLIJ_SESSION_NAME=leecode\" ;;\n"
+            "  *) printf '%s\\n' \"codex ZELLIJ_PANE_ID=7 ZELLIJ_SESSION_NAME=leecode\" ;;\n"
+            "esac\n",
+        )
+        self.hook("Stop", {"cwd": str(work), "status": "completed"})
+        spool = self.root / "zellij-agent-board-spool" / "leecode-0"
+        self.assertIn(" stop ", spool.read_text())
+        self.assertFalse(
+            (self.root / "zellij-agent-board-spool" / "leecode-7").exists()
+        )
+
+    def test_codex_daemon_skips_ambiguous_cwd(self):
+        self.env.pop("ZELLIJ_PANE_ID")
+        self.env.pop("ZELLIJ_SESSION_NAME")
+        work = self.root / "work"
+        work.mkdir()
+        self._fake_ps_lsof(
+            work,
+            "if [ \"$1\" = \"-ax\" ]; then\n"
+            "  printf '%s\\n' \"4242 codex\" \"4343 codex\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "case \"$3\" in\n"
+            "  4242) printf '%s\\n' \"codex ZELLIJ_PANE_ID=7 ZELLIJ_SESSION_NAME=leecode\" ;;\n"
+            "  *) printf '%s\\n' \"codex ZELLIJ_PANE_ID=8 ZELLIJ_SESSION_NAME=other\" ;;\n"
+            "esac\n",
+        )
+        self.hook("Stop", {"cwd": str(work)})
+        self.assertFalse((self.root / "zellij-agent-board-spool").exists())
+
 
 class InstallTests(unittest.TestCase):
     def test_reasonix_writes_flat_hook_commands(self):
