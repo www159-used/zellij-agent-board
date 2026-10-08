@@ -16,13 +16,15 @@ if command -v python3 >/dev/null 2>&1; then
     ENV_SESSION="${ZELLIJ_SESSION_NAME:-}" \
     ENV_PANE="${ZELLIJ_PANE_ID:-}" \
     python3 -c '
-import glob, json, os, shutil, subprocess, sys
+import glob, json, os, shutil, sqlite3, subprocess, sys
+from contextlib import closing
+from pathlib import Path
 
 def emit_nothing():
     raise SystemExit(0)
 
-def run(argv):
-    return subprocess.run(argv, capture_output=True, text=True, errors="replace")
+def run(argv, timeout=None):
+    return subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=timeout)
 
 def real(path):
     try:
@@ -105,6 +107,60 @@ def cwd_from_session(session_id):
         except Exception:
             continue
     return ""
+
+def pane_from_thread_name(session_id, wanted, candidates):
+    # Bare Codex TUIs can share cwd without putting the active thread in argv.
+    # Use the local thread name and current Zellij title only to break that tie.
+    # Never create a Codex database or include panes absent from the live scan.
+    home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    paths = glob.glob(os.path.join(home, "state_*.sqlite"))
+    versions = []
+    for path in paths:
+        version = Path(path).stem.removeprefix("state_")
+        if version.isdigit():
+            versions.append((int(version), path))
+    zellij = shutil.which("zellij")
+    if not versions or not zellij:
+        return None
+    try:
+        uri = Path(max(versions)[1]).resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.1)) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
+            name_column = "name" if "name" in columns else "NULL"
+            row = db.execute(
+                f"SELECT {name_column}, title, cwd FROM threads WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+        if not row or real(row[2]) != wanted:
+            return None
+        name = row[0] or row[1]
+        if not isinstance(name, str) or not name:
+            return None
+        matches = set()
+        for session in sorted({session for session, _pane in candidates}):
+            result = run([zellij, "--session", session, "action", "list-panes", "--json"], timeout=2)
+            if result.returncode != 0:
+                return None
+            panes = json.loads(result.stdout)
+            if not isinstance(panes, list):
+                return None
+            for pane in panes:
+                if not isinstance(pane, dict) or pane.get("is_plugin") or pane.get("exited"):
+                    continue
+                ids = (session, str(pane.get("id")))
+                title = pane.get("title") or ""
+                if ids in candidates and isinstance(title, str):
+                    # The TUI adds a spinner while working. Tool and Stop hooks
+                    # arrive before completion removes it from the pane title.
+                    if len(title) > 1 and title[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" and title[1] == " ":
+                        title = title[2:]
+                    if title == name or title.startswith(name + " | "):
+                        matches.add(ids)
+        if len(matches) == 1:
+            return next(iter(matches))
+    except (OSError, ValueError, sqlite3.Error, subprocess.TimeoutExpired):
+        pass
+    return None
 
 def emit(session, pane):
     print(session)
@@ -192,6 +248,10 @@ if wanted:
         if len(pairs) == 1:
             session, pane = next(iter(pairs))
             emit(session, pane)
+        if session_id and len(pairs) > 1:
+            matched = pane_from_thread_name(session_id, wanted, pairs)
+            if matched:
+                emit(*matched)
 
 emit_nothing()
 ' <<<"$payload"

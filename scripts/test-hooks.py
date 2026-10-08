@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -344,6 +345,160 @@ class HookTests(unittest.TestCase):
         )
         self.hook("Stop", {"cwd": str(work)})
         self.assertFalse((self.root / "zellij-agent-board-spool").exists())
+
+    def _codex_shared_cwd(self, panes, name="Daily task", custom_home=False):
+        work = self.root / "work"
+        work.mkdir()
+        self.env["ZELLIJ_SESSION_NAME"] = "daily"
+        self.env["ZELLIJ_PANE_ID"] = "4"
+        self.env["HOME"] = str(self.root / "fake-home")
+        codex_home = Path(self.env["HOME"]) / ".codex"
+        if custom_home:
+            codex_home = self.root / "custom-codex"
+            self.env["CODEX_HOME"] = str(codex_home)
+        else:
+            self.env.pop("CODEX_HOME", None)
+        codex_home.mkdir(parents=True)
+        sid = "01a0d803-414c-75c3-b213-cf0fec3a4967"
+        with sqlite3.connect(codex_home / "state_5.sqlite") as db:
+            db.execute("CREATE TABLE threads (id TEXT, name TEXT, title TEXT, cwd TEXT)")
+            db.execute("INSERT INTO threads VALUES (?, ?, ?, ?)",
+                       (sid, name, "Original prompt", str(work)))
+        self._fake_ps_lsof(
+            work,
+            'if [ "$1" = "-ax" ]; then\n'
+            '  printf "%s\\n" "4242 codex" "4343 codex"\n'
+            '  exit 0\n'
+            'fi\n'
+            'case "$3" in\n'
+            '  4242) printf "%s\\n" "codex ZELLIJ_PANE_ID=0 ZELLIJ_SESSION_NAME=daily" ;;\n'
+            '  *) printf "%s\\n" "codex ZELLIJ_PANE_ID=8 ZELLIJ_SESSION_NAME=daily" ;;\n'
+            'esac\n',
+        )
+        (self.root / "panes.json").write_text(json.dumps(panes))
+        zellij = self.root / "bin" / "zellij"
+        zellij.write_text(f'#!/bin/sh\ncat "{self.root / "panes.json"}"\n')
+        zellij.chmod(0o755)
+        return {"cwd": str(work), "session_id": sid}
+
+    def test_codex_shared_cwd_stop_resolves_thread_name(self):
+        payload = self._codex_shared_cwd([
+            {"id": 0, "title": "Daily task | work", "is_plugin": False},
+            {"id": 8, "title": "Other task | work", "is_plugin": False},
+            {"id": 0, "title": "Other plugin", "is_plugin": True},
+        ])
+        spool = self.root / "zellij-agent-board-spool" / "daily-0"
+        started = self.root / "state" / "started" / "daily-0"
+        for path, line in [(spool, "HOOK daily 0 postToolUse @1\n"),
+                           (started, "STARTED daily 0 1\n")]:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(line)
+        self.hook("Stop", payload)
+        self.assertIn(" stop ", spool.read_text())
+        self.assertFalse(started.exists())
+        self.assertFalse((spool.parent / "daily-4").exists())
+        self.assertFalse((spool.parent / "daily-8").exists())
+
+    def test_codex_shared_cwd_busy_title_keeps_tool_and_stop_hooks(self):
+        panes = [
+            {"id": 0, "title": "Daily task | work"},
+            {"id": 8, "title": "Other task | work"},
+        ]
+        payload = self._codex_shared_cwd(panes)
+        spool = self.root / "zellij-agent-board-spool" / "daily-0"
+        started = self.root / "state" / "started" / "daily-0"
+        self.hook("UserPromptSubmit", payload)
+        self.assertIn(" beforeSubmitPrompt ", spool.read_text())
+        self.assertTrue(started.exists())
+        for spinner in ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]:
+            with self.subTest(spinner=spinner):
+                panes[0]["title"] = f"{spinner} Daily task | work"
+                (self.root / "panes.json").write_text(json.dumps(panes))
+                self.hook("PostToolUse", payload)
+                self.assertIn(" postToolUse ", spool.read_text())
+                self.assertTrue(started.exists())
+        # Stop runs before the TUI consumes completion and removes its spinner.
+        self.hook("Stop", payload)
+        self.assertIn(" stop ", spool.read_text())
+        self.assertFalse(started.exists())
+        self.assertFalse((spool.parent / "daily-4").exists())
+        self.assertFalse((spool.parent / "daily-8").exists())
+
+    def test_codex_shared_cwd_respects_custom_home_and_unnamed_thread(self):
+        payload = self._codex_shared_cwd([
+            {"id": 0, "title": "Other task | work"},
+            {"id": 8, "title": "Original prompt | work", "is_suppressed": True},
+        ], name=None, custom_home=True)
+        self.hook("PostToolUse", payload)
+        spool = self.root / "zellij-agent-board-spool" / "daily-8"
+        self.assertIn(" postToolUse ", spool.read_text())
+
+    def test_codex_shared_cwd_drops_duplicate_titles(self):
+        payload = self._codex_shared_cwd([
+            {"id": 0, "title": "Daily task | work"},
+            {"id": 8, "title": "Daily task | work"},
+        ])
+        self.hook("Stop", payload)
+        self.assertFalse((self.root / "zellij-agent-board-spool").exists())
+
+    def test_codex_shared_cwd_busy_duplicate_titles_remain_ambiguous(self):
+        payload = self._codex_shared_cwd([
+            {"id": 0, "title": "⠋ Daily task | work"},
+            {"id": 8, "title": "⠙ Daily task | work"},
+        ])
+        self.hook("PostToolUse", payload)
+        self.assertFalse((self.root / "zellij-agent-board-spool").exists())
+
+    def test_codex_shared_cwd_does_not_strip_arbitrary_title_prefixes(self):
+        payload = self._codex_shared_cwd([
+            {"id": 0, "title": "Review Daily task | work"},
+            {"id": 8, "title": "⠋Daily task | work"},
+        ])
+        self.hook("Stop", payload)
+        self.assertFalse((self.root / "zellij-agent-board-spool").exists())
+
+    def test_codex_shared_cwd_ignores_non_agent_and_prefix_titles(self):
+        payload = self._codex_shared_cwd([
+            {"id": 0, "title": "Daily task extended | work"},
+            {"id": 8, "title": "Original prompt | work"},
+            {"id": 99, "title": "Daily task | work"},
+            {"id": 0, "title": "Daily task | work", "is_plugin": True},
+        ])
+        self.hook("Stop", payload)
+        self.assertFalse((self.root / "zellij-agent-board-spool").exists())
+
+    def test_codex_shared_cwd_missing_db_does_not_create_one(self):
+        payload = self._codex_shared_cwd([{"id": 0, "title": "Daily task | work"}])
+        db = Path(self.env["HOME"]) / ".codex" / "state_5.sqlite"
+        db.unlink()
+        self.hook("Stop", payload)
+        self.assertFalse(db.exists())
+        self.assertFalse((self.root / "zellij-agent-board-spool").exists())
+
+    def test_codex_shared_cwd_failed_pane_query_drops_hook(self):
+        payload = self._codex_shared_cwd([{"id": 0, "title": "Daily task | work"}])
+        zellij = self.root / "bin" / "zellij"
+        for body in ['printf "not-json"', 'exit 1']:
+            with self.subTest(body=body):
+                zellij.write_text(f"#!/bin/sh\n{body}\n")
+                self.hook("Stop", payload)
+                self.assertFalse((self.root / "zellij-agent-board-spool").exists())
+
+    def test_codex_shared_cwd_requires_matching_thread_cwd(self):
+        payload = self._codex_shared_cwd([{"id": 0, "title": "Daily task | work"}])
+        with sqlite3.connect(Path(self.env["HOME"]) / ".codex" / "state_5.sqlite") as db:
+            db.execute("UPDATE threads SET cwd = ?", (str(self.root / "other-work"),))
+        self.hook("Stop", payload)
+        self.assertFalse((self.root / "zellij-agent-board-spool").exists())
+
+    def test_codex_shared_cwd_supports_schema_without_name(self):
+        payload = self._codex_shared_cwd([{"id": 0, "title": "Original prompt | work"}])
+        with sqlite3.connect(Path(self.env["HOME"]) / ".codex" / "state_5.sqlite") as db:
+            db.execute("ALTER TABLE threads RENAME TO old_threads")
+            db.execute("CREATE TABLE threads AS SELECT id, title, cwd FROM old_threads")
+        self.hook("PostToolUse", payload)
+        spool = self.root / "zellij-agent-board-spool" / "daily-0"
+        self.assertIn(" postToolUse ", spool.read_text())
 
 
 class InstallTests(unittest.TestCase):
