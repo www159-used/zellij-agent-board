@@ -54,16 +54,40 @@ The WASM pane hides itself and opens `board-tui` with `new-pane --floating --clo
 | `p`, then `Tab` | Open the full-list picker, switch between query and labels |
 | `Enter`, mouse click | Jump to the selected Agent |
 | `?` | Show help |
-| `S` | Open Settings (empty placeholder for future customization) |
+| `S` | Open Settings from Home or Monitor |
 | `h` | Switch to the Agents home page (default) |
 | `t` | Switch to the full bottom monitor |
 | `q` | Exit the entire GUI immediately, including search, picker and overlays |
 | `Esc` | Cancel the current Home input mode or overlay; otherwise dismiss Home |
+| `Ctrl+l` | Enter the privacy screensaver immediately |
 
 The top navigation is always visible and clickable, with an active-page highlight
 and pointer hover. There are two pages: `h` (Agents) and `t` (Monitor). `p` opens
-Home's picker; it is not a third page. Settings currently has no options; `S` or
-`Esc` returns to the Agent list.
+Home's picker; it is not a third page. The Settings navigation button is clickable;
+`S` or `Esc` closes Settings and returns to the previous page.
+
+Settings contains a keyboard- and mouse-operated privacy form. Tab or Up/Down
+moves between fields; Left/Right or Enter/Space changes a choice. Clicking an
+option selects it directly (narrow panes show one value and cycle on click).
+Changes apply immediately and are saved atomically to
+`$XDG_CONFIG_HOME/zellij-agent-board/settings.json`, or
+`~/.config/zellij-agent-board/settings.json`. `ZAB_SETTINGS_PATH` overrides the
+file path. Load/save errors are shown in Settings; failed saves keep the change
+active for the current GUI.
+
+By default, 30 seconds without input in ZAB activates a privacy screensaver.
+Background updates and terminal resize do not reset the timer. Settings offers
+Screensaver, Monitor, Close GUI or Disabled actions; 30s, 1min or 5min delays; and
+Blank or Clock screensavers. The Monitor action switches to `t` once per idle
+period. Closing the GUI exposes the terminal below it; Monitor can display
+process names and command lines.
+
+The screensaver hides the entire board including navigation. Space or left-clicking
+anywhere inside the screensaver restores the previous page, selection and input; the wake
+operation is consumed. Pointer motion and other keys do not wake it. `q` still
+exits the GUI. Settings has a Preview screensaver button. This covers only the
+ZAB pane and does not authenticate the user; use the system lock screen to
+protect the whole desktop.
 
 The monitor embeds the bottom 0.14.9 library in the native binary, so no separate
 `btm` installation is required. It runs in a private PTY, preserving bottom's
@@ -73,7 +97,7 @@ scroll position and monitor history. Bottom uses your usual configuration; set
 `ZAB_BOTTOM_CONFIG` to use a specific config file. A failed monitor shows an error
 and can be restarted with `t` or its navigation button.
 
-Bare `h`, `t` and `q` are reserved for navigation and exit on the Monitor page.
+Bare `h`, `t`, `S` and `q` are reserved for navigation, Settings and exit on the Monitor page.
 Use arrows for bottom's horizontal movement and `F5` for process tree mode.
 Home's search, hint and picker inputs accept `h` and `t` as text; clicking the
 navigation still switches pages. `q` always exits. Closing the GUI also kills

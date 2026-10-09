@@ -40,6 +40,10 @@ use zellij_agent_board::{
 mod monitor;
 #[path = "board_tui/navigation.rs"]
 mod navigation;
+#[path = "board_tui/privacy.rs"]
+mod privacy;
+#[path = "board_tui/settings.rs"]
+mod settings;
 use navigation::{Navigation, Page, Target};
 
 type HostTerminal = Terminal<PtyBackend>;
@@ -70,6 +74,8 @@ struct App {
     nav_hover: Option<Target>,
     monitor: Option<monitor::Monitor>,
     monitor_error: Option<String>,
+    settings: settings::Form,
+    privacy: privacy::Privacy,
     jump_sender: fn(&str, u32, &str) -> &'static str,
 }
 
@@ -327,6 +333,8 @@ impl App {
             nav_hover: None,
             monitor: None,
             monitor_error: None,
+            settings: settings::Form::load(settings::config_path()),
+            privacy: privacy::Privacy::new(now),
             jump_sender: send_jump,
         }
     }
@@ -376,6 +384,7 @@ impl App {
     }
 
     fn run(&mut self, terminal: &mut HostTerminal) -> io::Result<()> {
+        self.privacy.activity(Instant::now());
         let mut dirty = true;
         loop {
             if let Ok(size) = terminal.size() {
@@ -388,7 +397,7 @@ impl App {
                     monitor.error = Some(err.to_string());
                 }
                 let updated = monitor.poll();
-                dirty |= self.page == Page::Monitor && updated;
+                dirty |= self.page == Page::Monitor && !self.privacy.active && updated;
             }
             if dirty {
                 self.board.set_list_geometry(content.width, content.height);
@@ -409,6 +418,18 @@ impl App {
             }
             dirty |= self.take_store();
             let now = Instant::now();
+            match self.privacy.due(now, &self.settings.value) {
+                Some(settings::IdleAction::Screensaver) => {
+                    self.privacy.show();
+                    dirty = true;
+                }
+                Some(settings::IdleAction::Monitor) => {
+                    self.switch_page(Page::Monitor);
+                    dirty = true;
+                }
+                Some(settings::IdleAction::Close) => return Ok(()),
+                _ => {}
+            }
             if now.duration_since(self.last_reconcile) >= SCAN_EVERY {
                 spawn_reconcile(&mut self.reconcile);
                 self.last_reconcile = Instant::now();
@@ -416,8 +437,14 @@ impl App {
             if dir_changed(&spool_dir(), &mut self.spool_mtime) {
                 dirty |= self.reload_spool();
             }
-            if self.board.needs_clock() && now.duration_since(self.last_tick) >= TICK_EVERY {
-                self.board.tick();
+            let clock_visible = self.privacy.active
+                && self.settings.value.saver_style == settings::SaverStyle::Clock;
+            if (self.board.needs_clock() || clock_visible)
+                && now.duration_since(self.last_tick) >= TICK_EVERY
+            {
+                if self.board.needs_clock() {
+                    self.board.tick();
+                }
                 self.last_tick = now;
                 dirty = true;
             }
@@ -443,9 +470,12 @@ impl App {
                     Loop::Ignored => {}
                 },
                 Event::Resize(_, _) => dirty = true,
-                Event::Paste(text) if self.page == Page::Monitor => {
-                    if let Some(monitor) = &mut self.monitor {
-                        monitor.paste(&text);
+                Event::Paste(text) if !self.privacy.active => {
+                    self.privacy.activity(Instant::now());
+                    if self.page == Page::Monitor && self.board.overlay != Overlay::Settings {
+                        if let Some(monitor) = &mut self.monitor {
+                            monitor.paste(&text);
+                        }
                     }
                 }
                 _ => {}
@@ -466,7 +496,20 @@ impl App {
         if event.code == KeyCode::Char('q') && event.modifiers == KeyModifiers::NONE {
             return Loop::Quit;
         }
+        if self.privacy.active {
+            if event.code == KeyCode::Char(' ') && event.modifiers == KeyModifiers::NONE {
+                self.privacy.wake(Instant::now());
+                return Loop::Changed;
+            }
+            return Loop::Ignored;
+        }
+        self.privacy.activity(Instant::now());
+        if event.code == KeyCode::Char('l') && event.modifiers == KeyModifiers::CONTROL {
+            self.privacy.show();
+            return Loop::Changed;
+        }
         let entering_text = self.page == Page::Home
+            && self.board.overlay != Overlay::Settings
             && (self.board.is_searching() || self.board.is_hinting() || self.board.is_picking());
         if event.modifiers == KeyModifiers::NONE && !entering_text {
             match event.code {
@@ -474,6 +517,14 @@ impl App {
                 KeyCode::Char('h') => return self.switch_page(Page::Home),
                 _ => {}
             }
+        }
+        if self.board.overlay == Overlay::Settings {
+            let outcome = self.settings.key(event);
+            return self.settings_outcome(outcome);
+        }
+        if event.code == KeyCode::Char('S') && !entering_text {
+            self.board.overlay = Overlay::Settings;
+            return Loop::Changed;
         }
         if self.page == Page::Monitor {
             if let Some(monitor) = &mut self.monitor {
@@ -557,6 +608,17 @@ impl App {
     /// that row, the wheel scrolls the view. Hover never steals `selected`.
     /// Right button is ignored.
     fn handle_mouse(&mut self, mut mouse: MouseEvent) -> Loop {
+        if self.privacy.active {
+            let area = Rect::new(0, 0, self.view.width, self.view.height);
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && area.contains(Position::new(mouse.column, mouse.row))
+            {
+                self.privacy.wake(Instant::now());
+                return Loop::Changed;
+            }
+            return Loop::Ignored;
+        }
+        self.privacy.activity(Instant::now());
         let nav = self.navigation();
         let hovered = nav.hit(mouse.column, mouse.row);
         let changed = self.nav_hover != hovered;
@@ -565,6 +627,14 @@ impl App {
             match hovered {
                 Some(Target::Quit) => return Loop::Quit,
                 Some(Target::Page(page)) => return self.switch_page(page),
+                Some(Target::Settings) => {
+                    self.board.overlay = if self.board.overlay == Overlay::Settings {
+                        Overlay::None
+                    } else {
+                        Overlay::Settings
+                    };
+                    return Loop::Changed;
+                }
                 None => {}
             }
         }
@@ -576,6 +646,10 @@ impl App {
             } else {
                 Loop::Ignored
             };
+        }
+        if self.board.overlay == Overlay::Settings {
+            let outcome = self.settings.mouse(mouse, nav.content);
+            return self.settings_outcome(outcome);
         }
         mouse.row -= nav.content.y;
         if self.page == Page::Monitor {
@@ -887,6 +961,97 @@ mod process_tests {
             app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         assert_eq!(app.board.picker_query(), "th");
+        assert_eq!(app.page, Page::Home);
+    }
+
+    #[test]
+    fn screensaver_consumes_wake_input_and_restores_each_page_without_navigation() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        for page in [Page::Home, Page::Monitor] {
+            let mut app = test_app(&dir.path().join("usage.jsonl"));
+            app.page = page;
+            app.board.decide(Key::StartPicker);
+            app.privacy.show();
+            for code in [
+                KeyCode::Char('h'),
+                KeyCode::Char('t'),
+                KeyCode::Enter,
+                KeyCode::Esc,
+            ] {
+                assert!(matches!(app.handle_key(key(code)), Loop::Ignored));
+                assert!(app.privacy.active);
+            }
+            let mouse = MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            };
+            assert!(matches!(app.handle_mouse(mouse), Loop::Ignored));
+            assert!(app.privacy.active);
+            assert!(matches!(
+                app.handle_key(key(KeyCode::Char(' '))),
+                Loop::Changed
+            ));
+            assert!(!app.privacy.active);
+            assert_eq!(app.page, page);
+            assert_eq!(app.board.picker_query(), "");
+            for size in [Size::new(100, 30), Size::new(48, 12)] {
+                app.view = size;
+                for (column, row) in [
+                    (0, 0),
+                    (size.width - 1, size.height - 1),
+                    (size.width / 2, size.height / 2),
+                ] {
+                    app.privacy.show();
+                    assert!(matches!(
+                        app.handle_mouse(MouseEvent {
+                            kind: MouseEventKind::Down(MouseButton::Left),
+                            column,
+                            row,
+                            ..mouse
+                        }),
+                        Loop::Changed
+                    ));
+                    assert!(!app.privacy.active);
+                    assert_eq!(app.page, page);
+                    assert_eq!(app.board.picker_query(), "");
+                }
+            }
+            app.privacy.show();
+            assert!(matches!(
+                app.handle_key(key(KeyCode::Char('q'))),
+                Loop::Quit
+            ));
+        }
+    }
+
+    #[test]
+    fn settings_preview_and_back_preserve_monitor() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(&dir.path().join("usage.jsonl"));
+        app.settings = settings::Form::load(dir.path().join("settings.json"));
+        app.page = Page::Monitor;
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.handle_key(key(KeyCode::Char('S')));
+        assert_eq!(app.board.overlay, Overlay::Settings);
+        for _ in 0..3 {
+            app.handle_key(key(KeyCode::Tab));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.privacy.active);
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.board.overlay, Overlay::Settings);
+        assert_eq!(app.page, Page::Monitor);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.board.overlay, Overlay::None);
+        assert_eq!(app.page, Page::Monitor);
+        app.handle_key(key(KeyCode::Char('S')));
+        app.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(app.board.overlay, Overlay::None);
         assert_eq!(app.page, Page::Home);
     }
 
@@ -1438,11 +1603,29 @@ fn trace_jump(message: &str) {
 }
 
 impl App {
+    fn settings_outcome(&mut self, outcome: settings::Outcome) -> Loop {
+        match outcome {
+            settings::Outcome::Ignored => Loop::Ignored,
+            settings::Outcome::Changed => Loop::Changed,
+            settings::Outcome::Close => {
+                self.board.overlay = Overlay::None;
+                Loop::Changed
+            }
+            settings::Outcome::Preview => {
+                self.privacy.show();
+                Loop::Changed
+            }
+        }
+    }
+
     fn navigation(&self) -> Navigation {
         Navigation::new(Rect::new(0, 0, self.view.width, self.view.height))
     }
 
     fn switch_page(&mut self, page: Page) -> Loop {
+        if self.board.overlay == Overlay::Settings {
+            self.board.overlay = Overlay::None;
+        }
         self.launch_focus = None;
         self.pointer = None;
         self.board.hovered = None;
@@ -1468,19 +1651,32 @@ impl App {
             let area = frame.area();
             let nav = Navigation::new(area);
             Clear.render(area, frame.buffer_mut());
-            match self.page {
-                Page::Home => {
-                    render_board(&self.board, &self.home, nav.content, frame.buffer_mut())
-                }
-                Page::Monitor => {
-                    if let Some(monitor) = &self.monitor {
-                        monitor.render(nav.content, frame.buffer_mut());
-                    } else if let Some(error) = &self.monitor_error {
-                        Paragraph::new(error.as_str()).render(nav.content, frame.buffer_mut());
+            if self.privacy.active {
+                privacy::render(area, self.settings.value.saver_style, frame.buffer_mut());
+                return;
+            }
+            if self.board.overlay == Overlay::Settings {
+                self.settings.render(nav.content, frame.buffer_mut());
+            } else {
+                match self.page {
+                    Page::Home => {
+                        render_board(&self.board, &self.home, nav.content, frame.buffer_mut())
+                    }
+                    Page::Monitor => {
+                        if let Some(monitor) = &self.monitor {
+                            monitor.render(nav.content, frame.buffer_mut());
+                        } else if let Some(error) = &self.monitor_error {
+                            Paragraph::new(error.as_str()).render(nav.content, frame.buffer_mut());
+                        }
                     }
                 }
             }
-            nav.render(self.page, self.nav_hover, frame.buffer_mut());
+            nav.render(
+                self.page,
+                self.board.overlay == Overlay::Settings,
+                self.nav_hover,
+                frame.buffer_mut(),
+            );
         })?;
         Ok(())
     }

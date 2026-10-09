@@ -29,7 +29,7 @@ import termios
 BINARY = Path(sys.argv.pop(1)).resolve()
 
 class BoardTTY:
-    def __init__(self, binary=BINARY, bad_config=False):
+    def __init__(self, binary=BINARY, bad_config=False, preferences=None, settings_path=None):
         self.temp = tempfile.TemporaryDirectory(prefix="zab-monitor-")
         self.root = Path(self.temp.name)
         state = self.root / "state"
@@ -48,12 +48,16 @@ class BoardTTY:
         bindir.mkdir()
         config = self.root / "bottom.toml"
         config.write_text("invalid = [" if bad_config else "[flags]\nrate = 250\n")
+        self.settings_path = Path(settings_path) if settings_path else self.root / "settings.json"
+        if preferences is not None:
+            self.settings_path.write_text(json.dumps(preferences))
         env = os.environ.copy()
         env.update(
             ZAB_STATE_DIR=str(state), ZELLIJ_SESSION_NAME="test",
             TMPDIR=str(self.root), TERM="xterm-256color",
             ZELLIJ_AGENT_BOARD_STATS=str(state / "usage.jsonl"),
             PATH=str(bindir), ZAB_BOTTOM_CONFIG=str(config),
+            ZAB_SETTINGS_PATH=str(self.settings_path),
         )
         env.pop("ZELLIJ_AGENT_BOARD_NO_STATS", None)
         ready_r, ready_w = os.pipe()
@@ -93,6 +97,17 @@ class BoardTTY:
     def send(self, text):
         os.write(self.fd, text)
 
+    def wait_setting(self, key, value):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            # Keep draining the PTY while waiting on the settings file: a full
+            # Settings frame can otherwise block the child before it reads the click.
+            if select.select([self.fd], [], [], 0.02)[0]:
+                os.read(self.fd, 65536)
+            if self.settings_path.exists() and json.loads(self.settings_path.read_text())[key] == value:
+                return
+        raise AssertionError(f"Setting {key!r} was not saved as {value!r}")
+
     def close_board(self):
         self.send(b"q")
         self.read_until(b"\x1b[?1049l")
@@ -125,7 +140,18 @@ class BoardTTY:
                         os.kill(self.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                os.waitpid(self.pid, 0)
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if os.waitpid(self.pid, os.WNOHANG)[0]:
+                        break
+                    if select.select([self.fd], [], [], 0)[0]:
+                        try:
+                            os.read(self.fd, 65536)
+                        except OSError:
+                            pass
+                    time.sleep(0.02)
+                else:
+                    raise AssertionError("test child did not exit after SIGKILL")
         os.close(self.fd)
         self.lock.close()
         self.temp.cleanup()
@@ -215,6 +241,74 @@ class MonitorTests(unittest.TestCase):
         self.click(board, 116, 1)
         board.read_until(b"\x1b[?1049l")
         board.wait_exit()
+
+    def test_settings_mouse_save_reopen_and_preview_consumes_space(self):
+        board = self.board()
+        self.click(board, 32, 1)
+        board.read_until(b"Privacy / idle protection")
+        # Native form content starts under the two-row navigation.
+        self.click(board, 29, 9)  # 1min option
+        board.wait_setting("idle_seconds", 60)
+        self.assertEqual(json.loads(board.settings_path.read_text())["idle_seconds"], 60)
+        self.click(board, 33, 12)  # Clock style
+        board.wait_setting("saver_style", "clock")
+        self.assertEqual(json.loads(board.settings_path.read_text())["saver_style"], "clock")
+        self.click(board, 9, 15)  # Preview
+        board.read_until(b"Space / click to resume")
+        board.send(b" ")
+        board.read_until(b"Privacy / idle protection")
+        board.send(b"\x1b")
+        board.read_until(b"task-00")
+        board.send(b"\x0c")  # Ctrl+l enters the curtain from Home.
+        board.read_until(b"Space / click to resume")
+        board.send(b" ")
+        board.read_until(b"task-00")
+        board.close_board()
+        reopened = self.board(settings_path=board.settings_path)
+        reopened.send(b"S")
+        reopened.read_until(b"1min")
+        self.assertEqual(json.loads(reopened.settings_path.read_text())["saver_style"], "clock")
+        reopened.close_board()
+
+    def test_idle_screensaver_restores_picker_and_q_exits(self):
+        board = self.board(preferences={"idle_seconds": 1})
+        board.send(b"p")
+        board.read_until(b"PICK")
+        board.read_until(b"Space / click to resume")
+        # Pointer motion and Enter do not dismiss the curtain.
+        board.send(b"\x1b[<35;3;4M\r")
+        time.sleep(0.15)
+        board.send(b" ")
+        board.read_until(b"PICK")
+        board.read_until(b"Space / click to resume")
+        board.close_board()
+
+    def test_idle_monitor_and_close_actions(self):
+        board = self.board(preferences={"idle_seconds": 1, "idle_action": "monitor"})
+        board.read_until(b"CPU", timeout=10)
+        board.close_board()
+        board = self.board(preferences={"idle_seconds": 1, "idle_action": "close"})
+        board.read_until(b"\x1b[?1049l")
+        board.wait_exit()
+
+    def test_monitor_screensaver_and_click_resume(self):
+        board = self.board(preferences={"idle_seconds": 1})
+        board.send(b"t")
+        board.read_until(b"CPU", timeout=10)
+        board.read_until(b"Space / click to resume")
+        self.click(board, 60, 17)
+        board.read_until(b"CPU", timeout=10)
+        board.close_board()
+
+    def test_screensaver_click_on_blank_area_restores_picker_without_passing_through(self):
+        board = self.board()
+        board.send(b"p")
+        board.read_until(b"PICK")
+        board.send(b"\x0c")
+        board.read_until(b"Space / click to resume")
+        self.click(board, 8, 8)
+        board.read_until(b"PICK", timeout=2)
+        board.close_board()
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ pub enum Page {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
     Page(Page),
+    Settings,
     Quit,
 }
 
@@ -22,6 +23,7 @@ pub struct Navigation {
     pub content: Rect,
     home: Rect,
     monitor: Rect,
+    settings: Rect,
     quit: Rect,
     area: Rect,
 }
@@ -30,12 +32,19 @@ impl Navigation {
         let height = area.height.min(if area.height > 3 { 2 } else { 1 });
         let quit_width = area.width.min(8);
         let available = area.width.saturating_sub(quit_width);
-        let home_width = (available / 2).min(14);
-        let monitor_width = available.saturating_sub(home_width).min(14);
+        let home_width = (available / 3).min(14);
+        let monitor_width = (available / 3).min(14);
+        let settings_width = available.saturating_sub(home_width + monitor_width).min(14);
         Self {
             content: Rect::new(area.x, area.y + height, area.width, area.height - height),
             home: Rect::new(area.x, area.y, home_width, height.min(1)),
             monitor: Rect::new(area.x + home_width, area.y, monitor_width, height.min(1)),
+            settings: Rect::new(
+                area.x + home_width + monitor_width,
+                area.y,
+                settings_width,
+                height.min(1),
+            ),
             quit: Rect::new(area.right() - quit_width, area.y, quit_width, height.min(1)),
             area,
         }
@@ -46,13 +55,21 @@ impl Navigation {
             Some(Target::Page(Page::Home))
         } else if self.monitor.contains(position) {
             Some(Target::Page(Page::Monitor))
+        } else if self.settings.contains(position) {
+            Some(Target::Settings)
         } else if self.quit.contains(position) {
             Some(Target::Quit)
         } else {
             None
         }
     }
-    pub fn render(&self, page: Page, hover: Option<Target>, buffer: &mut Buffer) {
+    pub fn render(
+        &self,
+        page: Page,
+        settings_open: bool,
+        hover: Option<Target>,
+        buffer: &mut Buffer,
+    ) {
         let theme = zellij_agent_board::theme();
         for (rect, target, label, compact) in [
             (self.home, Target::Page(Page::Home), " h Agents ", "h"),
@@ -62,9 +79,14 @@ impl Navigation {
                 " t Monitor ",
                 "t",
             ),
+            (self.settings, Target::Settings, " S Settings ", "S"),
             (self.quit, Target::Quit, " q Quit ", "q"),
         ] {
-            let selected = target == Target::Page(page);
+            let selected = if settings_open {
+                target == Target::Settings
+            } else {
+                target == Target::Page(page)
+            };
             let style = if selected {
                 Style::default()
                     .fg(theme.focus)
@@ -104,9 +126,12 @@ mod tests {
                 let nav = Navigation::new(Rect::new(0, 0, width, height));
                 assert_eq!(nav.home.intersection(nav.monitor).width, 0);
                 assert_eq!(nav.monitor.intersection(nav.quit).width, 0);
+                assert_eq!(nav.monitor.intersection(nav.settings).width, 0);
+                assert_eq!(nav.settings.intersection(nav.quit).width, 0);
                 for (rect, target) in [
                     (nav.home, Target::Page(Page::Home)),
                     (nav.monitor, Target::Page(Page::Monitor)),
+                    (nav.settings, Target::Settings),
                     (nav.quit, Target::Quit),
                 ] {
                     for x in rect.x..rect.right() {
