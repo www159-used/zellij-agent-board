@@ -231,12 +231,52 @@ pub struct Summary {
     pub mode_entries: BTreeMap<String, u64>,
     pub dispatch_results: BTreeMap<String, u64>,
     pub events: BTreeMap<String, u64>,
+    pub features: BTreeMap<String, u64>,
+    pub setting_values: BTreeMap<String, u64>,
+    pub errors: BTreeMap<String, u64>,
+    pub durations: BTreeMap<String, DurationSummary>,
+    pub incomplete_hooks: u64,
     pub first_ts: Option<u64>,
     pub last_ts: Option<u64>,
     /// Sum of `close.secs` — total time the board stayed open.
     pub open_secs: u64,
     /// Peak agents seen in any single event.
     pub max_agents: u64,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DurationSummary {
+    pub samples: u64,
+    pub total_ms: u64,
+    pub max_ms: u64,
+}
+
+fn feature_label(event: &str, map: &Map<String, Value>) -> Option<String> {
+    let text = |key| map.get(key).and_then(Value::as_str).unwrap_or("unknown");
+    Some(match event {
+        "quit" => format!("quit/{}", text("source")),
+        "page" => format!("page/{}/{}", text("to"), text("source")),
+        "settings" => format!("settings/{}/{}", text("action"), text("source")),
+        "settings_load" => format!("settings_load/{}", text("outcome")),
+        "settings_save" => format!(
+            "settings_save/{}/{}/{}",
+            text("field"),
+            text("outcome"),
+            text("source")
+        ),
+        "screensaver" => format!("screensaver/{}/{}", text("action"), text("source")),
+        "idle" => format!("idle/{}", text("action")),
+        "monitor" => format!("monitor/{}/{}", text("stage"), text("outcome")),
+        "hook_resolve" => format!(
+            "hook_resolve/{}/{}/{}/{}",
+            text("hook_event"),
+            text("method"),
+            text("outcome"),
+            text("cache")
+        ),
+        "close" => format!("close/{}", text("reason")),
+        _ => return None,
+    })
 }
 
 impl Summary {
@@ -250,6 +290,9 @@ pub fn summarize(log: &str) -> Summary {
     let mut opened = BTreeSet::new();
     let mut closed = BTreeSet::new();
     let mut facts = BTreeMap::new();
+    let mut hook_facts = BTreeSet::new();
+    let mut hooks_started = BTreeSet::new();
+    let mut hooks_finished = BTreeSet::new();
     for line in log.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -262,6 +305,18 @@ pub fn summarize(log: &str) -> Summary {
             continue;
         };
         if map.get("v").and_then(Value::as_u64) == Some(2) {
+            if matches!(event, "hook_resolve_start" | "hook_resolve") {
+                if let Some(id) = map.get("hook_id").and_then(Value::as_str) {
+                    if !hook_facts.insert((id.to_owned(), event.to_owned())) {
+                        continue;
+                    }
+                    if event == "hook_resolve_start" {
+                        hooks_started.insert(id.to_owned());
+                    } else {
+                        hooks_finished.insert(id.to_owned());
+                    }
+                }
+            }
             if let (Some(visit), Some(seq)) = (
                 map.get("visit_id").and_then(Value::as_str),
                 map.get("seq").and_then(Value::as_u64),
@@ -276,6 +331,44 @@ pub fn summarize(log: &str) -> Summary {
         }
         summary.total += 1;
         *summary.events.entry(event.to_string()).or_default() += 1;
+        if let Some(label) = feature_label(event, &map) {
+            *summary.features.entry(label.clone()).or_default() += 1;
+            if let Some(ms) = map.get("duration_ms").and_then(Value::as_u64) {
+                let timing = summary.durations.entry(label).or_default();
+                timing.samples += 1;
+                timing.total_ms = timing.total_ms.saturating_add(ms);
+                timing.max_ms = timing.max_ms.max(ms);
+            }
+            if let Some(kind) = map.get("error_kind").and_then(Value::as_str) {
+                *summary.errors.entry(format!("{event}/{kind}")).or_default() += 1;
+            }
+            if event == "hook_resolve"
+                && map.get("outcome").and_then(Value::as_str) == Some("unresolved")
+            {
+                if let Some(reason) = map.get("reason").and_then(Value::as_str) {
+                    *summary
+                        .errors
+                        .entry(format!("hook_resolve/{reason}"))
+                        .or_default() += 1;
+                }
+            }
+            if event == "settings_save" && map.get("previous") != map.get("value") {
+                if let (Some(field), Some(value), Some(outcome)) = (
+                    map.get("field").and_then(Value::as_str),
+                    map.get("value"),
+                    map.get("outcome").and_then(Value::as_str),
+                ) {
+                    let value = value
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| value.to_string());
+                    *summary
+                        .setting_values
+                        .entry(format!("{field}/{value}/{outcome}"))
+                        .or_default() += 1;
+                }
+            }
+        }
         if let Some(ts) = map.get("ts").and_then(Value::as_u64) {
             summary.first_ts = Some(summary.first_ts.map_or(ts, |seen| seen.min(ts)));
             summary.last_ts = Some(summary.last_ts.map_or(ts, |seen| seen.max(ts)));
@@ -314,12 +407,17 @@ pub fn summarize(log: &str) -> Summary {
             }
             "state" => {
                 if let Some(state) = map.get("state").and_then(Value::as_object) {
-                    let active: BTreeSet<String> =
+                    let mut active: BTreeSet<String> =
                         ["searching", "hinting", "picking", "help", "settings"]
                             .into_iter()
                             .filter(|key| state.get(*key).and_then(Value::as_bool) == Some(true))
                             .map(String::from)
                             .collect();
+                    for key in ["leader_menu", "status_filter"] {
+                        if let Some(value) = state.get(key).and_then(Value::as_str) {
+                            active.insert(format!("{key}/{value}"));
+                        }
+                    }
                     let previous = modes.entry(visit).or_default();
                     for mode in active.difference(previous) {
                         *summary.mode_entries.entry(mode.clone()).or_default() += 1;
@@ -337,6 +435,7 @@ pub fn summarize(log: &str) -> Summary {
     }
     summary.visits = opened.len() as u64;
     summary.incomplete_visits = opened.difference(&closed).count() as u64;
+    summary.incomplete_hooks = hooks_started.difference(&hooks_finished).count() as u64;
     summary
 }
 
@@ -368,6 +467,12 @@ pub fn format_summary(summary: &Summary) -> String {
             "pipe outcomes (not focus confirmation)",
             &summary.dispatch_results,
         ),
+        ("feature outcomes", &summary.features),
+        (
+            "setting changes (active value / save outcome)",
+            &summary.setting_values,
+        ),
+        ("error kinds / resolution failures", &summary.errors),
     ] {
         if !counts.is_empty() {
             out.push_str(&format!("  {label}\n"));
@@ -379,6 +484,23 @@ pub fn format_summary(summary: &Summary) -> String {
                 };
                 out.push_str(&format!("    {display:<24} {count}\n"));
             }
+        }
+    }
+    if summary.count("hook_resolve_start") > 0 {
+        out.push_str(&format!(
+            "  hook attempts without result {}\n",
+            summary.incomplete_hooks
+        ));
+    }
+    if !summary.durations.is_empty() {
+        out.push_str("  durations (ms; observed samples only)\n");
+        for (label, timing) in &summary.durations {
+            out.push_str(&format!(
+                "    {label}: n={} mean={} max={}\n",
+                timing.samples,
+                timing.total_ms / timing.samples,
+                timing.max_ms
+            ));
         }
     }
     out.push_str("  by event\n");
@@ -493,6 +615,49 @@ mod tests {
         assert_eq!(summary.open_secs, 5);
         assert_eq!(summary.dispatch_results["exit_error"], 1);
         assert!(!summary.dispatch_results.contains_key("ok"));
+    }
+
+    #[test]
+    fn feature_summary_handles_interleaved_duplicates_and_unfinished_hooks() {
+        let rows = [
+            json!({"v":2,"event":"open","visit_id":"a","seq":1}),
+            json!({"v":2,"event":"state","visit_id":"a","seq":2,"state":{"leader_menu":"Commands"}}),
+            json!({"v":2,"event":"state","visit_id":"a","seq":3,"state":{"leader_menu":"StateFilter"}}),
+            json!({"v":2,"event":"state","visit_id":"a","seq":4,"state":{"status_filter":"working"}}),
+            json!({"v":2,"event":"state","visit_id":"a","seq":5,"state":{"status_filter":"working","selected":1}}),
+            json!({"v":2,"event":"settings_save","visit_id":"a","seq":6,"field":"language","source":"mouse","outcome":"error","duration_ms":4}),
+            json!({"v":2,"event":"close","visit_id":"a","seq":7,"reason":"idle"}),
+            json!({"v":2,"event":"hook_resolve_start","hook_id":"h"}),
+            json!({"v":2,"event":"hook_resolve","hook_id":"h","hook_event":"Interrupt","method":"cache","outcome":"ok","cache":"hit","duration_ms":12}),
+            json!({"v":2,"event":"hook_resolve_start","hook_id":"unfinished"}),
+        ];
+        let log = rows
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let summary = summarize(&log);
+        assert_eq!(summary.mode_entries["leader_menu/Commands"], 1);
+        assert_eq!(summary.mode_entries["leader_menu/StateFilter"], 1);
+        assert_eq!(summary.mode_entries["status_filter/working"], 1);
+        assert_eq!(summary.features["close/idle"], 1);
+        assert_eq!(summary.features["settings_save/language/error/mouse"], 1);
+        assert_eq!(
+            summary.durations["hook_resolve/Interrupt/cache/ok/hit"].total_ms,
+            12
+        );
+        assert_eq!(summary.incomplete_hooks, 1);
+        assert_eq!(summary.visits, 1, "hooks are not GUI visits");
+        let reversed = rows
+            .iter()
+            .rev()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(summary, summarize(&format!("{reversed}\n{log}")));
+        let report = format_summary(&summary);
+        assert!(report.contains("hook attempts without result 1"));
+        assert!(report.contains("n=1 mean=12 max=12"));
     }
 
     #[test]

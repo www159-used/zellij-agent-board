@@ -3,6 +3,7 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
+    time::Instant,
 };
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -56,13 +57,21 @@ const SELECTORS: usize = 4;
 /// dispatch on this enum, so a new setting is a compile error until every site
 /// is updated instead of a row that silently paints but never stores.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Field {
+pub enum Field {
     IdleAction,
     IdleTime,
     SaverStyle,
     Language,
 }
 impl Field {
+    pub fn name(self) -> &'static str {
+        match self {
+            Field::IdleAction => "idle_action",
+            Field::IdleTime => "idle_seconds",
+            Field::SaverStyle => "saver_style",
+            Field::Language => "language",
+        }
+    }
     const ALL: [Field; SELECTORS] = [
         Field::IdleAction,
         Field::IdleTime,
@@ -91,6 +100,16 @@ pub struct Preferences {
     pub saver_style: SaverStyle,
     pub language: Locale,
 }
+impl Preferences {
+    fn field_value(&self, field: Field) -> serde_json::Value {
+        match field {
+            Field::IdleAction => serde_json::json!(self.idle_action),
+            Field::IdleTime => serde_json::json!(self.idle_seconds),
+            Field::SaverStyle => serde_json::json!(self.saver_style),
+            Field::Language => serde_json::json!(self.language),
+        }
+    }
+}
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -118,10 +137,18 @@ pub enum Outcome {
     Changed,
     Preview,
     Close,
+    Saved {
+        field: Field,
+        previous: serde_json::Value,
+        value: serde_json::Value,
+        error: Option<io::ErrorKind>,
+        duration_ms: u64,
+    },
 }
 
 pub struct Form {
     pub value: Preferences,
+    pub load_outcome: &'static str,
     path: PathBuf,
     focus: usize,
     hover: Option<(usize, Option<usize>)>,
@@ -129,18 +156,29 @@ pub struct Form {
 }
 impl Form {
     pub fn load(path: PathBuf) -> Self {
+        let mut load_outcome = "ok";
         let loaded = match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice::<Preferences>(&bytes)
-                .map_err(|err| err.to_string())
+                .map_err(|err| {
+                    load_outcome = "parse_error";
+                    err.to_string()
+                })
                 .and_then(|value| {
                     if (1..=86400).contains(&value.idle_seconds) {
                         Ok(value)
                     } else {
+                        load_outcome = "invalid_value";
                         Err(I18n::new(value.language).text(Message::InvalidIdleSeconds))
                     }
                 }),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Preferences::default()),
-            Err(err) => Err(err.to_string()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                load_outcome = "default";
+                Ok(Preferences::default())
+            }
+            Err(err) => {
+                load_outcome = "read_error";
+                Err(err.to_string())
+            }
         };
         let (value, notice) = match loaded {
             Ok(value) => (value, None),
@@ -151,6 +189,7 @@ impl Form {
         };
         Self {
             value,
+            load_outcome,
             path,
             focus: 0,
             hover: None,
@@ -208,6 +247,7 @@ impl Form {
         }
     }
     fn set(&mut self, field: Field, index: usize) -> Outcome {
+        let previous = self.value.field_value(field);
         match field {
             Field::IdleAction => self.value.idle_action = IDLE_ACTIONS[index].1,
             Field::IdleTime if index < IDLE_SECONDS.len() => {
@@ -217,11 +257,21 @@ impl Form {
             Field::SaverStyle => self.value.saver_style = SAVER_STYLES[index].1,
             Field::Language => self.value.language = Locale::ALL[index],
         }
-        self.notice = match self.save() {
+        let start = Instant::now();
+        let saved = self.save();
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let error = saved.as_ref().err().map(io::Error::kind);
+        self.notice = match saved {
             Ok(()) => None,
             Err(err) => Some((Message::SettingsSaveError, err.to_string())),
         };
-        Outcome::Changed
+        Outcome::Saved {
+            field,
+            previous,
+            value: self.value.field_value(field),
+            error,
+            duration_ms,
+        }
     }
     fn save(&self) -> io::Result<()> {
         let parent = self

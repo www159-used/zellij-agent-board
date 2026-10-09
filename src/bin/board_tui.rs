@@ -76,6 +76,8 @@ struct App {
     monitor_error: Option<String>,
     settings: settings::Form,
     privacy: privacy::Privacy,
+    close_reason: &'static str,
+    saver_started: Option<Instant>,
     jump_sender: fn(&str, u32, &str) -> &'static str,
 }
 
@@ -269,6 +271,16 @@ Log: {}
     let mut terminal = setup()?;
     app.usage
         .record("open", &[("os", json!(std::env::consts::OS))]);
+    app.usage.record(
+        "settings_load",
+        &[
+            ("outcome", json!(app.settings.load_outcome)),
+            ("idle_action", json!(app.settings.value.idle_action)),
+            ("idle_seconds", json!(app.settings.value.idle_seconds)),
+            ("saver_style", json!(app.settings.value.saver_style)),
+            ("language", json!(app.settings.value.language)),
+        ],
+    );
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run(&mut terminal)));
     app.finish_usage(&result);
     app.monitor.take();
@@ -306,8 +318,19 @@ fn replay(path: &str) -> io::Result<()> {
 
 impl App {
     fn finish_usage(&mut self, result: &std::thread::Result<io::Result<()>>) {
+        self.poll_monitor(self.navigation().content);
+        if let Some(start) = self.saver_started.take() {
+            self.usage.record(
+                "screensaver",
+                &[
+                    ("action", json!("close")),
+                    ("source", json!("exit")),
+                    ("duration_ms", json!(start.elapsed().as_millis() as u64)),
+                ],
+            );
+        }
         self.usage.close(match result {
-            Ok(Ok(())) => "dismiss",
+            Ok(Ok(())) => self.close_reason,
             Ok(Err(_)) => "io_error",
             Err(_) => "panic",
         });
@@ -335,6 +358,8 @@ impl App {
             monitor_error: None,
             settings: settings::Form::load(settings::config_path()),
             privacy: privacy::Privacy::new(now),
+            close_reason: "dismiss",
+            saver_started: None,
             jump_sender: send_jump,
         }
     }
@@ -392,13 +417,7 @@ impl App {
                 self.view = size;
             }
             let content = self.navigation().content;
-            if let Some(monitor) = &mut self.monitor {
-                if let Err(err) = monitor.resize(content) {
-                    monitor.error = Some(err.to_string());
-                }
-                let updated = monitor.poll();
-                dirty |= self.page == Page::Monitor && !self.privacy.active && updated;
-            }
+            dirty |= self.poll_monitor(content);
             if dirty {
                 self.board.set_list_geometry(content.width, content.height);
                 self.refresh_hover();
@@ -418,17 +437,10 @@ impl App {
             }
             dirty |= self.take_store();
             let now = Instant::now();
-            match self.privacy.due(now, &self.settings.value) {
-                Some(settings::IdleAction::Screensaver) => {
-                    self.privacy.show();
-                    dirty = true;
-                }
-                Some(settings::IdleAction::Monitor) => {
-                    self.switch_page(Page::Monitor);
-                    dirty = true;
-                }
-                Some(settings::IdleAction::Close) => return Ok(()),
-                _ => {}
+            match self.idle_action(now) {
+                Loop::Quit => return Ok(()),
+                Loop::Changed => dirty = true,
+                Loop::Ignored => {}
             }
             if now.duration_since(self.last_reconcile) >= SCAN_EVERY {
                 spawn_reconcile(&mut self.reconcile);
@@ -494,18 +506,18 @@ impl App {
     fn handle_key(&mut self, event: KeyEvent) -> Loop {
         self.launch_focus = None;
         if event.code == KeyCode::Char('q') && event.modifiers == KeyModifiers::NONE {
-            return Loop::Quit;
+            return self.quit("keyboard");
         }
         if self.privacy.active {
             if event.code == KeyCode::Char(' ') && event.modifiers == KeyModifiers::NONE {
-                self.privacy.wake(Instant::now());
+                self.wake_saver("keyboard", Instant::now());
                 return Loop::Changed;
             }
             return Loop::Ignored;
         }
         self.privacy.activity(Instant::now());
         if event.code == KeyCode::Char('l') && event.modifiers == KeyModifiers::CONTROL {
-            self.privacy.show();
+            self.show_saver("keyboard", Instant::now());
             return Loop::Changed;
         }
         let entering_text = self.page == Page::Home
@@ -513,17 +525,17 @@ impl App {
             && self.board.text_input_active();
         if event.modifiers == KeyModifiers::NONE && !entering_text {
             match event.code {
-                KeyCode::Char('t') => return self.switch_page(Page::Monitor),
-                KeyCode::Char('h') => return self.switch_page(Page::Home),
+                KeyCode::Char('t') => return self.switch_page(Page::Monitor, "keyboard"),
+                KeyCode::Char('h') => return self.switch_page(Page::Home, "keyboard"),
                 _ => {}
             }
         }
         if self.board.overlay == Overlay::Settings {
             let outcome = self.settings.key(event);
-            return self.settings_outcome(outcome);
+            return self.settings_outcome(outcome, "keyboard");
         }
         if event.code == KeyCode::Char('S') && !entering_text {
-            self.board.overlay = Overlay::Settings;
+            self.set_settings(true, "keyboard");
             return Loop::Changed;
         }
         if self.page == Page::Monitor {
@@ -557,7 +569,7 @@ impl App {
         match action {
             Action::Dismiss => {
                 log::info!("quit");
-                Loop::Quit
+                self.quit("keyboard")
             }
             Action::Jump { session, pane_id } => {
                 self.finish_jump(&before, &session, pane_id, "key")
@@ -613,7 +625,7 @@ impl App {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                 && area.contains(Position::new(mouse.column, mouse.row))
             {
-                self.privacy.wake(Instant::now());
+                self.wake_saver("mouse", Instant::now());
                 return Loop::Changed;
             }
             return Loop::Ignored;
@@ -625,14 +637,10 @@ impl App {
         self.nav_hover = hovered;
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             match hovered {
-                Some(Target::Quit) => return Loop::Quit,
-                Some(Target::Page(page)) => return self.switch_page(page),
+                Some(Target::Quit) => return self.quit("mouse"),
+                Some(Target::Page(page)) => return self.switch_page(page, "mouse"),
                 Some(Target::Settings) => {
-                    self.board.overlay = if self.board.overlay == Overlay::Settings {
-                        Overlay::None
-                    } else {
-                        Overlay::Settings
-                    };
+                    self.set_settings(self.board.overlay != Overlay::Settings, "mouse");
                     return Loop::Changed;
                 }
                 None => {}
@@ -649,7 +657,7 @@ impl App {
         }
         if self.board.overlay == Overlay::Settings {
             let outcome = self.settings.mouse(mouse, nav.content);
-            return self.settings_outcome(outcome);
+            return self.settings_outcome(outcome, "mouse");
         }
         mouse.row -= nav.content.y;
         if self.page == Page::Monitor {
@@ -696,7 +704,7 @@ impl App {
                     Action::None => Loop::Changed,
                     Action::Dismiss => {
                         log::info!("quit");
-                        Loop::Quit
+                        self.quit("mouse")
                     }
                 }
             }
@@ -1342,6 +1350,83 @@ mod process_tests {
         assert_eq!(app.board.status_filter(), None);
         app.handle_key(key(KeyCode::Home));
         assert_eq!(app.board.selected, 0);
+        let summary =
+            stats::summarize(&fs::read_to_string(dir.path().join("usage.jsonl")).unwrap());
+        assert_eq!(summary.mode_entries["status_filter/working"], 1);
+        assert_eq!(summary.mode_entries["status_filter/waiting"], 1);
+        assert_eq!(summary.mode_entries["leader_menu/Commands"], 5);
+        assert_eq!(summary.mode_entries["leader_menu/StateFilter"], 4);
+    }
+
+    #[test]
+    fn host_records_settings_save_failure_retry_and_language_without_paths() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.jsonl");
+        let mut app = test_app(&path);
+        let blocked = dir.path().join("private-settings");
+        fs::write(&blocked, "private contents").unwrap();
+        app.settings = settings::Form::load(blocked.join("settings.json"));
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.handle_key(key(KeyCode::Char('S')));
+        for _ in 0..3 {
+            app.handle_key(key(KeyCode::Down));
+        }
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            app.settings.value.language,
+            zellij_agent_board::i18n::Locale::SimplifiedChinese
+        );
+        fs::remove_file(&blocked).unwrap();
+        // Return to English and persist successfully after fixing the destination.
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Esc));
+        let log = fs::read_to_string(path).unwrap();
+        let summary = stats::summarize(&log);
+        assert_eq!(summary.features["settings/open/keyboard"], 1);
+        assert_eq!(summary.features["settings/close/keyboard"], 1);
+        assert_eq!(summary.features["settings_save/language/error/keyboard"], 1);
+        assert_eq!(summary.features["settings_save/language/ok/keyboard"], 1);
+        assert!(log.contains("zh-CN"));
+        assert!(!log.contains("private"));
+        assert!(!log.contains(dir.path().to_str().unwrap()));
+    }
+
+    #[test]
+    fn host_records_saver_trigger_wake_duration_and_idle_exit_once() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.jsonl");
+        let mut app = test_app(&path);
+        let now = Instant::now();
+        app.privacy = privacy::Privacy::new(now - Duration::from_secs(35));
+        app.settings.value = settings::Preferences::default();
+        assert!(matches!(
+            app.idle_action(now - Duration::from_secs(3)),
+            Loop::Changed
+        ));
+        assert!(matches!(app.idle_action(now), Loop::Ignored));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.show_saver("preview", Instant::now());
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.settings.value.idle_action = settings::IdleAction::Close;
+        app.privacy = privacy::Privacy::new(now - Duration::from_secs(35));
+        assert!(matches!(app.idle_action(now), Loop::Quit));
+        app.finish_usage(&Ok(Ok(())));
+        let summary = stats::summarize(&fs::read_to_string(path).unwrap());
+        assert_eq!(summary.features["idle/screensaver"], 1);
+        assert_eq!(summary.features["screensaver/show/idle"], 1);
+        assert_eq!(summary.features["screensaver/wake/keyboard"], 1);
+        assert!(summary.durations["screensaver/wake/keyboard"].max_ms >= 3000);
+        assert_eq!(summary.features["screensaver/wake/mouse"], 1);
+        assert_eq!(summary.features["idle/close"], 1);
+        assert_eq!(summary.features["close/idle"], 1);
     }
 
     #[test]
@@ -1655,16 +1740,136 @@ fn trace_jump(message: &str) {
 }
 
 impl App {
-    fn settings_outcome(&mut self, outcome: settings::Outcome) -> Loop {
+    fn quit(&mut self, source: &str) -> Loop {
+        self.usage.record("quit", &[("source", json!(source))]);
+        Loop::Quit
+    }
+
+    fn set_settings(&mut self, open: bool, source: &str) {
+        if open == (self.board.overlay == Overlay::Settings) {
+            return;
+        }
+        self.board.overlay = if open {
+            Overlay::Settings
+        } else {
+            Overlay::None
+        };
+        self.usage.record(
+            "settings",
+            &[
+                ("action", json!(if open { "open" } else { "close" })),
+                ("source", json!(source)),
+            ],
+        );
+    }
+
+    fn show_saver(&mut self, source: &str, now: Instant) {
+        if self.privacy.active {
+            return;
+        }
+        self.privacy.show();
+        self.saver_started = Some(now);
+        self.usage.record(
+            "screensaver",
+            &[
+                ("action", json!("show")),
+                ("source", json!(source)),
+                ("style", json!(self.settings.value.saver_style)),
+            ],
+        );
+    }
+
+    fn wake_saver(&mut self, source: &str, now: Instant) {
+        self.privacy.wake(now);
+        let duration = self
+            .saver_started
+            .take()
+            .map(|start| now.saturating_duration_since(start).as_millis() as u64);
+        self.usage.record(
+            "screensaver",
+            &[
+                ("action", json!("wake")),
+                ("source", json!(source)),
+                ("duration_ms", json!(duration)),
+            ],
+        );
+    }
+
+    fn idle_action(&mut self, now: Instant) -> Loop {
+        let Some(action) = self.privacy.due(now, &self.settings.value) else {
+            return Loop::Ignored;
+        };
+        self.usage.record(
+            "idle",
+            &[
+                ("action", json!(action)),
+                ("idle_seconds", json!(self.settings.value.idle_seconds)),
+            ],
+        );
+        match action {
+            settings::IdleAction::Screensaver => {
+                self.show_saver("idle", now);
+                Loop::Changed
+            }
+            settings::IdleAction::Monitor => self.switch_page(Page::Monitor, "idle"),
+            settings::IdleAction::Close => {
+                self.close_reason = "idle";
+                Loop::Quit
+            }
+            settings::IdleAction::Disabled => Loop::Ignored,
+        }
+    }
+
+    fn poll_monitor(&mut self, content: Rect) -> bool {
+        let Some(monitor) = &mut self.monitor else {
+            return false;
+        };
+        if let Err(err) = monitor.resize(content) {
+            monitor.fail("resize", err);
+        }
+        let updated = monitor.poll();
+        let events = monitor.take_events();
+        let changed = updated || !events.is_empty();
+        for event in events {
+            self.usage.record("monitor", &event);
+        }
+        self.page == Page::Monitor && !self.privacy.active && changed
+    }
+
+    fn settings_outcome(&mut self, outcome: settings::Outcome, source: &str) -> Loop {
         match outcome {
             settings::Outcome::Ignored => Loop::Ignored,
             settings::Outcome::Changed => Loop::Changed,
+            settings::Outcome::Saved {
+                field,
+                previous,
+                value,
+                error,
+                duration_ms,
+            } => {
+                self.usage.record(
+                    "settings_save",
+                    &[
+                        ("field", json!(field.name())),
+                        ("previous", previous),
+                        ("value", value),
+                        ("source", json!(source)),
+                        (
+                            "outcome",
+                            json!(if error.is_some() { "error" } else { "ok" }),
+                        ),
+                        ("error_kind", json!(error.map(|kind| format!("{kind:?}")))),
+                        ("duration_ms", json!(duration_ms)),
+                    ],
+                );
+                Loop::Changed
+            }
             settings::Outcome::Close => {
-                self.board.overlay = Overlay::None;
+                self.set_settings(false, source);
                 Loop::Changed
             }
             settings::Outcome::Preview => {
-                self.privacy.show();
+                self.show_saver("preview", Instant::now());
                 Loop::Changed
             }
         }
@@ -1674,9 +1879,21 @@ impl App {
         Navigation::new(Rect::new(0, 0, self.view.width, self.view.height))
     }
 
-    fn switch_page(&mut self, page: Page) -> Loop {
-        if self.board.overlay == Overlay::Settings {
-            self.board.overlay = Overlay::None;
+    fn switch_page(&mut self, page: Page, source: &str) -> Loop {
+        self.set_settings(false, source);
+        if self.page != page {
+            let name = |page| match page {
+                Page::Home => "home",
+                Page::Monitor => "monitor",
+            };
+            self.usage.record(
+                "page",
+                &[
+                    ("from", json!(name(self.page))),
+                    ("to", json!(name(page))),
+                    ("source", json!(source)),
+                ],
+            );
         }
         self.launch_focus = None;
         self.pointer = None;
@@ -1685,11 +1902,36 @@ impl App {
         if page == Page::Monitor
             && (self.monitor.is_none() || self.monitor.as_ref().is_some_and(|m| m.error.is_some()))
         {
+            let restart = self.monitor.is_some() || self.monitor_error.is_some();
+            // Drain any failure facts before replacing the child.
+            self.poll_monitor(self.navigation().content);
             self.monitor.take();
             self.monitor_error = None;
+            let start = Instant::now();
             match monitor::Monitor::spawn(self.navigation().content) {
-                Ok(monitor) => self.monitor = Some(monitor),
+                Ok(monitor) => {
+                    self.usage.record(
+                        "monitor",
+                        &[
+                            ("stage", json!("spawn")),
+                            ("outcome", json!("ok")),
+                            ("restart", json!(restart)),
+                            ("duration_ms", json!(start.elapsed().as_millis() as u64)),
+                        ],
+                    );
+                    self.monitor = Some(monitor);
+                }
                 Err(err) => {
+                    self.usage.record(
+                        "monitor",
+                        &[
+                            ("stage", json!("spawn")),
+                            ("outcome", json!("error")),
+                            ("restart", json!(restart)),
+                            ("error_kind", json!(format!("{:?}", err.kind()))),
+                            ("duration_ms", json!(start.elapsed().as_millis() as u64)),
+                        ],
+                    );
                     self.monitor_error =
                         Some(format!("Could not start bottom: {err}. Press t to retry."))
                 }

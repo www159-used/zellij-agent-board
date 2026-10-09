@@ -23,6 +23,8 @@ class HookTests(unittest.TestCase):
         self.env = dict(os.environ, TMPDIR=str(self.root),
                         ZAB_STATE_DIR=str(self.root / "state"),
                         ZELLIJ_SESSION_NAME="hook-test", ZELLIJ_PANE_ID="42")
+        self.env["ZELLIJ_AGENT_BOARD_STATS"] = str(self.root / "usage.jsonl")
+        self.env.pop("ZELLIJ_AGENT_BOARD_NO_STATS", None)
         self.spool = self.root / "zellij-agent-board-spool" / "hook-test-42"
         self.started = self.root / "state" / "started" / "hook-test-42"
 
@@ -32,6 +34,50 @@ class HookTests(unittest.TestCase):
             text=True, capture_output=True, env=self.env, timeout=5,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def observations(self):
+        path = self.root / "usage.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_resolution_observations_are_private_and_can_be_disabled(self):
+        payload = self._codex_shared_cwd([
+            {"id": 0, "title": "Daily task | work"},
+            {"id": 8, "title": "Other task | work"},
+        ])
+        payload["prompt"] = "secret text must not be collected"
+        self.hook("UserPromptSubmit", payload)
+        self.hook("Interrupt", payload)
+        rows = self.observations()
+        self.assertEqual([row["event"] for row in rows], ["hook_resolve_start", "hook_resolve"] * 2)
+        self.assertEqual(rows[-1]["method"], "cache")
+        self.assertEqual(rows[-1]["cache"], "hit")
+        self.assertEqual(rows[-1]["hook_event"], "Interrupt")
+        self.assertEqual(rows[-1]["outcome"], "ok")
+        for start, result in zip(rows[::2], rows[1::2]):
+            self.assertEqual(start["hook_id"], result["hook_id"])
+            self.assertGreaterEqual(result["duration_ms"], 0)
+        self.assertNotEqual(rows[0]["hook_id"], rows[2]["hook_id"])
+        log = json.dumps(rows)
+        for private in (payload["session_id"], payload["cwd"], "Daily task", "secret text"):
+            self.assertNotIn(private, log)
+        self.env["ZELLIJ_AGENT_BOARD_NO_STATS"] = ""
+        self.hook("Interrupt", payload)
+        self.assertEqual(self.observations(), rows)
+        self.assertIn(" interrupt ", (self.root / "zellij-agent-board-spool/daily-0").read_text())
+
+    def test_observation_sink_failure_does_not_block_interrupt(self):
+        payload = self._codex_shared_cwd([
+            {"id": 0, "title": "Daily task | work"},
+            {"id": 8, "title": "Other task | work"},
+        ])
+        fifo = self.root / "stats.fifo"
+        os.mkfifo(fifo)
+        for sink in (self.root, fifo):  # unusable file and a pipe without a reader
+            with self.subTest(sink=sink):
+                self.env["ZELLIJ_AGENT_BOARD_STATS"] = str(sink)
+                self.hook("UserPromptSubmit", payload)
+                self.hook("Interrupt", payload)
+                self.assertIn(" interrupt ", (self.root / "zellij-agent-board-spool/daily-0").read_text())
 
     def test_readers_keep_old_markers_during_prompt_publication(self):
         old_hook = b"HOOK hook-test 42 sessionStart @1\n"
@@ -462,6 +508,10 @@ class HookTests(unittest.TestCase):
         self.hook("Interrupt", payload)
         self.assertEqual(spool.read_bytes(), before)
         self.assertFalse((spool.parent / "daily-8").exists())
+        resolution = self.observations()[-1]
+        self.assertEqual(resolution["cache"], "title_unverified")
+        self.assertEqual(resolution["outcome"], "unresolved")
+        self.assertEqual(resolution["reason"], "ambiguous")
 
     def test_codex_cached_interrupt_does_not_match_a_shell_reusing_the_pane(self):
         payload = self._codex_shared_cwd([

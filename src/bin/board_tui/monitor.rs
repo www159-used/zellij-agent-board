@@ -10,6 +10,7 @@ use std::{
     io::{self, Read, Write},
     sync::mpsc::{self, Receiver},
     thread::{self, JoinHandle},
+    time::Instant,
 };
 use tui_term::{
     vt100::{self, MouseProtocolEncoding, MouseProtocolMode},
@@ -59,9 +60,14 @@ pub struct Monitor {
     output: Option<Receiver<Vec<u8>>>,
     reader: Option<JoinHandle<()>>,
     pub error: Option<String>,
+    started: Instant,
+    first_output: bool,
+    exit_seen: bool,
+    events: Vec<Vec<(&'static str, serde_json::Value)>>,
 }
 impl Monitor {
     pub fn spawn(area: Rect) -> io::Result<Self> {
+        let started = Instant::now();
         let size = pty_size(area);
         let pair = native_pty_system()
             .openpty(size)
@@ -102,6 +108,10 @@ impl Monitor {
             output: Some(output),
             reader: Some(reader),
             error: None,
+            started,
+            first_output: false,
+            exit_seen: false,
+            events: vec![],
         })
     }
     pub fn poll(&mut self) -> bool {
@@ -109,6 +119,17 @@ impl Monitor {
         if let Some(output) = &self.output {
             while let Ok(bytes) = output.try_recv() {
                 self.parser.process(&bytes);
+                if !self.first_output {
+                    self.first_output = true;
+                    self.events.push(vec![
+                        ("stage", serde_json::json!("first_output")),
+                        ("outcome", serde_json::json!("ok")),
+                        (
+                            "duration_ms",
+                            serde_json::json!(self.started.elapsed().as_millis() as u64),
+                        ),
+                    ]);
+                }
                 dirty = true;
             }
         }
@@ -116,22 +137,49 @@ impl Monitor {
         if !replies.is_empty() {
             self.write(&replies);
         }
-        if self.error.is_none() {
+        if !self.exit_seen {
             match self.child.try_wait() {
                 Ok(Some(status)) => {
+                    self.exit_seen = true;
+                    self.events.push(vec![
+                        ("stage", serde_json::json!("exit")),
+                        (
+                            "outcome",
+                            serde_json::json!(if status.success() { "ok" } else { "error" }),
+                        ),
+                        ("exit_code", serde_json::json!(status.exit_code())),
+                        (
+                            "duration_ms",
+                            serde_json::json!(self.started.elapsed().as_millis() as u64),
+                        ),
+                    ]);
                     self.error = Some(format!(
                         "bottom {status}. Press t to restart or h for Agents."
                     ));
                     dirty = true;
                 }
                 Err(err) => {
-                    self.error = Some(err.to_string());
+                    self.exit_seen = true;
+                    self.fail("wait", err);
                     dirty = true;
                 }
                 Ok(None) => {}
             }
         }
         dirty
+    }
+    pub fn take_events(&mut self) -> Vec<Vec<(&'static str, serde_json::Value)>> {
+        std::mem::take(&mut self.events)
+    }
+    pub fn fail(&mut self, stage: &'static str, err: io::Error) {
+        if self.error.is_none() {
+            self.events.push(vec![
+                ("stage", serde_json::json!(stage)),
+                ("outcome", serde_json::json!("error")),
+                ("error_kind", serde_json::json!(format!("{:?}", err.kind()))),
+            ]);
+            self.error = Some(err.to_string());
+        }
     }
     pub fn resize(&mut self, area: Rect) -> io::Result<()> {
         let size = pty_size(area);
@@ -158,7 +206,7 @@ impl Monitor {
                 .write_all(bytes)
                 .and_then(|()| self.writer.flush())
             {
-                self.error = Some(err.to_string());
+                self.fail("write", err);
             }
         }
     }

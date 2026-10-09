@@ -108,6 +108,11 @@ class BoardTTY:
                 return
         raise AssertionError(f"Setting {key!r} was not saved as {value!r}")
 
+    def events(self, kind=None):
+        path = self.root / "state/usage.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        return [row for row in rows if kind is None or row["event"] == kind]
+
     def close_board(self):
         self.send(b"q")
         self.read_until(b"\x1b[?1049l")
@@ -188,6 +193,12 @@ class MonitorTests(unittest.TestCase):
         os.kill(board.pid, signal.SIGWINCH)
         board.read_until(b"CPU")
         board.close_board()
+        pages = board.events("page")
+        self.assertEqual([(row["to"], row["source"]) for row in pages],
+                         [("monitor", "keyboard"), ("home", "mouse"), ("monitor", "mouse")])
+        monitor = board.events("monitor")
+        self.assertEqual(sum(row["stage"] == "spawn" for row in monitor), 1)
+        self.assertTrue(any(row["stage"] == "first_output" and row["duration_ms"] >= 0 for row in monitor))
 
     def test_q_exits_home_picker_search_and_overlays(self):
         for mode, needle in [(b"p", b"PICK"), (b"/", b"find"),
@@ -208,6 +219,13 @@ class MonitorTests(unittest.TestCase):
         board.send(b"t")
         board.read_until(b"CPU", timeout=10)
         board.close_board()
+        rows = board.events("monitor")
+        exits = [row for row in rows if row["stage"] == "exit"]
+        self.assertEqual(len(exits), 1)
+        self.assertEqual(exits[0]["outcome"], "error")
+        self.assertNotEqual(exits[0]["exit_code"], 0)
+        spawns = [row for row in rows if row["stage"] == "spawn"]
+        self.assertEqual([row["restart"] for row in spawns], [False, True])
 
     def test_q_exits_monitor_help_directly(self):
         board = self.board()
@@ -290,6 +308,8 @@ class MonitorTests(unittest.TestCase):
         board = self.board(preferences={"idle_seconds": 1, "idle_action": "close"})
         board.read_until(b"\x1b[?1049l")
         board.wait_exit()
+        self.assertEqual(board.events("idle")[0]["action"], "close")
+        self.assertEqual(board.events("close")[0]["reason"], "idle")
 
     def test_monitor_screensaver_and_click_resume(self):
         board = self.board(preferences={"idle_seconds": 1})
@@ -299,6 +319,9 @@ class MonitorTests(unittest.TestCase):
         self.click(board, 60, 17)
         board.read_until(b"CPU", timeout=10)
         board.close_board()
+        rows = board.events("screensaver")
+        self.assertEqual([(row["action"], row["source"]) for row in rows], [("show", "idle"), ("wake", "mouse")])
+        self.assertGreaterEqual(rows[-1]["duration_ms"], 0)
 
     def test_screensaver_click_on_blank_area_restores_picker_without_passing_through(self):
         board = self.board()
@@ -309,6 +332,24 @@ class MonitorTests(unittest.TestCase):
         self.click(board, 8, 8)
         board.read_until(b"PICK", timeout=2)
         board.close_board()
+
+    def test_invalid_settings_and_failed_save_are_observed_without_paths(self):
+        board = self.board(preferences={"idle_seconds": 0})
+        self.assertEqual(board.events("settings_load")[0]["outcome"], "invalid_value")
+        board.settings_path.unlink()
+        board.settings_path.mkdir()  # atomic save cannot replace a directory
+        board.send(b"S")
+        board.read_until(b"Privacy / idle protection")
+        board.send(b"\x1b[C")
+        board.read_until(b"could not save")
+        board.close_board()
+        saves = board.events("settings_save")
+        self.assertEqual(len(saves), 1)
+        self.assertEqual(saves[0]["outcome"], "error")
+        self.assertIsNotNone(saves[0]["error_kind"])
+        raw = json.dumps(board.events())
+        self.assertNotIn(str(board.root), raw)
+        self.assertNotIn("task-00", raw)
 
     def test_language_switch_is_live_clickable_and_persists(self):
         board = self.board()
@@ -326,6 +367,10 @@ class MonitorTests(unittest.TestCase):
         board.send(b" ")
         board.read_until("隐私与空闲保护".encode())
         board.close_board()
+        saves = board.events("settings_save")
+        self.assertEqual([(row["field"], row["value"], row["outcome"]) for row in saves],
+                         [("language", "zh-CN", "ok"), ("idle_action", "disabled", "ok"), ("saver_style", "clock", "ok")])
+        self.assertTrue(all(row["source"] == "mouse" for row in saves))
         reopened = self.board(settings_path=board.settings_path)
         reopened.send(b"S")
         reopened.read_until("隐私与空闲保护".encode())

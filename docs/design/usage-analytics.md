@@ -2,13 +2,13 @@
 
 ## 原则
 
-采集层记录发生了什么、当时界面是什么状态、执行得到什么结果。次数、比例、耗时、操作路径和用户偏好均在读取日志后计算，不作为埋点字段。数据仍保存在本机，不上传，不生成安装 ID。
+采集层记录发生了什么、当时界面是什么状态、执行得到什么结果。次数、比例、操作路径和用户偏好均在读取日志后计算，不作为埋点字段；单次执行或遮盖的测量耗时属于原始事实。数据仍保存在本机，不上传，不生成安装 ID。
 
 访问 ID 每次启动随机生成，仅关联一次看板打开期间的事件。同一本机的长期记录可以按时间汇总；将来如果需要合并多台机器的数据，再讨论是否引入可重置的安装 ID。
 
 ## 已实现的 v2 记录
 
-每行有 `v`、`ts`（UTC epoch 秒）、`event`、`visit_id`、`seq`、`elapsed_ms`（单调时钟毫秒）、`app_version`。访问 ID 与序号共同标识事件，关联不依赖日志行的交错顺序。计时从首个 open 事件开始，不包含此前的扫描和终端初始化时间。
+GUI 每行有 `v`、`ts`（UTC epoch 秒）、`event`、`visit_id`、`seq`、`elapsed_ms`（单调时钟毫秒）、`app_version`。访问 ID 与序号共同标识事件，关联不依赖日志行的交错顺序。计时从首个 open 事件开始，不包含此前的扫描和终端初始化时间。
 
 | 事件 | 基础字段 |
 | --- | --- |
@@ -50,3 +50,28 @@ v2 汇总按访问 ID 与序号排序、去重。缺失 close 的访问不补时
 ## 验证
 
 测试覆盖访问内序号、状态去重、输入与 session 名不落盘、禁用访问、从状态推导模式进入、乱序和重复事件汇总、保留字段不可覆盖、v1 日志兼容。显式 v1 样本位于 `tests/fixtures/usage-v1.jsonl`，混合版本测试确认旧数据不进入 v2 访问指标。宿主测试覆盖键盘搜索/输入/跳转/退出、鼠标跳转、请求与结果关联，以及 IO 错误和 panic 关闭原因；跳转发送函数使用替身，不操作真实窗口。报告将原始 hinting 状态显示为 Flash。真实 Zellij 跨 session 聚焦仍需要交互环境验证。
+
+## 新功能的观测
+
+GUI 操作在实际执行处记录，进入设置、切页、唤醒等操作不依赖下一帧绘制，连续输入在同一轮被消费时也不会漏掉。
+
+| 事件 | 字段与含义 |
+| --- | --- |
+| state | 增加 settings、status_filter 和 leader_menu；筛选与 Space 菜单的进入次数仍从状态变化推导 |
+| page | from / to（home、monitor）、source（keyboard、mouse、idle）；只记录实际切页 |
+| settings | action（open、close）、source；焦点移动和 hover 不算设置修改 |
+| settings_load | outcome（ok、default、parse_error、invalid_value、read_error），实际采用的四项偏好；失败时为默认值 |
+| settings_save | field、previous、value、source、outcome（ok、error）、error_kind、duration_ms；value 是立即生效的值，保存失败不代表变更未生效，同值重试仍记录保存结果 |
+| idle | action、idle_seconds；一次超时只触发一次，输入后重新计时 |
+| screensaver | action（show、wake、close）、source（idle、keyboard、mouse、preview、exit）；show 带 style，wake / close 带遮盖持续 duration_ms；恢复事件不会传给原页面 |
+| monitor | stage（spawn、first_output、exit、resize、write、wait）、outcome；spawn 带 restart，错误带 error_kind，退出带 exit_code，spawn / first_output / exit 带 duration_ms |
+| quit | source（keyboard、mouse）；显式退出请求，与最终 close 分开 |
+| close | 新增 reason=idle，区分自动关闭与 dismiss；IO 错误和 panic 仍覆盖正常退出原因 |
+
+monitor 的 spawn 耗时仅测量创建 PTY 和子进程；first_output 从创建开始计时，表示宿主首次收到输出，不能解释为 btm 已就绪。exit 的耗时是宿主观察到退出时的子进程存活时间。错误记录类别与退出码，不保存包含路径或进程内容的错误正文。父进程退出时主动终止 monitor 不算子进程自行失败。
+
+Hook 定位器向同一个 usage.jsonl 写入 `hook_resolve_start` 与 `hook_resolve`，遵守相同路径覆盖与 NO_STATS 开关。每次定位生成独立随机 hook_id，无 visit_id / seq / app_version，不混入 GUI 访问数。结果带允许列表内的 hook_event、method（cache、inherited、thread_argument、cwd、thread_title、none）、outcome（ok、unresolved）、cache（命中、缺失或验证失败类别）、reason、duration_ms。不写 cwd、PID、pane/session 标识、标题或 payload。记录失败不阻止 hook 执行。
+
+定位计时从 Python 定位器启动后开始，不包含 shell 启动与后续状态投递。定位成功只证明找到目标，不证明 Interrupt 已被 GUI 消费；现有 state 快照记录后续实际状态。只有 start 没有 result 的尝试单独计数，可能是进程被取消或结果写入失败，不能直接认定为超时。
+
+`--stats` 展示新功能的触发方式与结果、实际设置变更值及保存结果、错误类别与定位失败原因，以及耗时的样本数、均值和最大值。耗时仅来自完整测量；不推测缺失结果的耗时。Hook 按 hook_id 与事件类型去重；GUI 仍按 visit_id / seq 排序去重，兼容旧日志。`leader_menu/Commands` 也包括从筛选子菜单返回的进入。

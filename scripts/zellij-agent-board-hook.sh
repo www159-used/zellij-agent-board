@@ -35,14 +35,48 @@ if command -v python3 >/dev/null 2>&1; then
         ENV_SESSION="${ZELLIJ_SESSION_NAME:-}" \
         ENV_PANE="${ZELLIJ_PANE_ID:-}" \
         ENV_STATE="$state_dir" \
+        ENV_EVENT="$event" \
         python3 -c '
-import glob, json, os, shutil, sqlite3, subprocess, sys, tempfile
+import glob, json, os, shutil, sqlite3, subprocess, sys, tempfile, time
 from contextlib import closing
 from pathlib import Path
 
 state_dir = os.environ.get("ENV_STATE") or ""
+started = time.monotonic()
+try:
+    hook_id = os.urandom(16).hex()
+except OSError:
+    hook_id = None
+cache_status = "not_attempted"
+observing = False
+hook_event = os.environ.get("ENV_EVENT", "")
+if hook_event not in {"Interrupt", "UserPromptSubmit", "SessionStart", "PreToolUse", "PostToolUse", "Stop", "StopFailure", "Notification", "PermissionRequest"}:
+    hook_event = "other"
 
-def emit_nothing():
+def observe(event, **fields):
+    # Match the native usage sink and opt-out. One bounded append, no extra
+    # process or raw payload/identity, including on the one-second Interrupt path.
+    if not observing or hook_id is None or "ZELLIJ_AGENT_BOARD_NO_STATS" in os.environ:
+        return
+    try:
+        root = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+        path = Path(os.environ.get("ZELLIJ_AGENT_BOARD_STATS") or str(Path(root) / "zellij-agent-board/usage.jsonl"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = dict(v=2, ts=int(time.time()), event=event, hook_id=hook_id, hook_event=hook_event, **fields)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK, 0o600)
+        try:
+            os.write(fd, (json.dumps(row, separators=(",", ":")) + "\n").encode())
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        pass
+
+def resolution(method, outcome, reason):
+    observe("hook_resolve", method=method, outcome=outcome, reason=reason,
+            cache=cache_status, duration_ms=int((time.monotonic() - started) * 1000))
+
+def emit_nothing(reason="no_match"):
+    resolution("none", "unresolved", reason)
     # Identity present but unresolved: report none so the shell blanks the
     # daemon ids rather than mis-attributing the hook to the birth pane.
     print("none")
@@ -223,26 +257,37 @@ def pane_cache_path(session_id):
     return Path(state_dir) / "codex-panes" / (session_id + ".json")
 
 def cached_pane(session_id, wanted):
+    global cache_status
     path = pane_cache_path(session_id)
+    cache_status = "unavailable"
     if not path or not wanted:
         return None
     try:
+        cache_status = "missing"
+        if not path.exists():
+            return None
+        cache_status = "invalid"
         cached = json.loads(path.read_text())
         pid = str(cached["pid"])
         ids = (str(cached["session"]), str(cached["pane"]))
         if not pid.isdigit() or cached["cwd"] != wanted:
+            cache_status = "cwd_mismatch"
             return None
+        cache_status = "process_mismatch"
         if zellij_ids(pid, require_codex=True) != ids:
             return None
+        cache_status = "cwd_mismatch"
         if wanted not in proc_cwds(pid, ""):
             return None
         # Resume can reuse the same TUI PID and cwd for another thread. Its
         # current title must still match this exact thread before using cache.
-        return pane_from_thread_name(session_id, wanted, {ids})
+        match = pane_from_thread_name(session_id, wanted, {ids})
+        cache_status = "hit" if match else "title_unverified"
+        return match
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
-def emit(session, pane):
+def emit(session, pane, method):
     # Interrupt has a one-second deadline. Save a successfully resolved TUI
     # identity during normal hooks so cancellation only probes that one PID.
     path = pane_cache_path(session_id)
@@ -263,6 +308,7 @@ def emit(session, pane):
                     os.unlink(pending)
                 except FileNotFoundError:
                     pass
+    resolution(method, "ok", "matched")
     print("ok")
     print(session)
     print(pane)
@@ -290,6 +336,8 @@ session_id = str(data.get("session_id") or data.get("sessionId") or "")
 if not cwd and not session_id:
     emit_keep()
 
+observing = True
+observe("hook_resolve_start")
 wanted = real(cwd)
 if not wanted and session_id:
     wanted = real(cwd_from_session(session_id))
@@ -300,10 +348,10 @@ codex_pids = {}
 if session_id:
     matched = cached_pane(session_id, wanted)
     if matched:
-        emit(*matched)
+        emit(*matched, "cache")
 listed = run([ps, "-ax", "-o", "pid=,args="])
 if listed.returncode != 0:
-    emit_nothing()
+    emit_nothing("process_list_failed")
 
 codex_rows = []
 live_env = False
@@ -331,14 +379,14 @@ for line in listed.stdout.splitlines():
 # Cursor / Claude / a real Codex TUI already carry the right pane ids.
 # A shell left in the daemon birth pane must not count.
 if env_session and env_pane and live_env and (not wanted or env_matches_cwd):
-    emit(env_session, env_pane)
+    emit(env_session, env_pane, "inherited")
 
 if session_id:
     hits = [ids for args, ids, _cwds in codex_rows if session_id in args]
     pairs = set(hits)
     if len(pairs) == 1:
         session, pane = next(iter(pairs))
-        emit(session, pane)
+        emit(session, pane, "thread_argument")
 
 if wanted:
     hits = []
@@ -352,11 +400,13 @@ if wanted:
         pairs = set(chosen)
         if len(pairs) == 1:
             session, pane = next(iter(pairs))
-            emit(session, pane)
+            emit(session, pane, "cwd")
         if session_id and len(pairs) > 1:
             matched = pane_from_thread_name(session_id, wanted, pairs)
             if matched:
-                emit(*matched)
+                emit(*matched, "thread_title")
+        if len(pairs) > 1:
+            emit_nothing("ambiguous")
 
 emit_nothing()
 ' <<<"$payload"

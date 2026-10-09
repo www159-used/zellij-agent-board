@@ -103,4 +103,4 @@ make package-wasm VERSION=v0.8.1
 
 宿主 TUI 将基础行为记录到本机 JSONL，不上传。运行 `board-tui --stats` 查看汇总；设置 `ZELLIJ_AGENT_BOARD_NO_STATS` 关闭采集，`ZELLIJ_AGENT_BOARD_STATS` 可覆盖路径。默认位置是 `$XDG_DATA_HOME/zellij-agent-board/usage.jsonl`，未设置时为 `~/.local/share/zellij-agent-board/usage.jsonl`。
 
-每次打开生成新的访问 ID，没有持久安装 ID。记录操作、变化后的状态、跳转请求和投递结果；不保存输入内容、标题、路径和真实 session/pane 标识。旧版日志可能仍含 session 名，不自动改写。汇总从基础事件推导模式进入次数；投递成功不等于实际聚焦成功，缺失关闭事件的访问单独计数。当前日志尚未轮转。详见[设计说明](../design/usage-analytics.md)。
+每次打开生成新的访问 ID，没有持久安装 ID。记录操作、变化后的状态、跳转请求和投递结果；不保存输入内容、标题、路径和真实 session/pane 标识。旧版日志可能仍含 session 名，不自动改写。汇总从基础事件推导模式、Space 菜单和状态筛选的进入次数，并展示切页、设置、屏保、monitor 生命周期、hook 定位的执行结果与测量耗时。空闲自动关闭与普通退出分开，缺失关闭事件的访问及缺失结果的 hook 尝试单独计数。hook 定位器遵守相同路径与关闭采集开关，不记录 payload 或真实进程/session 标识；投递成功不等于实际聚焦成功。当前日志尚未轮转。详见[设计说明](../design/usage-analytics.md)。
