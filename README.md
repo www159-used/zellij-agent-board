@@ -52,6 +52,7 @@ The WASM pane hides itself and opens `board-tui` with `new-pane --floating --clo
 | `/`, then `n/N` | Incremental search, next/previous match |
 | `s` | Flash labels within the visible list |
 | `p`, then `Tab` | Open the full-list picker, switch between query and labels |
+| `Space f`, then a state key | Filter Agents by state; `w` working, `W` waiting, `d` done, `a` all |
 | `Enter`, mouse click | Jump to the selected Agent |
 | `?` | Show help |
 | `S` | Open Settings from Home or Monitor |
@@ -60,6 +61,10 @@ The WASM pane hides itself and opens `board-tui` with `new-pane --floating --clo
 | `q` | Exit the entire GUI immediately, including search, picker and overlays |
 | `Esc` | Cancel the current Home input mode or overlay; otherwise dismiss Home |
 | `Ctrl+l` | Enter the privacy screensaver immediately |
+
+Press `Space f` to see the state keys. The active filter appears in the header
+and updates as hooks arrive. Movement, search, Flash labels and the picker use
+the filtered Agents. `Space f a` restores all Agents; `Esc` cancels the menu.
 
 The top navigation is always visible and clickable, with an active-page highlight
 and pointer hover. There are two pages: `h` (Agents) and `t` (Monitor). `p` opens

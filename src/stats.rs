@@ -166,6 +166,8 @@ impl Visit {
         let state = json!({"rows": rows, "selected": board.selected,
             "width": width, "height": height, "searching": board.is_searching(),
             "hinting": board.is_hinting(), "picking": board.is_picking(),
+            "status_filter": board.status_filter().map(|status| status.label()),
+            "leader_menu": board.leader_menu().map(|menu| format!("{menu:?}")),
             "help": board.overlay == Overlay::Help,
             "settings": board.overlay == Overlay::Settings,
             "search_length": board.search_query().chars().count(),

@@ -8,7 +8,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
 };
 
-use crate::{theme::theme, Agent, Board, BodyLine, HintField, Overlay, PickerFocus, Status};
+use crate::{
+    theme::theme, Agent, Board, BodyLine, HintField, LeaderMenu, Overlay, PickerFocus, Status,
+    STATE_FILTER_CHOICES,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PaintCtx<'a> {
@@ -115,6 +118,9 @@ pub fn render_board(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) 
             if board.is_picking() {
                 render_picker(board, home, content, buffer);
             }
+            if let Some(menu) = board.leader_menu() {
+                render_leader_menu(board, menu, content, buffer);
+            }
         }
     }
     if let Some(footer) = footer {
@@ -184,6 +190,10 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
         Line::from(vec![key("s"), Span::raw("search")]),
         Line::from(vec![key("/  n  N"), Span::raw("find / next / prev")]),
         Line::from(vec![key("p  Tab"), Span::raw("picker / tip jump")]),
+        Line::from(vec![
+            key("Space f w / f a"),
+            Span::raw("filter working / all"),
+        ]),
         Line::from(vec![key("h / t"), Span::raw("Agents / Monitor pages")]),
         Line::from(vec![key("q"), Span::raw("exit GUI; Esc cancels")]),
         Line::from(vec![key("Alt+q"), Span::raw("toggle board")]),
@@ -192,6 +202,65 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
         Line::from(vec![key("?"), Span::raw("close help")]),
     ];
     Paragraph::new(lines).render(inner, buffer);
+}
+
+fn render_leader_menu(board: &Board, menu: LeaderMenu, area: Rect, buffer: &mut Buffer) {
+    let choices: Vec<(char, String, bool)> = match menu {
+        LeaderMenu::Commands => vec![('f', "filter by state".into(), false)],
+        LeaderMenu::StateFilter => STATE_FILTER_CHOICES
+            .iter()
+            .map(|&(key, status)| {
+                (
+                    key,
+                    status.map_or("all", Status::label).into(),
+                    status == board.status_filter(),
+                )
+            })
+            .collect(),
+    };
+    let width = area.width.min(52);
+    let columns = if width >= 44 { 2 } else { 1 };
+    let height = (choices.len().div_ceil(columns) as u16 + 2).min(area.height);
+    let popup = Rect::new(
+        area.right().saturating_sub(width),
+        area.bottom().saturating_sub(height),
+        width,
+        height,
+    );
+    Clear.render(popup, buffer);
+    buffer.set_style(popup, Style::default().fg(theme().text).bg(theme().surface));
+    let block = overlay_block(match menu {
+        LeaderMenu::Commands => " Space ",
+        LeaderMenu::StateFilter => " Space f · state ",
+    });
+    let inner = block.inner(popup);
+    block.render(popup, buffer);
+    let cell_width = inner.width / columns as u16;
+    for (index, (key, label, active)) in choices.into_iter().enumerate() {
+        let row = index / columns;
+        if row >= usize::from(inner.height) {
+            break;
+        }
+        let cell = Rect::new(
+            inner.x + (index % columns) as u16 * cell_width,
+            inner.y + row as u16,
+            cell_width,
+            1,
+        );
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(" {key} "),
+                Style::default()
+                    .fg(theme().focus)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{label}{}", if active { " *" } else { "" }),
+                Style::default().fg(if active { theme().focus } else { theme().text }),
+            ),
+        ]))
+        .render(cell, buffer);
+    }
 }
 
 fn render_settings(area: Rect, buffer: &mut Buffer) {
@@ -213,7 +282,7 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    if board.agents.is_empty() {
+    if board.agents.is_empty() && board.status_filter().is_none() {
         Paragraph::new("no cursor agents")
             .style(Style::default().fg(theme().muted))
             .render(area, buffer);
@@ -250,6 +319,12 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
     }
 
     let lines = board.all_lines(wide);
+    if lines.is_empty() {
+        Paragraph::new("no agents match this state")
+            .style(Style::default().fg(theme().muted))
+            .render(body, buffer);
+        return;
+    }
     let top = usize::try_from(board.topline())
         .unwrap_or(0)
         .min(lines.len());
@@ -674,6 +749,24 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         footer_hints(area.width, None, &[("Esc  S", "back"), ("q", "exit")])
     } else if board.overlay == Overlay::Help {
         footer_hints(area.width, None, &[("q", "close"), ("?", "close")])
+    } else if let Some(menu) = board.leader_menu() {
+        footer_hints(
+            area.width,
+            None,
+            &[
+                (
+                    if menu == LeaderMenu::Commands {
+                        "Space"
+                    } else {
+                        "Space f"
+                    },
+                    "choose",
+                ),
+                ("Esc", "cancel"),
+                ("Backspace", "back"),
+                ("q", "close"),
+            ],
+        )
     } else if board.is_picking() {
         Line::from(vec![
             Span::styled(
@@ -746,6 +839,7 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
                 ("/", "find"),
                 ("q", "close"),
                 ("?", "more"),
+                ("Space", "filter"),
             ],
         )
     };
@@ -804,8 +898,9 @@ fn header_line(board: &Board) -> Line<'static> {
     push_count(&mut parts, board, Status::Idle, "idle");
     push_count(&mut parts, board, Status::Found, "found");
     push_count(&mut parts, board, Status::Unknown, "unknown");
+    push_count(&mut parts, board, Status::Ended, "ended");
 
-    if parts.is_empty() {
+    if parts.is_empty() && board.status_filter().is_none() {
         return Line::from(Span::styled(
             "no status yet",
             Style::default().fg(theme().mask_fg),
@@ -813,6 +908,17 @@ fn header_line(board: &Board) -> Line<'static> {
     }
 
     let mut spans = Vec::new();
+    if let Some(status) = board.status_filter() {
+        spans.push(Span::styled(
+            format!("filter: {}", status.label()),
+            Style::default()
+                .fg(theme().focus)
+                .add_modifier(Modifier::BOLD),
+        ));
+        if !parts.is_empty() {
+            spans.push(Span::styled(" · ", Style::default().fg(theme().mask_fg)));
+        }
+    }
     for (i, (n, label, status)) in parts.into_iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" · ", Style::default().fg(theme().mask_fg)));
@@ -834,7 +940,8 @@ fn push_count(
     let n = board
         .agents
         .iter()
-        .filter(|agent| agent.status == status)
+        .enumerate()
+        .filter(|(index, agent)| board.matches_status_filter(*index) && agent.status == status)
         .count();
     if n > 0 {
         parts.push((n, label, status));
@@ -1585,6 +1692,7 @@ mod tests {
         assert!(text.contains(" go "));
         assert!(text.contains(" search "));
         assert!(text.contains(" more "));
+        assert!(text.contains(" Space "));
         assert!(!text.contains("hjkl"));
         assert!(!text.contains("^d"));
         let ansi = paint(

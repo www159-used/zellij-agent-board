@@ -127,7 +127,15 @@ impl Runner {
         // typed input (tip label or query char). Esc always dismisses.
         let typing =
             self.board.is_hinting() || self.board.is_searching() || self.board.is_picking();
-        let key = parse_key(args, line, typing)?;
+        let key = if self.board.leader_menu().is_some()
+            && args.len() == 1
+            && args[0].chars().count() == 1
+            && args[0] != "q"
+        {
+            Key::Input(args[0].chars().next().unwrap())
+        } else {
+            parse_key(args, line, typing)?
+        };
         self.last = self.board.decide(key);
         self.paint();
         Ok(())
@@ -312,6 +320,14 @@ fn apply_place(board: &mut Board, args: &[&str], line: usize) -> Result<(), Scen
 
 fn parse_key(args: &[&str], line: usize, typing: bool) -> Result<Key, SceneError> {
     match args.first().copied() {
+        Some("space") => {
+            exact(args, 1, line, "key space")?;
+            Ok(if typing {
+                Key::Input(' ')
+            } else {
+                Key::StartLeader
+            })
+        }
         Some("enter") | Some("e") => {
             exact(args, 1, line, "key enter")?;
             Ok(Key::Confirm)

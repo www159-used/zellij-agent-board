@@ -49,6 +49,25 @@ impl Status {
         width
     };
 
+    /// Mnemonic key for the `Space f w/W/d/...` state filter. The exhaustive
+    /// match makes a new variant a compile error here, so the filter menu can
+    /// never silently omit a status.
+    pub const fn filter_key(self) -> char {
+        match self {
+            Self::Failed => 'f',
+            Self::Waiting => 'W',
+            Self::IdleWait => 'I',
+            Self::Done => 'd',
+            Self::Compact => 'c',
+            Self::Working => 'w',
+            Self::Interrupted => 's',
+            Self::Idle => 'i',
+            Self::Found => 'o',
+            Self::Unknown => 'u',
+            Self::Ended => 'e',
+        }
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Failed => "failed",

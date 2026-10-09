@@ -50,10 +50,15 @@ WASM 会隐藏自身，通过 `new-pane --floating --close-on-exit` 打开 `boar
 | `/`，随后 `n/N` | 增量搜索、下一个/上一个匹配 |
 | `s` | 在可见列表内使用 Flash 标签跳转 |
 | `p`，随后 `Tab` | 打开全列表选择器，在查询和标签间切换 |
+| `Space f`，随后状态键 | 按状态筛选：`w` working、`W` waiting、`d` done、`a` 全部 |
 | `Enter`、鼠标点击 | 跳转到 Agent |
 | `?` | 查看帮助 |
 | `S` | 打开 Settings 页面（目前仅为后续自定义功能预留） |
 | `Esc`、`q` | 关闭看板；`Esc` 优先取消当前浮层，搜索时 `q` 仍作为输入 |
+
+按 `Space f` 查看各状态的快捷键。当前筛选显示在顶部，并随 Hook 状态更新。
+移动、搜索、Flash 标签和 Picker 都限定在筛选结果中。`Space f a` 恢复全部，
+`Esc` 取消菜单。
 
 Settings 页面目前没有可调整的选项。按 `S`、`Esc` 或 `q` 返回 Agent 列表。
 

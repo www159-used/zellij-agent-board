@@ -1,0 +1,61 @@
+# Space f chooses a live state filter; navigation and picker share its rows.
+size 90 16
+meta hooks=1 epoch=100
+scan alpha 1 /tmp/hidden-one agent
+scan alpha 2 /tmp/active-one agent
+scan alpha 3 /tmp/hidden-two agent
+scan beta 4 /tmp/active-two agent
+hook alpha 2 beforeSubmitPrompt @100
+hook beta 4 beforeSubmitPrompt @100
+
+key space
+expect screen contains filter by state
+key f
+expect screen contains Space f
+expect screen contains waiting
+key w
+expect screen contains filter: working
+expect screen contains active-one
+expect screen contains active-two
+expect screen excludes hidden-one
+expect screen excludes hidden-two
+expect selected alpha 2
+key j
+expect selected beta 4
+
+key p
+expect picking yes
+expect screen excludes hidden-one
+expect screen excludes hidden-two
+key esc
+key space
+key f
+key esc
+expect action none
+expect screen contains filter: working
+
+# Hooks remove finished Agents from the filtered list without dropping scan data.
+hook beta 4 stop @110
+expect selected alpha 2
+expect screen excludes active-two
+hook alpha 2 stop @120
+expect screen contains no agents match this state
+key enter
+expect action none
+
+key space
+key f
+key d
+expect screen contains filter: done
+expect screen contains active-one
+expect screen contains active-two
+expect screen excludes hidden-one
+key space
+key f
+key a
+expect screen excludes filter:
+expect screen contains hidden-one
+expect screen contains hidden-two
+key G
+key enter
+expect action jump beta 4

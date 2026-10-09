@@ -87,7 +87,28 @@ pub enum Key {
     GPrefix,
     StartPicker,
     TogglePickerFocus,
+    StartLeader,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaderMenu {
+    Commands,
+    StateFilter,
+}
+
+/// `Space f` menu rows: the `a`/all reset plus one entry per [`Status`],
+/// derived from [`Status::ALL`] so a new variant joins the menu as soon as it
+/// joins that list.
+pub(crate) const STATE_FILTER_CHOICES: [(char, Option<Status>); Status::ALL.len() + 1] = {
+    let mut choices = [('\0', None); Status::ALL.len() + 1];
+    choices[0] = ('a', None);
+    let mut index = 0;
+    while index < Status::ALL.len() {
+        choices[index + 1] = (Status::ALL[index].filter_key(), Some(Status::ALL[index]));
+        index += 1;
+    }
+    choices
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -202,6 +223,8 @@ pub struct Board {
     hint: Option<HintState>,
     search: Option<SearchState>,
     picker: Option<PickerState>,
+    leader: Option<LeaderMenu>,
+    status_filter: Option<Status>,
     picker_page_len: usize,
     last_search: String,
     motion_count: Option<u32>,
@@ -323,6 +346,7 @@ impl Board {
         at_epoch: Option<u64>,
         _at_stamp: Option<&str>,
     ) {
+        let mut filter_membership_changed = false;
         if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == *id) {
             // Failed ends the turn. A later idle/stop must not become an
             // unread completion (some CLIs emit both).
@@ -330,6 +354,9 @@ impl Board {
                 return;
             }
             let changing = agent.status != status;
+            filter_membership_changed = self
+                .status_filter
+                .is_some_and(|filter| (agent.status == filter) != (status == filter));
             if changing {
                 agent.status_since = self.now;
             }
@@ -393,6 +420,15 @@ impl Board {
                     }
                 }
             }
+        }
+        if filter_membership_changed {
+            self.ensure_filtered_selection();
+            self.hovered = self
+                .hovered
+                .filter(|&index| self.matches_status_filter(index));
+            self.reveal();
+            self.recompute_hint_labels();
+            self.refresh_picker();
         }
     }
 
@@ -487,6 +523,9 @@ impl Board {
             }
             return Action::None;
         }
+        if self.leader.is_some() {
+            return self.decide_leader(key);
+        }
         if self.is_picking() {
             return match key {
                 Key::Dismiss => {
@@ -526,6 +565,7 @@ impl Board {
                 Key::Dismiss => {
                     if let Some(search) = self.search.take() {
                         self.selected = search.origin.min(self.agents.len().saturating_sub(1));
+                        self.ensure_filtered_selection();
                     }
                     Action::None
                 }
@@ -672,6 +712,12 @@ impl Board {
                 self.open_picker();
                 Action::None
             }
+            Key::StartLeader => {
+                self.clear_motion();
+                self.hovered = None;
+                self.leader = Some(LeaderMenu::Commands);
+                Action::None
+            }
             Key::TogglePickerFocus => Action::None,
             Key::NextMatch => {
                 self.goto_match(1);
@@ -683,6 +729,92 @@ impl Board {
             }
             Key::Backspace | Key::Input(_) => Action::None,
         }
+    }
+
+    pub fn leader_menu(&self) -> Option<LeaderMenu> {
+        self.leader
+    }
+
+    pub fn status_filter(&self) -> Option<Status> {
+        self.status_filter
+    }
+
+    pub(crate) fn matches_status_filter(&self, index: usize) -> bool {
+        self.agents.get(index).is_some_and(|agent| {
+            self.status_filter
+                .is_none_or(|status| agent.status == status)
+        })
+    }
+
+    /// `matches_status_filter` plus the row's text matching `query`. The one
+    /// predicate search, flash labels and the picker all share.
+    fn visible_matches(&self, index: usize, query: &str) -> bool {
+        self.matches_status_filter(index) && agent_matches(&self.agents[index], query)
+    }
+
+    fn filtered_indices(&self) -> Vec<usize> {
+        (0..self.agents.len())
+            .filter(|&index| self.matches_status_filter(index))
+            .collect()
+    }
+
+    /// Position of `selected` within a filtered index list; `0` when absent.
+    fn filtered_position(&self, indices: &[usize]) -> usize {
+        indices
+            .iter()
+            .position(|&index| index == self.selected)
+            .unwrap_or(0)
+    }
+
+    /// Any row passes the current filter. Avoids allocating a list just to
+    /// ask whether it is empty.
+    fn has_visible(&self) -> bool {
+        (0..self.agents.len()).any(|index| self.matches_status_filter(index))
+    }
+
+    /// A keypress is typed input — not a command — while a cursor, a flash
+    /// label query, the picker or the leader menu is active.
+    pub fn text_input_active(&self) -> bool {
+        self.is_searching() || self.is_hinting() || self.is_picking() || self.leader.is_some()
+    }
+
+    fn ensure_filtered_selection(&mut self) {
+        if !self.matches_status_filter(self.selected) {
+            let indices = self.filtered_indices();
+            self.selected = indices
+                .iter()
+                .copied()
+                .find(|&index| index >= self.selected)
+                .or_else(|| indices.last().copied())
+                .unwrap_or(0);
+        }
+    }
+
+    fn decide_leader(&mut self, key: Key) -> Action {
+        match key {
+            Key::Dismiss => self.leader = None,
+            Key::StartLeader | Key::Input(' ') => self.leader = Some(LeaderMenu::Commands),
+            Key::Backspace => {
+                self.leader = match self.leader {
+                    Some(LeaderMenu::StateFilter) => Some(LeaderMenu::Commands),
+                    _ => None,
+                };
+            }
+            Key::Input('f') if self.leader == Some(LeaderMenu::Commands) => {
+                self.leader = Some(LeaderMenu::StateFilter);
+            }
+            Key::Input(ch) if self.leader == Some(LeaderMenu::StateFilter) => {
+                if let Some((_, status)) = STATE_FILTER_CHOICES.iter().find(|(key, _)| *key == ch) {
+                    self.status_filter = *status;
+                    self.leader = None;
+                    self.topline = 0;
+                    self.ensure_filtered_selection();
+                    self.reveal();
+                }
+            }
+            _ => {}
+        }
+        Action::None
     }
 
     pub fn set_list_geometry(&mut self, width: u16, height: u16) {
@@ -716,7 +848,7 @@ impl Board {
     /// scope and paging; the painter slices [`Board::all_lines`] instead.
     pub fn visible_range(&self) -> (usize, usize) {
         let len = self.agents.len();
-        if len == 0 {
+        if !self.has_visible() {
             return (0, 0);
         }
         if self.list_height == 0 {
@@ -740,7 +872,7 @@ impl Board {
     /// Returns whether the frame changed.
     pub fn scroll_view(&mut self, delta: i32) -> bool {
         let len = self.agents.len();
-        if len == 0 || self.list_height == 0 || delta == 0 {
+        if len == 0 || !self.has_visible() || self.list_height == 0 || delta == 0 {
             return false;
         }
         let wide = self.wide_list;
@@ -806,6 +938,11 @@ impl Board {
     /// the agent's title row. Pinning the whole Gap/◆/activity block used to
     /// freeze the wheel on the first multi-session row (`upper == 0`).
     fn clamp_view(&mut self) {
+        if !self.has_visible() {
+            self.topline = 0;
+            self.scroll_anchor = 0;
+            return;
+        }
         if self.list_height == 0 || self.agents.is_empty() {
             return;
         }
@@ -829,26 +966,25 @@ impl Board {
 
     /// Document line of the agent's title row (after any Gap / session head).
     fn agent_title_line(&self, index: usize, wide: bool) -> u32 {
-        let index = index.min(self.agents.len().saturating_sub(1));
-        let mut line = self.lines_before(index, wide);
-        if self.has_multiple_sessions() {
-            let new_session =
-                index == 0 || self.agents[index].id.session != self.agents[index - 1].id.session;
-            if new_session {
-                if index > 0 {
-                    line = line.saturating_add(1); // Gap
-                }
-                line = line.saturating_add(1); // Session
-            }
-        }
-        let _ = wide;
-        line
+        self.all_lines(wide)
+            .iter()
+            .position(|line| *line == BodyLine::Agent(index))
+            .unwrap_or(0) as u32
     }
 
     pub(crate) fn has_multiple_sessions(&self) -> bool {
-        self.agents
-            .windows(2)
-            .any(|pair| pair[0].id.session != pair[1].id.session)
+        let mut last_session: Option<&str> = None;
+        for index in 0..self.agents.len() {
+            if !self.matches_status_filter(index) {
+                continue;
+            }
+            let session = self.agents[index].id.session.as_str();
+            if last_session.is_some_and(|previous| previous != session) {
+                return true;
+            }
+            last_session = Some(session);
+        }
+        false
     }
 
     fn row_has_activity(&self, index: usize) -> bool {
@@ -864,7 +1000,7 @@ impl Board {
         let multi = self.has_multiple_sessions();
         let mut lines = Vec::new();
         let mut last_session = None;
-        for index in 0..self.agents.len() {
+        for index in self.filtered_indices() {
             let session = self.agents[index].id.session.as_str();
             if multi && last_session != Some(session) {
                 if last_session.is_some() {
@@ -893,6 +1029,9 @@ impl Board {
         let mut count = 0u32;
         let mut last_session = None;
         for index in 0..until {
+            if !self.matches_status_filter(index) {
+                continue;
+            }
             let session = self.agents[index].id.session.as_str();
             if multi && last_session != Some(session) {
                 if last_session.is_some() {
@@ -920,6 +1059,9 @@ impl Board {
         let mut count = 0u32;
         let mut last_session = None;
         for index in 0..len {
+            if !self.matches_status_filter(index) {
+                continue;
+            }
             let session = self.agents[index].id.session.as_str();
             if multi && last_session != Some(session) {
                 if last_session.is_some() {
@@ -936,7 +1078,7 @@ impl Board {
                 return index;
             }
         }
-        len - 1
+        self.filtered_indices().last().copied().unwrap_or(0)
     }
 
     /// Agent under a click at zero-based `column`,`row` in the list pane.
@@ -1064,7 +1206,7 @@ impl Board {
 
     fn push_count_digit(&mut self, digit: u8) {
         if digit == 0 && self.motion_count.is_none() {
-            self.selected = 0;
+            self.selected = self.filtered_indices().first().copied().unwrap_or(0);
             return;
         }
         let next = self
@@ -1088,7 +1230,10 @@ impl Board {
             return 10;
         }
         let (start, end) = self.visible_range();
-        (end.saturating_sub(start)).max(1)
+        (start..end)
+            .filter(|&index| self.matches_status_filter(index))
+            .count()
+            .max(1)
     }
 
     fn half_page(&self) -> usize {
@@ -1103,35 +1248,38 @@ impl Board {
     }
 
     fn move_by(&mut self, delta: isize) {
-        if self.agents.is_empty() {
+        let indices = self.filtered_indices();
+        if indices.is_empty() {
             return;
         }
-        let last = self.agents.len() as isize - 1;
-        self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
+        let position = self.filtered_position(&indices);
+        let next = (position as isize + delta).clamp(0, indices.len() as isize - 1);
+        self.selected = indices[next as usize];
     }
 
     fn goto_counted_or_first(&mut self) {
         if let Some(count) = self.motion_count.take() {
             self.goto_line(count);
-        } else if !self.agents.is_empty() {
-            self.selected = 0;
+        } else {
+            self.selected = self.filtered_indices().first().copied().unwrap_or(0);
         }
     }
 
     fn goto_counted_or_last(&mut self) {
         if let Some(count) = self.motion_count.take() {
             self.goto_line(count);
-        } else if !self.agents.is_empty() {
-            self.selected = self.agents.len() - 1;
+        } else {
+            self.selected = self.filtered_indices().last().copied().unwrap_or(0);
         }
     }
 
     fn goto_line(&mut self, line: u32) {
-        if self.agents.is_empty() {
+        let indices = self.filtered_indices();
+        if indices.is_empty() {
             return;
         }
         let index = (line.max(1) as usize).saturating_sub(1);
-        self.selected = index.min(self.agents.len() - 1);
+        self.selected = indices[index.min(indices.len() - 1)];
     }
 
     pub fn is_hinting(&self) -> bool {
@@ -1156,7 +1304,7 @@ impl Board {
     /// A full-page overlay owns the frame: rows behind it take no pointer and
     /// no click.
     pub fn overlay_visible(&self) -> bool {
-        self.overlay != Overlay::None
+        self.overlay != Overlay::None || self.leader.is_some()
     }
 
     pub fn picker_focus(&self) -> PickerFocus {
@@ -1204,8 +1352,8 @@ impl Board {
 
     fn open_picker(&mut self) {
         self.hovered = None;
-        let matches: Vec<usize> = (0..self.agents.len()).collect();
-        let selected = self.selected.min(matches.len().saturating_sub(1));
+        let matches = self.filtered_indices();
+        let selected = self.filtered_position(&matches);
         let cursor = matches
             .get(selected)
             .and_then(|&index| self.agents.get(index))
@@ -1349,7 +1497,7 @@ impl Board {
                 query.push(ch);
                 query
             })
-            .filter(|query| self.agents.iter().any(|agent| agent_matches(agent, query)))
+            .filter(|query| !self.match_indices(query).is_empty())
         else {
             return;
         };
@@ -1371,7 +1519,10 @@ impl Board {
             .iter()
             .enumerate()
             // Empty query matches everything, like open_picker.
-            .filter(|(_, agent)| query.is_empty() || agent_matches(agent, &query))
+            .filter(|(index, agent)| {
+                self.matches_status_filter(*index)
+                    && (query.is_empty() || agent_matches(agent, &query))
+            })
             .map(|(index, _)| index)
             .collect();
         let selected = cursor
@@ -1562,9 +1713,7 @@ impl Board {
         let mut query = hint.query.clone();
         query.push(ch);
         let (start, end) = self.hint_scope();
-        let has_matches = self.agents[start..end]
-            .iter()
-            .any(|agent| agent_matches(agent, &query));
+        let has_matches = (start..end).any(|index| self.visible_matches(index, &query));
         if !has_matches {
             return Action::None;
         }
@@ -1596,7 +1745,7 @@ impl Board {
         };
         let mut query = search.query.clone();
         query.push(ch);
-        if !self.agents.iter().any(|agent| agent_matches(agent, &query)) {
+        if self.match_indices(&query).is_empty() {
             return Action::None;
         }
         if let Some(search) = self.search.as_mut() {
@@ -1613,14 +1762,8 @@ impl Board {
         let query = hint.query.clone();
         let (start, end) = hint.scope;
         let (start, end) = (start.min(self.agents.len()), end.min(self.agents.len()));
-        let matches: Vec<usize> = self
-            .agents
-            .iter()
-            .enumerate()
-            .filter_map(|(index, agent)| {
-                (index >= start && index < end && !query.is_empty() && agent_matches(agent, &query))
-                    .then_some(index)
-            })
+        let matches: Vec<usize> = (start..end)
+            .filter(|&index| !query.is_empty() && self.visible_matches(index, &query))
             .collect();
         let mut available: Vec<u8> = HINT_ALPHABET
             .iter()
@@ -1628,9 +1771,7 @@ impl Board {
             .filter(|candidate| {
                 let mut extended = query.clone();
                 extended.push(char::from(*candidate));
-                !self.agents[start..end]
-                    .iter()
-                    .any(|agent| agent_matches(agent, &extended))
+                !(start..end).any(|index| self.visible_matches(index, &extended))
             })
             .collect();
         if available.is_empty() {
@@ -1681,10 +1822,8 @@ impl Board {
         if query.is_empty() {
             return Vec::new();
         }
-        self.agents
-            .iter()
-            .enumerate()
-            .filter_map(|(index, agent)| agent_matches(agent, query).then_some(index))
+        (0..self.agents.len())
+            .filter(|&index| self.visible_matches(index, query))
             .collect()
     }
 
@@ -1707,6 +1846,7 @@ impl Board {
         if hits.is_empty() {
             if let Some(search) = &self.search {
                 self.selected = search.origin.min(self.agents.len().saturating_sub(1));
+                self.ensure_filtered_selection();
             }
             return;
         }
@@ -1772,6 +1912,9 @@ impl Board {
         let Some(index) = self.index_of(id) else {
             return false;
         };
+        if !self.matches_status_filter(index) {
+            return false;
+        }
         self.selected = index;
         if self.list_height == 0 {
             self.center_pending = true;
@@ -1822,6 +1965,9 @@ impl Board {
     }
 
     fn jump_at(&mut self, index: usize) -> Action {
+        if !self.matches_status_filter(index) {
+            return Action::None;
+        }
         if self.is_hinting() {
             self.hint = None;
         }
@@ -1910,6 +2056,7 @@ impl Board {
     fn restore_selection(&mut self, selected_id: Option<AgentId>) {
         let index = selected_id.and_then(|id| self.index_of(&id));
         self.selected = index.unwrap_or(0).min(self.agents.len().saturating_sub(1));
+        self.ensure_filtered_selection();
         self.clamp_view();
         if self.is_hinting() {
             self.recompute_hint_labels();
@@ -1917,7 +2064,9 @@ impl Board {
     }
 
     fn restore_hover(&mut self, hovered_id: Option<AgentId>) {
-        self.hovered = hovered_id.and_then(|id| self.index_of(&id));
+        self.hovered = hovered_id
+            .and_then(|id| self.index_of(&id))
+            .filter(|&index| self.matches_status_filter(index));
     }
 }
 
@@ -2033,6 +2182,179 @@ SCAN ww 3 agent /Users/ww/.local/bin/agent --workspace /tmp/ww
 SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
 ",
         );
+    }
+
+    fn filter_state(board: &mut Board, key: char) {
+        board.decide(Key::StartLeader);
+        board.decide(Key::Input('f'));
+        board.decide(Key::Input(key));
+    }
+
+    #[test]
+    fn state_filter_moves_and_jumps_only_among_matching_agents() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 6);
+        for index in [1, 3, 5] {
+            board.agents[index].status = Status::Working;
+        }
+        board.set_list_geometry(80, 10);
+        filter_state(&mut board, 'w');
+        assert_eq!(board.agents.len(), 6, "filtering preserves the scan");
+        assert_eq!(board.selected, 1);
+        board.decide(Key::Down);
+        assert_eq!(board.selected, 3);
+        board.decide(Key::Digit(2));
+        board.decide(Key::Down);
+        assert_eq!(board.selected, 5);
+        board.decide(Key::Digit(0));
+        assert_eq!(board.selected, 1);
+        board.decide(Key::Last);
+        assert_eq!(board.selected, 5);
+        board.decide(Key::Digit(2));
+        board.decide(Key::GPrefix);
+        board.decide(Key::GPrefix);
+        assert_eq!(board.selected, 3);
+        let target = board.agents[3].id.clone();
+        assert_eq!(
+            board.decide(Key::Confirm),
+            Action::Jump {
+                session: target.session,
+                pane_id: target.pane_id,
+            }
+        );
+        filter_state(&mut board, 'a');
+        assert_eq!(
+            board.selected, 3,
+            "clearing keeps the current agent selected"
+        );
+        board.decide(Key::Up);
+        assert_eq!(board.selected, 2);
+    }
+
+    #[test]
+    fn state_filter_limits_search_flash_and_picker() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 5);
+        for index in [1, 3] {
+            board.agents[index].status = Status::Working;
+            board.agents[index].tab_name = "visible".into();
+        }
+        board.agents[2].tab_name = "hidden".into();
+        board.set_list_geometry(80, 16);
+        filter_state(&mut board, 'w');
+
+        board.decide(Key::StartSearch);
+        board.decide(Key::Input('h'));
+        assert_eq!(
+            board.search_query(),
+            "",
+            "hidden rows cannot accept a query"
+        );
+        board.decide(Key::Input('v'));
+        board.decide(Key::Confirm);
+        board.decide(Key::NextMatch);
+        assert_eq!(board.selected, 3);
+        board.decide(Key::NextMatch);
+        assert_eq!(board.selected, 1);
+
+        board.decide(Key::StartHint);
+        assert_eq!(board.decide(Key::Input('v')), Action::None);
+        assert!(board.hint_label(1).is_some());
+        assert!(board.hint_label(3).is_some());
+        assert!(board.hint_label(2).is_none());
+        board.decide(Key::Dismiss);
+
+        board.selected = 3;
+        board.decide(Key::StartPicker);
+        assert_eq!(board.picker_matches(), [1, 3]);
+        assert_eq!(board.picker_position(), 1);
+        board.decide(Key::Input('h'));
+        assert_eq!(board.picker_query(), "");
+        board.decide(Key::Input('v'));
+        assert_eq!(board.picker_matches(), [1, 3]);
+    }
+
+    #[test]
+    fn state_filter_tracks_live_hooks_and_scans_and_handles_no_matches() {
+        let mut board = Board::default();
+        ingest_panes(&mut board, 4);
+        board.agents[1].status = Status::Working;
+        board.agents[3].status = Status::Working;
+        board.set_list_geometry(80, 8);
+        filter_state(&mut board, 'w');
+        board.hovered = Some(1);
+        board.decide(Key::StartPicker);
+        board.hovered = Some(1);
+        let first = board.agents[1].id.clone();
+        let second = board.agents[3].id.clone();
+        board.apply_hook(&first, Status::Waiting, "", None, None);
+        assert_eq!(board.selected, 3);
+        assert_eq!(board.hovered, None);
+        assert_eq!(board.picker_matches(), [3]);
+        board.apply_hook(&second, Status::Waiting, "", None, None);
+        assert!(board.picker_matches().is_empty());
+        assert_eq!(board.decide(Key::Confirm), Action::None);
+        board.decide(Key::Dismiss);
+        assert_eq!(board.decide(Key::Confirm), Action::None);
+        assert_eq!(board.visible_range(), (0, 0));
+        assert!(!board.scroll_view(1));
+        let text = board.lines().join("\n");
+        assert!(text.contains("filter: working"), "{text}");
+        assert!(text.contains("no agents match this state"), "{text}");
+
+        board.apply_hook(&first, Status::Working, "", None, None);
+        assert_eq!(board.selected, 1);
+        let remaining = format!(
+            "META hooks=1\nSCAN {} {} agent /tmp/a --workspace /tmp/a2\n",
+            first.session, first.pane_id
+        );
+        board.ingest(&remaining);
+        assert_eq!(board.status_filter(), Some(Status::Working));
+        assert_eq!(board.agents[board.selected].id, first);
+        assert_eq!(board.filtered_indices(), [0]);
+    }
+
+    #[test]
+    fn state_filter_scroll_and_click_use_the_painted_rows() {
+        let mut board = Board::default();
+        let mut scan = String::from("META hooks=1\n");
+        for session in ["a", "b", "c"] {
+            for pane in 1..=10 {
+                scan.push_str(&format!(
+                    "SCAN {session} {pane} agent /tmp/a --workspace /tmp/a{pane}\n"
+                ));
+            }
+        }
+        board.ingest(&scan);
+        for agent in &mut board.agents {
+            if agent.id.session != "b" && agent.id.pane_id % 2 == 0 {
+                agent.status = Status::Working;
+                agent.detail = "activity".into();
+            }
+        }
+        board.set_list_geometry(80, 8);
+        filter_state(&mut board, 'w');
+        let lines = board.all_lines(true);
+        assert_eq!(lines.len() as u32, board.list_lines_total(true));
+        let max_top = board.list_lines_total(true) - u32::from(board.list_height);
+        assert!(board.scroll_view(100));
+        assert_eq!(board.topline(), max_top);
+        assert!(board.matches_status_filter(board.selected));
+        for row in 0..8 {
+            if let Some(index) = board.agent_at(8, 80, 10, row) {
+                let id = board.agents[index].id.clone();
+                assert_eq!(
+                    board.click(8, 80, 10, row),
+                    Action::Jump {
+                        session: id.session,
+                        pane_id: id.pane_id,
+                    }
+                );
+            }
+        }
+        assert!(board.scroll_view(-100));
+        assert_eq!(board.topline(), 0);
+        assert!(board.matches_status_filter(board.selected));
     }
 
     #[test]

@@ -510,7 +510,7 @@ impl App {
         }
         let entering_text = self.page == Page::Home
             && self.board.overlay != Overlay::Settings
-            && (self.board.is_searching() || self.board.is_hinting() || self.board.is_picking());
+            && self.board.text_input_active();
         if event.modifiers == KeyModifiers::NONE && !entering_text {
             match event.code {
                 KeyCode::Char('t') => return self.switch_page(Page::Monitor),
@@ -542,7 +542,7 @@ impl App {
         let mapped = if self.board.is_picking() {
             map_picker_key(event)
         } else {
-            map_key(event, self.board.is_hinting(), self.board.is_searching())
+            map_key(event, self.board.text_input_active())
         };
         let Some(key) = mapped else {
             return Loop::Ignored;
@@ -1292,6 +1292,59 @@ mod process_tests {
     }
 
     #[test]
+    fn host_space_filter_handles_shortcuts_cancellation_and_waiting() {
+        use super::*;
+        use zellij_agent_board::{LeaderMenu, Status};
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(&dir.path().join("usage.jsonl"));
+        app.board.ingest(
+            "META hooks=1\n\
+            SCAN private 3 agent /bin/agent --workspace /tmp/working\n\
+            SCAN private 4 agent /bin/agent --workspace /tmp/waiting\n",
+        );
+        app.board.agents[0].status = Status::Working;
+        app.board.agents[1].status = Status::Waiting;
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        for ch in [' ', 'f', 'w'] {
+            assert!(matches!(
+                app.handle_key(key(KeyCode::Char(ch))),
+                Loop::Changed
+            ));
+        }
+        assert_eq!(app.board.status_filter(), Some(Status::Working));
+        assert_eq!(app.board.selected, 0);
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(app.page, Page::Home, "leader input cannot switch pages");
+        app.handle_key(key(KeyCode::Char('f')));
+        app.handle_key(key(KeyCode::Char('S')));
+        assert_eq!(
+            app.board.overlay,
+            Overlay::None,
+            "leader input cannot open settings"
+        );
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.board.leader_menu(), Some(LeaderMenu::Commands));
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.board.leader_menu(), None);
+        assert_eq!(app.board.status_filter(), Some(Status::Working));
+
+        for ch in [' ', 'f'] {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT));
+        assert_eq!(app.board.status_filter(), Some(Status::Waiting));
+        assert_eq!(app.board.selected, 1);
+        for ch in [' ', 'f', 'a'] {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        assert_eq!(app.board.status_filter(), None);
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.board.selected, 0);
+    }
+
+    #[test]
     fn host_keyboard_search_jump_and_exit_record_linked_facts() {
         use super::*;
         let dir = tempfile::tempdir().unwrap();
@@ -1407,8 +1460,7 @@ fn view_scroll_delta(event: KeyEvent) -> Option<i32> {
     }
 }
 
-fn map_key(event: KeyEvent, hinting: bool, searching: bool) -> Option<Key> {
-    let typing = hinting || searching;
+fn map_key(event: KeyEvent, typing: bool) -> Option<Key> {
     if event.modifiers.contains(KeyModifiers::CONTROL) && !typing {
         return match event.code {
             KeyCode::Char('d') => Some(Key::HalfPageDown),
@@ -1432,6 +1484,7 @@ fn map_key(event: KeyEvent, hinting: bool, searching: bool) -> Option<Key> {
         KeyCode::Char('s') if !typing => Some(Key::StartHint),
         KeyCode::Char('/') if !typing => Some(Key::StartSearch),
         KeyCode::Char('p') if !typing => Some(Key::StartPicker),
+        KeyCode::Char(' ') if !typing => Some(Key::StartLeader),
         KeyCode::Char('n') if !typing => Some(Key::NextMatch),
         KeyCode::Char('N') if !typing => Some(Key::PrevMatch),
         KeyCode::Char(ch) if typing => Some(Key::Input(ch)),
