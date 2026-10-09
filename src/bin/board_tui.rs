@@ -25,9 +25,9 @@ use crossterm::terminal::{
 };
 use ratatui::backend::{Backend, ClearType as Region, WindowSize};
 use ratatui::buffer::Cell;
-use ratatui::layout::{Position, Size};
+use ratatui::layout::{Position, Rect, Size};
 use ratatui::style::{Color, Modifier};
-use ratatui::widgets::{Clear, Widget};
+use ratatui::widgets::{Clear, Paragraph, Widget};
 use ratatui::Terminal;
 use serde_json::json;
 use zellij_agent_board::{
@@ -35,6 +35,12 @@ use zellij_agent_board::{
     places_path, reconcile_once, render_board, run_reconcile, runtime_dir, scan_path,
     scan_places_for, spool_dir, stats, zellij_bin, Action, AgentId, Board, Key, Overlay, PIPE_NAME,
 };
+
+#[path = "board_tui/monitor.rs"]
+mod monitor;
+#[path = "board_tui/navigation.rs"]
+mod navigation;
+use navigation::{Navigation, Page, Target};
 
 type HostTerminal = Terminal<PtyBackend>;
 
@@ -60,6 +66,10 @@ struct App {
     places_mtime: Option<SystemTime>,
     spool_mtime: Option<SystemTime>,
     usage: stats::Visit,
+    page: Page,
+    nav_hover: Option<Target>,
+    monitor: Option<monitor::Monitor>,
+    monitor_error: Option<String>,
     jump_sender: fn(&str, u32, &str) -> &'static str,
 }
 
@@ -188,6 +198,9 @@ fn prune_board_log_gz(dir: &Path, keep: usize) {
 }
 
 fn main() -> io::Result<()> {
+    if monitor::is_child() {
+        return monitor::run_child();
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let launch_focus = match args.first().map(String::as_str) {
         Some("--stats") => {
@@ -252,6 +265,7 @@ Log: {}
         .record("open", &[("os", json!(std::env::consts::OS))]);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run(&mut terminal)));
     app.finish_usage(&result);
+    app.monitor.take();
     restore(&mut terminal)?;
     log::info!("close session={}", app.home);
     match result {
@@ -309,6 +323,10 @@ impl App {
             places_mtime: None,
             spool_mtime: None,
             usage: stats::Visit::default(),
+            page: Page::Home,
+            nav_hover: None,
+            monitor: None,
+            monitor_error: None,
             jump_sender: send_jump,
         }
     }
@@ -364,11 +382,18 @@ impl App {
                 dirty |= size != self.view;
                 self.view = size;
             }
+            let content = self.navigation().content;
+            if let Some(monitor) = &mut self.monitor {
+                if let Err(err) = monitor.resize(content) {
+                    monitor.error = Some(err.to_string());
+                }
+                let updated = monitor.poll();
+                dirty |= self.page == Page::Monitor && updated;
+            }
             if dirty {
-                self.board
-                    .set_list_geometry(self.view.width, self.view.height);
+                self.board.set_list_geometry(content.width, content.height);
                 self.refresh_hover();
-                draw(terminal, &self.board, &self.home)?;
+                self.draw(terminal)?;
                 self.usage
                     .snapshot(&self.board, self.view.width, self.view.height);
                 dirty = false;
@@ -418,6 +443,11 @@ impl App {
                     Loop::Ignored => {}
                 },
                 Event::Resize(_, _) => dirty = true,
+                Event::Paste(text) if self.page == Page::Monitor => {
+                    if let Some(monitor) = &mut self.monitor {
+                        monitor.paste(&text);
+                    }
+                }
                 _ => {}
             }
             if !event::poll(Duration::ZERO)? {
@@ -433,6 +463,24 @@ impl App {
 
     fn handle_key(&mut self, event: KeyEvent) -> Loop {
         self.launch_focus = None;
+        if event.code == KeyCode::Char('q') && event.modifiers == KeyModifiers::NONE {
+            return Loop::Quit;
+        }
+        let entering_text = self.page == Page::Home
+            && (self.board.is_searching() || self.board.is_hinting() || self.board.is_picking());
+        if event.modifiers == KeyModifiers::NONE && !entering_text {
+            match event.code {
+                KeyCode::Char('t') => return self.switch_page(Page::Monitor),
+                KeyCode::Char('h') => return self.switch_page(Page::Home),
+                _ => {}
+            }
+        }
+        if self.page == Page::Monitor {
+            if let Some(monitor) = &mut self.monitor {
+                monitor.key(event);
+            }
+            return Loop::Changed;
+        }
         // C-e / C-y: same move-together scroll as the wheel (spotlight holds
         // its screen line; the list flows under it).
         if !self.board.overlay_visible() {
@@ -508,7 +556,45 @@ impl App {
     /// Pointer input: a click jumps to the row under it, motion previews
     /// that row, the wheel scrolls the view. Hover never steals `selected`.
     /// Right button is ignored.
-    fn handle_mouse(&mut self, mouse: MouseEvent) -> Loop {
+    fn handle_mouse(&mut self, mut mouse: MouseEvent) -> Loop {
+        let nav = self.navigation();
+        let hovered = nav.hit(mouse.column, mouse.row);
+        let changed = self.nav_hover != hovered;
+        self.nav_hover = hovered;
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            match hovered {
+                Some(Target::Quit) => return Loop::Quit,
+                Some(Target::Page(page)) => return self.switch_page(page),
+                None => {}
+            }
+        }
+        if !nav.content.contains(Position::new(mouse.column, mouse.row)) {
+            self.pointer = None;
+            let was_hovered = self.board.hovered.take().is_some();
+            return if changed || was_hovered {
+                Loop::Changed
+            } else {
+                Loop::Ignored
+            };
+        }
+        mouse.row -= nav.content.y;
+        if self.page == Page::Monitor {
+            if let Some(monitor) = &mut self.monitor {
+                monitor.mouse(mouse);
+            }
+            return Loop::Changed;
+        }
+        let result = self.handle_home_mouse(mouse);
+        if changed && matches!(result, Loop::Ignored) {
+            Loop::Changed
+        } else {
+            result
+        }
+    }
+
+    /// Home input coordinates are relative to its content area.
+    fn handle_home_mouse(&mut self, mouse: MouseEvent) -> Loop {
+        let content = self.navigation().content;
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // A press commits to a row, so the launch hint is spent.
@@ -527,7 +613,7 @@ impl App {
                 let before = ModeSnap::capture(&self.board);
                 let action =
                     self.board
-                        .click(self.view.height, self.view.width, mouse.column, mouse.row);
+                        .click(content.height, content.width, mouse.column, mouse.row);
                 self.usage
                     .snapshot(&self.board, self.view.width, self.view.height);
                 match action {
@@ -543,8 +629,8 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) if self.board.is_picking() => {
                 if self.board.drag_picker_scrollbar(
-                    self.view.height,
-                    self.view.width,
+                    content.height,
+                    content.width,
                     mouse.column,
                     mouse.row,
                 ) {
@@ -557,7 +643,7 @@ impl App {
                 self.pointer = Some((mouse.column, mouse.row));
                 if self
                     .board
-                    .hover(self.view.height, self.view.width, mouse.column, mouse.row)
+                    .hover(content.height, content.width, mouse.column, mouse.row)
                 {
                     Loop::Changed
                 } else {
@@ -584,11 +670,14 @@ impl App {
     /// Rows slid under a still pointer: re-resolve the hover so the preview
     /// keeps sitting under the cursor instead of riding the old row away.
     fn refresh_hover(&mut self) -> bool {
+        if self.page != Page::Home {
+            return false;
+        }
+        let content = self.navigation().content;
         let Some((column, row)) = self.pointer else {
             return false;
         };
-        self.board
-            .hover(self.view.height, self.view.width, column, row)
+        self.board.hover(content.height, content.width, column, row)
     }
 
     /// C-e/C-y and the wheel share one path: record the input, slide the
@@ -760,6 +849,46 @@ mod process_tests {
     use super::spawn_if_idle;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn home_defaults_and_q_exits_every_input_mode() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        for mode in ["list", "search", "hint", "picker", "help", "settings"] {
+            let mut app = test_app(&dir.path().join("usage.jsonl"));
+            assert_eq!(app.page, Page::Home);
+            match mode {
+                "search" => {
+                    app.board.decide(Key::StartSearch);
+                }
+                "hint" => {
+                    app.board.decide(Key::StartHint);
+                }
+                "picker" => {
+                    app.board.decide(Key::StartPicker);
+                }
+                "help" => app.board.overlay = Overlay::Help,
+                "settings" => app.board.overlay = Overlay::Settings,
+                _ => {}
+            }
+            assert!(
+                matches!(
+                    app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+                    Loop::Quit
+                ),
+                "{mode}"
+            );
+        }
+        let mut app = test_app(&dir.path().join("usage.jsonl"));
+        app.board
+            .ingest("SCAN private 3 agent agent --workspace /tmp/th\n");
+        app.board.decide(Key::StartPicker);
+        for c in ['t', 'h'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(app.board.picker_query(), "th");
+        assert_eq!(app.page, Page::Home);
+    }
 
     #[test]
     fn picker_wheel_scrolls_but_navigation_keys_keep_the_old_mapping() {
@@ -943,7 +1072,7 @@ mod process_tests {
             app.handle_mouse(MouseEvent {
                 kind: MouseEventKind::Moved,
                 column: 0,
-                row: 0,
+                row: 3,
                 modifiers: KeyModifiers::NONE,
             });
             assert!(app.launch_focus.is_some());
@@ -951,7 +1080,7 @@ mod process_tests {
                 app.handle_mouse(MouseEvent {
                     kind,
                     column: 0,
-                    row: 0,
+                    row: 3,
                     modifiers: KeyModifiers::NONE,
                 });
             } else {
@@ -1308,16 +1437,53 @@ fn trace_jump(message: &str) {
     }
 }
 
-/// Draw through ratatui's cell diff. The PTY is still the only pipe out of
-/// a Zellij pane — there is no direct Metal/iTerm2 handle — but we no longer
-/// stitch ANSI lines ourselves.
-fn draw(terminal: &mut HostTerminal, board: &Board, home: &str) -> io::Result<()> {
-    terminal.draw(|frame| {
-        let area = frame.area();
-        Clear.render(area, frame.buffer_mut());
-        render_board(board, home, area, frame.buffer_mut());
-    })?;
-    Ok(())
+impl App {
+    fn navigation(&self) -> Navigation {
+        Navigation::new(Rect::new(0, 0, self.view.width, self.view.height))
+    }
+
+    fn switch_page(&mut self, page: Page) -> Loop {
+        self.launch_focus = None;
+        self.pointer = None;
+        self.board.hovered = None;
+        self.page = page;
+        if page == Page::Monitor
+            && (self.monitor.is_none() || self.monitor.as_ref().is_some_and(|m| m.error.is_some()))
+        {
+            self.monitor.take();
+            self.monitor_error = None;
+            match monitor::Monitor::spawn(self.navigation().content) {
+                Ok(monitor) => self.monitor = Some(monitor),
+                Err(err) => {
+                    self.monitor_error =
+                        Some(format!("Could not start bottom: {err}. Press t to retry."))
+                }
+            }
+        }
+        Loop::Changed
+    }
+
+    fn draw(&self, terminal: &mut HostTerminal) -> io::Result<()> {
+        terminal.draw(|frame| {
+            let area = frame.area();
+            let nav = Navigation::new(area);
+            Clear.render(area, frame.buffer_mut());
+            match self.page {
+                Page::Home => {
+                    render_board(&self.board, &self.home, nav.content, frame.buffer_mut())
+                }
+                Page::Monitor => {
+                    if let Some(monitor) = &self.monitor {
+                        monitor.render(nav.content, frame.buffer_mut());
+                    } else if let Some(error) = &self.monitor_error {
+                        Paragraph::new(error.as_str()).render(nav.content, frame.buffer_mut());
+                    }
+                }
+            }
+            nav.render(self.page, self.nav_hover, frame.buffer_mut());
+        })?;
+        Ok(())
+    }
 }
 
 fn file_changed(path: &Path, seen: &mut Option<SystemTime>) -> bool {
@@ -1348,24 +1514,48 @@ fn dir_changed(path: &Path, seen: &mut Option<SystemTime>) -> bool {
 }
 
 fn setup() -> io::Result<HostTerminal> {
-    enable_raw_mode()?;
     let mut out = stdout();
-    // Mouse mode is what lets a click jump; 1003 adds motion so hover
-    // can paint without a button down. Restore must undo both or the
-    // shell keeps eating clicks after the board closes.
-    execute!(out, EnterAlternateScreen, cursor::Hide, EnableMouseCapture)?;
-    write!(out, "\x1b[?1003h")?;
+    enter_screen(&mut out)?;
     Terminal::new(PtyBackend { out })
 }
 
-fn restore(terminal: &mut HostTerminal) -> io::Result<()> {
+fn enter_screen(out: &mut impl Write) -> io::Result<()> {
+    enable_raw_mode()?;
+    // Mouse mode is what lets a click jump; 1003 adds motion so hover
+    // can paint without a button down. Restore must undo both or the
+    // shell keeps eating clicks after the board closes.
+    execute!(
+        out,
+        EnterAlternateScreen,
+        SetAttribute(Attribute::Reset),
+        SetColors(Colors::new(
+            crossterm::style::Color::Reset,
+            crossterm::style::Color::Reset
+        )),
+        cursor::Hide,
+        EnableMouseCapture
+    )?;
+    write!(out, "\x1b[?1003h")?;
+    out.flush()
+}
+
+fn leave_screen(terminal: &mut HostTerminal) -> io::Result<()> {
     write!(terminal.backend_mut().out, "\x1b[?1003l")?;
     execute!(
         terminal.backend_mut(),
         cursor::Show,
+        SetAttribute(Attribute::Reset),
+        SetColors(Colors::new(
+            crossterm::style::Color::Reset,
+            crossterm::style::Color::Reset
+        )),
         DisableMouseCapture,
         LeaveAlternateScreen
-    )?;
+    )
+}
+
+fn restore(terminal: &mut HostTerminal) -> io::Result<()> {
+    leave_screen(terminal)?;
     disable_raw_mode()
 }
 

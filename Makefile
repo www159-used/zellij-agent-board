@@ -22,9 +22,9 @@ EVENT ?=
 # Pass values through the environment so paths and arguments stay quoted.
 export TARGET VERSION WASM TUI OUT_DIR ASSET_DIR ARCHIVE ADAPTER SCENE SCENARIO REPEAT EVENT
 
-.PHONY: help fmt fmt-check lint check test test-rust test-hooks test-harness \
+.PHONY: help fmt fmt-check lint check test test-rust test-hooks test-harness test-monitor \
 	build wasm tui install install-hooks run stats scan reconcile catalog hook \
-	e2e replay e2e-zellij fault package package-wasm test-package clean
+	e2e replay e2e-zellij test-deleted-cwd fault package package-wasm test-package clean
 
 help: ## List commands and their parameters
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' Makefile
@@ -40,7 +40,7 @@ lint: ## Run Rust Clippy with warnings as errors
 
 check: fmt-check lint test ## Run formatting, lint, and all unit tests
 
-test: test-rust test-hooks test-harness ## Run Rust, hook, and Zellij harness unit tests
+test: test-rust test-hooks test-harness test-monitor ## Run unit tests and terminal integration tests
 
 test-rust: ## Run Rust unit tests and board scenes
 	$(CARGO) test --locked --lib --bin board-tui
@@ -50,6 +50,10 @@ test-hooks: ## Test hook scripts with isolated state
 
 test-harness: ## Test the Zellij harness without launching Zellij
 	PYTHONPATH=e2e/zellij $(PYTHON) -B -m unittest discover -s e2e/zellij/harness -p 'test_*.py'
+
+test-monitor: ## Test embedded bottom, navigation and terminal recovery in isolated PTYs
+	$(CARGO) build --locked --bin board-tui
+	$(PYTHON) -B scripts/test-monitor.py target/debug/board-tui
 
 build: wasm tui ## Build the release WASM bridge and host TUI
 
@@ -97,6 +101,9 @@ replay: ## Replay one board scene (SCENE=path.scene)
 
 e2e-zellij: build ## Check board startup and dismissal in an isolated Zellij session
 	bash scripts/e2e-zellij.sh "$$WASM" "$$TUI"
+
+test-deleted-cwd: build ## Test the WASM bridge from a pane with a deleted working directory
+	$(PYTHON) -B scripts/test-deleted-cwd.py "$$WASM" "$$TUI"
 
 fault: build ## Run Zellij lifecycle experiments (optional SCENARIO=name REPEAT=count)
 	@set --; if [[ -n "$$SCENARIO" ]]; then set -- "$$SCENARIO"; fi; \

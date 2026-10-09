@@ -53,6 +53,7 @@ pub use scan::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use scene::{run_scene, SceneError};
 pub use status::Status;
+pub use theme::{theme, Theme};
 pub use toggle::{
     bridge_close_plan, closes_the_board, duplicate_close_ids, duplicate_close_ids_with_focus,
     is_host_tui_exit, jump_steps, looks_like_board_tui, now_ms, plugin_ids_to_close_explicitly,

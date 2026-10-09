@@ -71,6 +71,7 @@ if [ -z "$zellij_bin" ]; then
   exit 2
 fi
 cmd=("$zellij_bin" --session "$ZAB_SESSION" action new-pane --floating
+  --cwd /
   --close-on-exit --name board-tui
   --width "$ZAB_W" --height "$ZAB_H" --x "$ZAB_X" --y "$ZAB_Y")
 if [ -n "${ZAB_TAB:-}" ]; then
@@ -418,7 +419,9 @@ impl State {
         run_command_with_env_variables_and_cwd(
             &["/bin/bash", "-c", TUI_LAUNCHER],
             env,
-            PathBuf::from("."),
+            // A restored pane can still refer to a deleted worktree. Both the
+            // launcher and the new terminal must use an existing directory.
+            PathBuf::from("/"),
             context,
         );
     }

@@ -55,9 +55,29 @@ The WASM pane hides itself and opens `board-tui` with `new-pane --floating --clo
 | `Enter`, mouse click | Jump to the selected Agent |
 | `?` | Show help |
 | `S` | Open Settings (empty placeholder for future customization) |
-| `Esc`, `q` | Dismiss the board; `Esc` first cancels an active overlay, while `q` remains input during search |
+| `h` | Switch to the Agents home page (default) |
+| `t` | Switch to the full bottom monitor |
+| `q` | Exit the entire GUI immediately, including search, picker and overlays |
+| `Esc` | Cancel the current Home input mode or overlay; otherwise dismiss Home |
 
-Settings currently has no options. Press `S`, `Esc`, or `q` to return to the Agent list.
+The top navigation is always visible and clickable, with an active-page highlight
+and pointer hover. There are two pages: `h` (Agents) and `t` (Monitor). `p` opens
+Home's picker; it is not a third page. Settings currently has no options; `S` or
+`Esc` returns to the Agent list.
+
+The monitor embeds the bottom 0.14.9 library in the native binary, so no separate
+`btm` installation is required. It runs in a private PTY, preserving bottom's
+CPU, memory, network, disks, process list, help, keyboard and mouse controls while
+keeping the host navigation available. Switching pages preserves Agent selection,
+scroll position and monitor history. Bottom uses your usual configuration; set
+`ZAB_BOTTOM_CONFIG` to use a specific config file. A failed monitor shows an error
+and can be restarted with `t` or its navigation button.
+
+Bare `h`, `t` and `q` are reserved for navigation and exit on the Monitor page.
+Use arrows for bottom's horizontal movement and `F5` for process tree mode.
+Home's search, hint and picker inputs accept `h` and `t` as text; clicking the
+navigation still switches pages. `q` always exits. Closing the GUI also kills
+and reaps its monitor child.
 
 The picker supports mouse-wheel scrolling and a scrollbar on the right: click or drag its thumb to scroll. Keyboard behavior is unchanged.
 
@@ -81,9 +101,11 @@ make e2e-zellij
 make fault SCENARIO=board-launch-focus REPEAT=5
 ```
 
-`make check` runs Rust formatting, Clippy, Rust tests (including board scenes), hook tests, and the Zellij harness unit tests. `make fmt` formats Rust. `make run`, `make stats`, `make scan`, `make reconcile`, and `make catalog` expose the host tools. Hook payloads can be replayed with `make hook EVENT=stop < payload.json`.
+`make check` runs Rust formatting, Clippy, Rust tests (including board scenes), hook tests, the Zellij harness unit tests, and terminal integration tests. `make fmt` formats Rust. `make run`, `make stats`, `make scan`, `make reconcile`, and `make catalog` expose the host tools. Hook payloads can be replayed with `make hook EVENT=stop < payload.json`.
 
 `e2e/scenes/` are host scenes: each input paints a frame at the declared size; `expect` checkpoints read that frame. `board-tui --replay` runs them without a TTY. `make e2e-zellij` starts a throwaway Zellij session, dumps the board footer chrome, and checks that `q` closes `board-tui`. A headless session cannot grant plugin permissions, so the TUI is started directly with `new-pane`; plugin loading is best effort. The script skips if `zellij` is absent; set `ZAB_E2E_ZELLIJ_REQUIRED=1` to fail instead. Permission granting, Alt+q toggling, and cross-session jumps still need interactive verification.
+
+`make test-deleted-cwd` attaches a PTY client to a throwaway session, removes its pane's working directory, and presses Alt+q to test the actual WASM bridge and native board. It checks rendering and `q` dismissal without changing user sessions or config. The WASM path must already have Zellij plugin permissions granted; use `WASM=/absolute/path/to/trusted/plugin.wasm` to test an installed plugin.
 
 To package a release locally, build for the desired Rust target and then package the binaries:
 

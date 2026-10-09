@@ -167,7 +167,7 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
         )
     };
     let lines = vec![
-        Line::from(vec![key("j/k  h/l  arrows"), Span::raw("move")]),
+        Line::from(vec![key("j/k  arrows"), Span::raw("move")]),
         Line::from(vec![
             key("10j  0  gg  G"),
             Span::raw("count / first / last"),
@@ -184,7 +184,8 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
         Line::from(vec![key("s"), Span::raw("search")]),
         Line::from(vec![key("/  n  N"), Span::raw("find / next / prev")]),
         Line::from(vec![key("p  Tab"), Span::raw("picker / tip jump")]),
-        Line::from(vec![key("q  Esc"), Span::raw("close")]),
+        Line::from(vec![key("h / t"), Span::raw("Agents / Monitor pages")]),
+        Line::from(vec![key("q"), Span::raw("exit GUI; Esc cancels")]),
         Line::from(vec![key("Alt+q"), Span::raw("toggle board")]),
         Line::from(vec![key("S"), Span::raw("settings")]),
         Line::from(vec![key("!"), Span::raw("done, not opened yet")]),
@@ -670,7 +671,7 @@ fn render_picker_results(board: &Board, home: &str, area: Rect, buffer: &mut Buf
 
 fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
     let line = if board.overlay == Overlay::Settings {
-        footer_hints(area.width, None, &[("Esc  q  S", "back")])
+        footer_hints(area.width, None, &[("Esc  S", "back"), ("q", "exit")])
     } else if board.overlay == Overlay::Help {
         footer_hints(area.width, None, &[("q", "close"), ("?", "close")])
     } else if board.is_picking() {
