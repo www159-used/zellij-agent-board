@@ -3,8 +3,10 @@ use ratatui::{
     buffer::Buffer,
     layout::{Position, Rect},
     style::{Modifier, Style},
+    text::Line,
     widgets::{Paragraph, Widget},
 };
+use zellij_agent_board::i18n::{I18n, Message};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
@@ -68,19 +70,35 @@ impl Navigation {
         page: Page,
         settings_open: bool,
         hover: Option<Target>,
+        lang: I18n,
         buffer: &mut Buffer,
     ) {
         let theme = zellij_agent_board::theme();
         for (rect, target, label, compact) in [
-            (self.home, Target::Page(Page::Home), " h Agents ", "h"),
+            (
+                self.home,
+                Target::Page(Page::Home),
+                format!(" h {} ", lang.text(Message::NavHome)),
+                "h",
+            ),
             (
                 self.monitor,
                 Target::Page(Page::Monitor),
-                " t Monitor ",
+                format!(" t {} ", lang.text(Message::NavMonitor)),
                 "t",
             ),
-            (self.settings, Target::Settings, " S Settings ", "S"),
-            (self.quit, Target::Quit, " q Quit ", "q"),
+            (
+                self.settings,
+                Target::Settings,
+                format!(" S {} ", lang.text(Message::NavSettings)),
+                "S",
+            ),
+            (
+                self.quit,
+                Target::Quit,
+                format!(" q {} ", lang.text(Message::NavQuit)),
+                "q",
+            ),
         ] {
             let selected = if settings_open {
                 target == Target::Settings
@@ -97,8 +115,8 @@ impl Navigation {
             } else {
                 Style::default().fg(theme.muted)
             };
-            Paragraph::new(if rect.width >= label.len() as u16 {
-                label
+            Paragraph::new(if rect.width >= Line::from(label.as_str()).width() as u16 {
+                label.as_str()
             } else {
                 compact
             })

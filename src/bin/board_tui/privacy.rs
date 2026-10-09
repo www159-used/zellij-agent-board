@@ -3,10 +3,12 @@ use super::settings::{IdleAction, Preferences, SaverStyle};
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Rect},
-    style::{Color, Style},
+    style::Style,
+    text::Line,
     widgets::{Clear, Paragraph, Widget},
 };
 use std::time::{Duration, Instant};
+use zellij_agent_board::i18n::{I18n, Message};
 
 pub struct Privacy {
     last_input: Instant,
@@ -47,8 +49,8 @@ impl Privacy {
     }
 }
 
-pub fn resume_button(area: Rect) -> Rect {
-    let width = area.width.min(28);
+fn resume_button(area: Rect, label_width: u16) -> Rect {
+    let width = area.width.min(label_width + 4);
     Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
         area.y + area.height / 2,
@@ -57,16 +59,18 @@ pub fn resume_button(area: Rect) -> Rect {
     )
     .intersection(area)
 }
-pub fn render(area: Rect, style: SaverStyle, buffer: &mut Buffer) {
+pub fn render(area: Rect, style: SaverStyle, lang: I18n, buffer: &mut Buffer) {
     Clear.render(area, buffer);
-    buffer.set_style(area, Style::default().bg(Color::Black).fg(Color::Gray));
-    let button = resume_button(area);
+    let theme = zellij_agent_board::theme();
+    buffer.set_style(area, Style::default().bg(theme.mask).fg(theme.mask_fg));
+    let resume = lang.text(Message::Resume);
+    let button = resume_button(area, Line::from(resume.as_str()).width() as u16);
     if style == SaverStyle::Clock && button.y >= area.y + 2 {
         Paragraph::new(chrono::Local::now().format("%H:%M:%S").to_string())
             .alignment(Alignment::Center)
             .render(Rect::new(area.x, button.y - 2, area.width, 1), buffer);
     }
-    Paragraph::new("[ Space / click to resume ]")
+    Paragraph::new(format!("[ {resume} ]"))
         .alignment(Alignment::Center)
         .render(button, buffer);
 }
@@ -108,7 +112,7 @@ mod tests {
         for style in [SaverStyle::Blank, SaverStyle::Clock] {
             let mut buffer = Buffer::empty(area);
             Paragraph::new("secret session workspace process").render(area, &mut buffer);
-            render(area, style, &mut buffer);
+            render(area, style, I18n::default(), &mut buffer);
             let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
             assert!(text.contains("Space / click to resume"));
             assert!(!text.contains("secret"));

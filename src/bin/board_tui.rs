@@ -658,7 +658,7 @@ impl App {
             }
             return Loop::Changed;
         }
-        let result = self.handle_home_mouse(mouse);
+        let result = self.handle_home_mouse(mouse, nav.content);
         if changed && matches!(result, Loop::Ignored) {
             Loop::Changed
         } else {
@@ -667,8 +667,7 @@ impl App {
     }
 
     /// Home input coordinates are relative to its content area.
-    fn handle_home_mouse(&mut self, mouse: MouseEvent) -> Loop {
-        let content = self.navigation().content;
+    fn handle_home_mouse(&mut self, mouse: MouseEvent, content: Rect) -> Loop {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // A press commits to a row, so the launch hint is spent.
@@ -1038,7 +1037,7 @@ mod process_tests {
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         app.handle_key(key(KeyCode::Char('S')));
         assert_eq!(app.board.overlay, Overlay::Settings);
-        for _ in 0..3 {
+        for _ in 0..4 {
             app.handle_key(key(KeyCode::Tab));
         }
         app.handle_key(key(KeyCode::Enter));
@@ -1652,7 +1651,12 @@ impl App {
             let nav = Navigation::new(area);
             Clear.render(area, frame.buffer_mut());
             if self.privacy.active {
-                privacy::render(area, self.settings.value.saver_style, frame.buffer_mut());
+                privacy::render(
+                    area,
+                    self.settings.value.saver_style,
+                    self.settings.i18n(),
+                    frame.buffer_mut(),
+                );
                 return;
             }
             if self.board.overlay == Overlay::Settings {
@@ -1675,6 +1679,7 @@ impl App {
                 self.page,
                 self.board.overlay == Overlay::Settings,
                 self.nav_hover,
+                self.settings.i18n(),
                 frame.buffer_mut(),
             );
         })?;

@@ -6,21 +6,52 @@ trap 'rm -f "${spool_tmp:-}" "${started_tmp:-}"; exit 0' EXIT
 event="${1:-}"
 payload=$(cat || true)
 
+# Live hook mail stays in TMPDIR; titles / seen / started live in the host
+# cache, so they survive reboot and q. Mirrors the host state-dir chain so the
+# Codex pane cache and the started/seen files below agree with the Rust scanner.
+if [ -n "${ZAB_STATE_DIR:-}" ]; then
+  state_dir="$ZAB_STATE_DIR"
+elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+  state_dir="$XDG_CACHE_HOME/zellij-agent-board"
+elif [ -n "${HOME:-}" ]; then
+  state_dir="$HOME/.cache/zellij-agent-board"
+else
+  state_dir="${TMPDIR:-/tmp}/zellij-agent-board"
+fi
+
 # Codex 0.157+ runs hooks from the app-server daemon. That process keeps the
 # Zellij ids from wherever it was born (often daily/4), not the TUI pane that
 # owns the turn. Never trust ZELLIJ_* that only a daemon holds. Resolve the
 # pane from payload cwd / session_id→rollout / codex TUI match. Leave
 # hooks.json alone — editing the command string invalidates trusted_hash.
 if command -v python3 >/dev/null 2>&1; then
-  resolved=$(
-    ENV_SESSION="${ZELLIJ_SESSION_NAME:-}" \
-    ENV_PANE="${ZELLIJ_PANE_ID:-}" \
-    python3 -c '
-import glob, json, os, shutil, sqlite3, subprocess, sys
+  # Cursor/Claude and most hooks carry no Codex identity, so the inherited ids
+  # already name the right pane: skip the resolver unless the payload could.
+  # Keys mirror the parser below; a false positive only costs one start-up.
+  case "$payload" in
+    *\"cwd\"* | *\"CWD\"* | *\"working_directory\"* | *\"workdir\"* | \
+      *\"session_id\"* | *\"sessionId\"*)
+      resolved=$(
+        ENV_SESSION="${ZELLIJ_SESSION_NAME:-}" \
+        ENV_PANE="${ZELLIJ_PANE_ID:-}" \
+        ENV_STATE="$state_dir" \
+        python3 -c '
+import glob, json, os, shutil, sqlite3, subprocess, sys, tempfile
 from contextlib import closing
 from pathlib import Path
 
+state_dir = os.environ.get("ENV_STATE") or ""
+
 def emit_nothing():
+    # Identity present but unresolved: report none so the shell blanks the
+    # daemon ids rather than mis-attributing the hook to the birth pane.
+    print("none")
+    raise SystemExit(0)
+
+def emit_keep():
+    # No Codex identity in the payload: the inherited Zellij ids already name
+    # the right pane, so leave them for the shell to keep.
+    print("keep")
     raise SystemExit(0)
 
 def run(argv, timeout=None):
@@ -68,10 +99,27 @@ def proc_cwds(pid, args):
                 out.append(path)
     return out
 
-def zellij_ids(pid):
-    env = run([ps, "eww", "-p", pid])
+def zellij_ids(pid, require_codex=False):
+    env = run([ps, "eww", "-p", pid, "-o", "command="])
     if env.returncode != 0:
         return None
+    if require_codex:
+        # Daemon path names can occur inside the inherited environment. Only
+        # argv determines whether the PID itself is a daemon or a Codex TUI.
+        lines = []
+        for line in env.stdout.splitlines():
+            argv = []
+            for token in line.split():
+                if "=" in token:
+                    break
+                argv.append(token)
+            if argv:
+                lines.append(" ".join(argv))
+        if not any(
+            os.path.basename(line.split()[0]) == "codex" and not is_daemon(line)
+            for line in lines
+        ):
+            return None
     session = pane = ""
     for token in env.stdout.split():
         if token.startswith("ZELLIJ_SESSION_NAME="):
@@ -119,7 +167,12 @@ def pane_from_thread_name(session_id, wanted, candidates):
         version = Path(path).stem.removeprefix("state_")
         if version.isdigit():
             versions.append((int(version), path))
-    zellij = shutil.which("zellij")
+    # Match the host scanner: cargo installs take precedence over an older
+    # system Zellij that may not support list-panes at all.
+    cargo_zellij = os.path.expanduser("~/.cargo/bin/zellij")
+    zellij = os.environ.get("ZAB_ZELLIJ") or (
+        cargo_zellij if os.path.isfile(cargo_zellij) else shutil.which("zellij")
+    )
     if not versions or not zellij:
         return None
     try:
@@ -138,7 +191,7 @@ def pane_from_thread_name(session_id, wanted, candidates):
             return None
         matches = set()
         for session in sorted({session for session, _pane in candidates}):
-            result = run([zellij, "--session", session, "action", "list-panes", "--json"], timeout=2)
+            result = run([zellij, "--session", session, "action", "list-panes", "--all", "--json"], timeout=2)
             if result.returncode != 0:
                 return None
             panes = json.loads(result.stdout)
@@ -162,7 +215,55 @@ def pane_from_thread_name(session_id, wanted, candidates):
         pass
     return None
 
+def pane_cache_path(session_id):
+    if not session_id or not state_dir:
+        return None
+    if not all(c.isalnum() or c in "-_" for c in session_id):
+        return None
+    return Path(state_dir) / "codex-panes" / (session_id + ".json")
+
+def cached_pane(session_id, wanted):
+    path = pane_cache_path(session_id)
+    if not path or not wanted:
+        return None
+    try:
+        cached = json.loads(path.read_text())
+        pid = str(cached["pid"])
+        ids = (str(cached["session"]), str(cached["pane"]))
+        if not pid.isdigit() or cached["cwd"] != wanted:
+            return None
+        if zellij_ids(pid, require_codex=True) != ids:
+            return None
+        if wanted not in proc_cwds(pid, ""):
+            return None
+        # Resume can reuse the same TUI PID and cwd for another thread. Its
+        # current title must still match this exact thread before using cache.
+        return pane_from_thread_name(session_id, wanted, {ids})
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
 def emit(session, pane):
+    # Interrupt has a one-second deadline. Save a successfully resolved TUI
+    # identity during normal hooks so cancellation only probes that one PID.
+    path = pane_cache_path(session_id)
+    pid = codex_pids.get((session, pane)) if session_id else None
+    if path and pid and wanted:
+        pending = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as handle:
+                pending = handle.name
+                json.dump({"pid": pid, "session": session, "pane": pane, "cwd": wanted}, handle)
+            os.replace(pending, path)
+        except OSError:
+            pass
+        finally:
+            if pending:
+                try:
+                    os.unlink(pending)
+                except FileNotFoundError:
+                    pass
+    print("ok")
     print(session)
     print(pane)
     raise SystemExit(0)
@@ -187,9 +288,7 @@ session_id = str(data.get("session_id") or data.get("sessionId") or "")
 # No Codex identity in the payload: keep inherited Zellij ids (Cursor/Claude
 # / tests). Codex daemon hooks carry cwd or session_id and must not.
 if not cwd and not session_id:
-    if env_session and env_pane:
-        emit(env_session, env_pane)
-    emit_nothing()
+    emit_keep()
 
 wanted = real(cwd)
 if not wanted and session_id:
@@ -197,6 +296,11 @@ if not wanted and session_id:
 
 ps = shutil.which("ps") or "/bin/ps"
 lsof = shutil.which("lsof") or "/usr/sbin/lsof"
+codex_pids = {}
+if session_id:
+    matched = cached_pane(session_id, wanted)
+    if matched:
+        emit(*matched)
 listed = run([ps, "-ax", "-o", "pid=,args="])
 if listed.returncode != 0:
     emit_nothing()
@@ -222,6 +326,7 @@ for line in listed.stdout.splitlines():
             env_matches_cwd = True
     if os.path.basename(args.split()[0]) == "codex":
         codex_rows.append((args, ids, cwds))
+        codex_pids[ids] = pid
 
 # Cursor / Claude / a real Codex TUI already carry the right pane ids.
 # A shell left in the daemon birth pane must not count.
@@ -255,19 +360,22 @@ if wanted:
 
 emit_nothing()
 ' <<<"$payload"
-  ) || true
-  if [ -n "$resolved" ]; then
-    ZELLIJ_SESSION_NAME=$(printf '%s\n' "$resolved" | sed -n '1p')
-    ZELLIJ_PANE_ID=$(printf '%s\n' "$resolved" | sed -n '2p')
-  else
-    case "$payload" in
-      *\"cwd\"* | *\"session_id\"* | *\"sessionId\"*)
-        # Codex identity present but no pane matched — drop daemon ids.
-        ZELLIJ_SESSION_NAME=""
-        ZELLIJ_PANE_ID=""
-        ;;
-    esac
-  fi
+      ) || true
+      case "$(printf '%s\n' "$resolved" | sed -n '1p')" in
+        ok)
+          ZELLIJ_SESSION_NAME=$(printf '%s\n' "$resolved" | sed -n '2p')
+          ZELLIJ_PANE_ID=$(printf '%s\n' "$resolved" | sed -n '3p')
+          ;;
+        keep) ;; # No Codex identity: the inherited ids stand.
+        *)
+          # Identity present but no pane matched (or the parser failed): drop
+          # the daemon ids rather than attribute the hook to the wrong pane.
+          ZELLIJ_SESSION_NAME=""
+          ZELLIJ_PANE_ID=""
+          ;;
+      esac
+      ;;
+  esac
 fi
 
 [ -n "${ZELLIJ_PANE_ID:-}" ] || exit 0
@@ -388,18 +496,6 @@ spool_tmp=$(mktemp "$spool_dir/.pending/hook.XXXXXX") || exit 0
 printf '%s\n' "$line" >"$spool_tmp" &&
   mv -f "$spool_tmp" "${spool_dir}/${ZELLIJ_SESSION_NAME}-${ZELLIJ_PANE_ID}" || exit 0
 spool_tmp=""
-
-# Live hook mail stays in TMPDIR. Titles / seen / started live in the
-# host cache so they survive reboot and q.
-if [ -n "${ZAB_STATE_DIR:-}" ]; then
-  state_dir="$ZAB_STATE_DIR"
-elif [ -n "${XDG_CACHE_HOME:-}" ]; then
-  state_dir="$XDG_CACHE_HOME/zellij-agent-board"
-elif [ -n "${HOME:-}" ]; then
-  state_dir="$HOME/.cache/zellij-agent-board"
-else
-  state_dir="${TMPDIR:-/tmp}/zellij-agent-board"
-fi
 
 # Last spool line is often a tool hook. Persist the turn start separately
 # so working elapsed survives q / Alt+q.

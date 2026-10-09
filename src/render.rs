@@ -746,7 +746,6 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
                 ("/", "find"),
                 ("q", "close"),
                 ("?", "more"),
-                ("S", "settings"),
             ],
         )
     };

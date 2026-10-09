@@ -10,9 +10,11 @@ use ratatui::{
     buffer::Buffer,
     layout::{Position, Rect},
     style::{Modifier, Style},
+    text::Line,
     widgets::{Block, Paragraph, Widget},
 };
 use serde::{Deserialize, Serialize};
+use zellij_agent_board::i18n::{I18n, Locale, Message};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,12 +33,63 @@ pub enum SaverStyle {
     Clock,
 }
 
+/// Selectable values per row, paired with the label the form paints, and kept in
+/// the order the form shows them. `choices`, `selected` and `set` all read these
+/// tables, so the painted order and the stored value cannot drift apart.
+const IDLE_ACTIONS: [(Message, IdleAction); 4] = [
+    (Message::ChoiceScreensaver, IdleAction::Screensaver),
+    (Message::ChoiceMonitor, IdleAction::Monitor),
+    (Message::ChoiceClose, IdleAction::Close),
+    (Message::ChoiceDisabled, IdleAction::Disabled),
+];
+const IDLE_SECONDS: [u64; 3] = [30, 60, 300];
+const SAVER_STYLES: [(Message, SaverStyle); 2] = [
+    (Message::ChoiceBlank, SaverStyle::Blank),
+    (Message::ChoiceClock, SaverStyle::Clock),
+];
+
+/// One row per selector, then the Preview and Back buttons.
+const ROWS: usize = 6;
+const SELECTORS: usize = 4;
+
+/// Selector rows in paint order. `choices`, `selected`, `set` and `render` all
+/// dispatch on this enum, so a new setting is a compile error until every site
+/// is updated instead of a row that silently paints but never stores.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    IdleAction,
+    IdleTime,
+    SaverStyle,
+    Language,
+}
+impl Field {
+    const ALL: [Field; SELECTORS] = [
+        Field::IdleAction,
+        Field::IdleTime,
+        Field::SaverStyle,
+        Field::Language,
+    ];
+    fn label(self) -> Message {
+        match self {
+            Field::IdleAction => Message::SettingsIdleAction,
+            Field::IdleTime => Message::SettingsIdleTime,
+            Field::SaverStyle => Message::SettingsSaverStyle,
+            Field::Language => Message::SettingsLanguage,
+        }
+    }
+}
+
+fn label_width(inner: Rect) -> u16 {
+    18.min(inner.width / 3)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
     pub idle_action: IdleAction,
     pub idle_seconds: u64,
     pub saver_style: SaverStyle,
+    pub language: Locale,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -44,6 +97,7 @@ impl Default for Preferences {
             idle_action: IdleAction::Screensaver,
             idle_seconds: 30,
             saver_style: SaverStyle::Blank,
+            language: Locale::English,
         }
     }
 }
@@ -71,7 +125,7 @@ pub struct Form {
     path: PathBuf,
     focus: usize,
     hover: Option<(usize, Option<usize>)>,
-    notice: Option<String>,
+    notice: Option<(Message, String)>,
 }
 impl Form {
     pub fn load(path: PathBuf) -> Self {
@@ -82,7 +136,7 @@ impl Form {
                     if (1..=86400).contains(&value.idle_seconds) {
                         Ok(value)
                     } else {
-                        Err("idle_seconds must be between 1 and 86400".into())
+                        Err(I18n::new(value.language).text(Message::InvalidIdleSeconds))
                     }
                 }),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Preferences::default()),
@@ -92,7 +146,7 @@ impl Form {
             Ok(value) => (value, None),
             Err(err) => (
                 Preferences::default(),
-                Some(format!("Could not load settings; using defaults: {err}")),
+                Some((Message::SettingsLoadError, err)),
             ),
         };
         Self {
@@ -104,55 +158,68 @@ impl Form {
         }
     }
 
-    fn choices(&self, row: usize) -> Vec<String> {
-        match row {
-            0 => ["Screensaver", "Monitor", "Close GUI", "Disabled"]
-                .map(str::to_owned)
-                .to_vec(),
-            1 => {
-                let mut choices = vec!["30s".into(), "1min".into(), "5min".into()];
-                if ![30, 60, 300].contains(&self.value.idle_seconds) {
-                    choices.push(format!("{}s", self.value.idle_seconds));
+    pub fn i18n(&self) -> I18n {
+        I18n::new(self.value.language)
+    }
+
+    fn choices(&self, field: Field) -> Vec<String> {
+        let lang = self.i18n();
+        match field {
+            Field::IdleAction => IDLE_ACTIONS.map(|(label, _)| lang.text(label)).to_vec(),
+            Field::IdleTime => {
+                let mut choices = vec![
+                    lang.format(Message::Seconds, &[("seconds", "30")]),
+                    lang.format(Message::Minutes, &[("minutes", "1")]),
+                    lang.format(Message::Minutes, &[("minutes", "5")]),
+                ];
+                if !IDLE_SECONDS.contains(&self.value.idle_seconds) {
+                    choices.push(lang.format(
+                        Message::Seconds,
+                        &[("seconds", &self.value.idle_seconds.to_string())],
+                    ));
                 }
                 choices
             }
-            2 => vec!["Blank".into(), "Clock".into()],
-            _ => vec![],
-        }
-    }
-    fn selected(&self, row: usize) -> usize {
-        match row {
-            0 => match self.value.idle_action {
-                IdleAction::Screensaver => 0,
-                IdleAction::Monitor => 1,
-                IdleAction::Close => 2,
-                IdleAction::Disabled => 3,
-            },
-            1 => [30, 60, 300]
+            Field::SaverStyle => SAVER_STYLES.map(|(label, _)| lang.text(label)).to_vec(),
+            Field::Language => Locale::ALL
                 .iter()
-                .position(|n| *n == self.value.idle_seconds)
-                .unwrap_or(3),
-            2 => usize::from(self.value.saver_style == SaverStyle::Clock),
-            _ => 0,
+                .map(|locale| locale.native_name().to_owned())
+                .collect(),
         }
     }
-    fn set(&mut self, row: usize, index: usize) -> Outcome {
-        match row {
-            0 => {
-                self.value.idle_action = [
-                    IdleAction::Screensaver,
-                    IdleAction::Monitor,
-                    IdleAction::Close,
-                    IdleAction::Disabled,
-                ][index]
+    fn selected(&self, field: Field) -> usize {
+        match field {
+            Field::IdleAction => IDLE_ACTIONS
+                .iter()
+                .position(|(_, action)| *action == self.value.idle_action)
+                .unwrap_or(0),
+            Field::IdleTime => IDLE_SECONDS
+                .iter()
+                .position(|seconds| *seconds == self.value.idle_seconds)
+                .unwrap_or(IDLE_SECONDS.len()),
+            Field::SaverStyle => SAVER_STYLES
+                .iter()
+                .position(|(_, style)| *style == self.value.saver_style)
+                .unwrap_or(0),
+            Field::Language => Locale::ALL
+                .iter()
+                .position(|locale| *locale == self.value.language)
+                .unwrap_or(0),
+        }
+    }
+    fn set(&mut self, field: Field, index: usize) -> Outcome {
+        match field {
+            Field::IdleAction => self.value.idle_action = IDLE_ACTIONS[index].1,
+            Field::IdleTime if index < IDLE_SECONDS.len() => {
+                self.value.idle_seconds = IDLE_SECONDS[index]
             }
-            1 if index < 3 => self.value.idle_seconds = [30, 60, 300][index],
-            2 => self.value.saver_style = [SaverStyle::Blank, SaverStyle::Clock][index],
-            _ => {}
+            Field::IdleTime => {}
+            Field::SaverStyle => self.value.saver_style = SAVER_STYLES[index].1,
+            Field::Language => self.value.language = Locale::ALL[index],
         }
         self.notice = match self.save() {
             Ok(()) => None,
-            Err(err) => Some(format!("Changes active, but could not save: {err}")),
+            Err(err) => Some((Message::SettingsSaveError, err.to_string())),
         };
         Outcome::Changed
     }
@@ -172,13 +239,13 @@ impl Form {
     }
     fn activate(&mut self, direction: isize) -> Outcome {
         match self.focus {
-            0..=2 => {
-                let len = self.choices(self.focus).len();
-                let index =
-                    (self.selected(self.focus) as isize + direction).rem_euclid(len as isize);
-                self.set(self.focus, index as usize)
+            0..SELECTORS => {
+                let field = Field::ALL[self.focus];
+                let len = self.choices(field).len();
+                let index = (self.selected(field) as isize + direction).rem_euclid(len as isize);
+                self.set(field, index as usize)
             }
-            3 => Outcome::Preview,
+            SELECTORS => Outcome::Preview,
             _ => Outcome::Close,
         }
     }
@@ -186,15 +253,15 @@ impl Form {
         match key.code {
             KeyCode::Esc | KeyCode::Char('S') => Outcome::Close,
             KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => {
-                self.focus = (self.focus + 1) % 5;
+                self.focus = (self.focus + 1) % ROWS;
                 Outcome::Changed
             }
             KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => {
-                self.focus = (self.focus + 4) % 5;
+                self.focus = (self.focus + ROWS - 1) % ROWS;
                 Outcome::Changed
             }
-            KeyCode::Left if self.focus < 3 => self.activate(-1),
-            KeyCode::Right if self.focus < 3 => self.activate(1),
+            KeyCode::Left if self.focus < SELECTORS => self.activate(-1),
+            KeyCode::Right if self.focus < SELECTORS => self.activate(1),
             KeyCode::Enter | KeyCode::Char(' ') => self.activate(1),
             _ => Outcome::Ignored,
         }
@@ -211,7 +278,7 @@ impl Form {
             if let Some(cell) = hit {
                 self.focus = cell.row;
                 return if let Some(option) = cell.option {
-                    self.set(cell.row, option)
+                    self.set(Field::ALL[cell.row], option)
                 } else {
                     self.activate(1)
                 };
@@ -225,52 +292,58 @@ impl Form {
     }
     fn cells(&self, area: Rect) -> Vec<Cell> {
         let inner = Block::bordered().inner(area);
-        let step = if inner.height >= 19 {
+        let step = if inner.height >= 22 {
             3
-        } else if inner.height >= 13 {
+        } else if inner.height >= 15 {
             2
         } else {
             1
         };
-        let label_width = 18.min(inner.width / 3);
+        let label_width = label_width(inner);
         let mut cells = vec![];
-        for row in 0..5 {
+        for row in 0..ROWS {
             let y = inner.y.saturating_add(2 + row as u16 * step);
-            let field = Rect::new(inner.x, y, inner.width, 1).intersection(inner);
-            if field.height == 0 || field.width == 0 {
+            let row_rect = Rect::new(inner.x, y, inner.width, 1).intersection(inner);
+            if row_rect.height == 0 || row_rect.width == 0 {
                 continue;
             }
-            if row >= 3 {
+            if row >= SELECTORS {
                 cells.push(Cell {
-                    rect: field,
+                    rect: row_rect,
                     row,
                     option: None,
-                    text: if row == 3 {
-                        "[ Preview screensaver ]"
-                    } else {
-                        "[ Back ]"
-                    }
-                    .into(),
+                    text: format!(
+                        "[ {} ]",
+                        self.i18n().text(if row == SELECTORS {
+                            Message::PreviewScreensaver
+                        } else {
+                            Message::Back
+                        })
+                    ),
                 });
-            } else if inner.width < 70 {
+                continue;
+            }
+            let field = Field::ALL[row];
+            if inner.width < 70 {
                 let rect = Rect::new(
-                    field.x + label_width,
+                    row_rect.x + label_width,
                     y,
-                    field.width.saturating_sub(label_width),
+                    row_rect.width.saturating_sub(label_width),
                     1,
                 );
                 cells.push(Cell {
                     rect,
                     row,
                     option: None,
-                    text: format!("< {} >", self.choices(row)[self.selected(row)]),
+                    text: format!("< {} >", self.choices(field)[self.selected(field)]),
                 });
             } else {
-                let mut x = field.x + label_width;
-                for (option, text) in self.choices(row).into_iter().enumerate() {
+                let mut x = row_rect.x + label_width;
+                for (option, text) in self.choices(field).into_iter().enumerate() {
                     let text = format!("[ {text} ] ");
-                    let rect = Rect::new(x, y, text.len() as u16, 1).intersection(field);
-                    x += text.len() as u16;
+                    let width = Line::from(text.as_str()).width() as u16;
+                    let rect = Rect::new(x, y, width, 1).intersection(row_rect);
+                    x += width;
                     if rect.width > 0 {
                         cells.push(Cell {
                             rect,
@@ -286,25 +359,23 @@ impl Form {
     }
     pub fn render(&self, area: Rect, buffer: &mut Buffer) {
         let theme = zellij_agent_board::theme();
+        let lang = self.i18n();
         let block = Block::bordered()
-            .title(" settings ")
+            .title(format!(" {} ", lang.text(Message::SettingsTitle)))
             .border_style(Style::default().fg(theme.card_border));
         let inner = block.inner(area);
         block.render(area, buffer);
-        Paragraph::new("Privacy / idle protection")
+        Paragraph::new(lang.text(Message::SettingsHeading))
             .style(Style::default().fg(theme.text))
             .render(
                 Rect::new(inner.x, inner.y, inner.width, 1).intersection(inner),
                 buffer,
             );
         let cells = self.cells(area);
-        for (row, label) in ["Idle action", "Idle time", "Saver style"]
-            .into_iter()
-            .enumerate()
-        {
+        for (row, field) in Field::ALL.into_iter().enumerate() {
             if let Some(cell) = cells.iter().find(|cell| cell.row == row) {
-                let rect = Rect::new(inner.x, cell.rect.y, 18.min(inner.width / 3), 1);
-                Paragraph::new(label)
+                let rect = Rect::new(inner.x, cell.rect.y, label_width(inner), 1);
+                Paragraph::new(lang.text(field.label()))
                     .style(Style::default().fg(if self.focus == row {
                         theme.focus
                     } else {
@@ -314,9 +385,10 @@ impl Form {
             }
         }
         for cell in &cells {
-            let selected = cell
-                .option
-                .is_some_and(|option| self.selected(cell.row) == option);
+            let selected = matches!(
+                (Field::ALL.get(cell.row).copied(), cell.option),
+                (Some(field), Some(option)) if self.selected(field) == option
+            );
             let hover = self.hover == Some((cell.row, cell.option));
             let style = Style::default()
                 .fg(if selected || self.focus == cell.row {
@@ -340,9 +412,9 @@ impl Form {
                 .style(style)
                 .render(cell.rect, buffer);
         }
-        if let (Some(last), Some(notice)) = (cells.last(), &self.notice) {
+        if let (Some(last), Some((message, error))) = (cells.last(), &self.notice) {
             let y = last.rect.y + 2;
-            Paragraph::new(notice.as_str())
+            Paragraph::new(lang.format(*message, &[("error", error)]))
                 .style(Style::default().fg(theme.text))
                 .render(
                     Rect::new(inner.x, y, inner.width, 1).intersection(inner),
@@ -375,17 +447,14 @@ mod tests {
             Preferences {
                 idle_action: IdleAction::Monitor,
                 idle_seconds: 60,
-                saver_style: SaverStyle::Blank
+                saver_style: SaverStyle::Blank,
+                ..Preferences::default()
             }
         );
         fs::write(&path, r#"{"idle_seconds":0}"#).unwrap();
         let invalid = Form::load(path);
         assert_eq!(invalid.value, Preferences::default());
-        assert!(invalid
-            .notice
-            .as_deref()
-            .unwrap()
-            .contains("Could not load"));
+        assert_eq!(invalid.notice.unwrap().0, Message::SettingsLoadError);
     }
     #[test]
     fn painted_choices_are_clickable_and_small_forms_do_not_overflow() {
@@ -424,8 +493,82 @@ mod tests {
         let path = dir.path().join("settings.json");
         fs::create_dir(&path).unwrap();
         let mut form = Form::load(path);
-        form.set(0, 3);
+        form.set(Field::IdleAction, 3);
         assert_eq!(form.value.idle_action, IdleAction::Disabled);
-        assert!(form.notice.as_deref().unwrap().contains("could not save"));
+        assert_eq!(form.notice.unwrap().0, Message::SettingsSaveError);
+    }
+
+    #[test]
+    fn language_changes_live_and_persists_without_translating_protocol_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut form = Form::load(path.clone());
+        for _ in 0..3 {
+            form.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        form.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(form.value.language, Locale::SimplifiedChinese);
+        assert_eq!(form.i18n().text(Message::SettingsIdleAction), "空闲动作");
+        assert_eq!(
+            Form::load(path.clone()).value.language,
+            Locale::SimplifiedChinese
+        );
+        let encoded = fs::read_to_string(&path).unwrap();
+        assert!(encoded.contains("\"language\": \"zh-CN\""));
+        assert!(encoded.contains("\"idle_action\": \"screensaver\""));
+        let area = Rect::new(0, 2, 120, 28);
+        let mut buffer = Buffer::empty(area);
+        form.render(area, &mut buffer);
+        // Buffer cells following wide glyphs contain padding, not extra text.
+        let text: String = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .flat_map(str::chars)
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        assert!(text.contains("隐私与空闲保护"));
+        assert!(text.contains("预览屏保"));
+        // Render and dispatch Chinese choices after resizing too.
+        for width in [120, 50] {
+            let area = Rect::new(0, 2, width, 28);
+            let cell = form
+                .cells(area)
+                .into_iter()
+                .find(|cell| cell.row == 2 && (cell.option == Some(1) || cell.option.is_none()))
+                .unwrap();
+            form.value.saver_style = SaverStyle::Blank;
+            form.mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: cell.rect.x,
+                    row: cell.rect.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                area,
+            );
+            assert_eq!(form.value.saver_style, SaverStyle::Clock);
+        }
+        form.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        form.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        form.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        form.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(form.value.language, Locale::English);
+    }
+
+    #[test]
+    fn old_and_unknown_language_settings_preserve_other_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        for value in [
+            r#"{"idle_seconds":60}"#,
+            r#"{"idle_seconds":60,"language":"fr-FR"}"#,
+        ] {
+            fs::write(&path, value).unwrap();
+            let form = Form::load(path.clone());
+            assert_eq!(form.value.language, Locale::English);
+            assert_eq!(form.value.idle_seconds, 60);
+            assert!(form.notice.is_none());
+        }
     }
 }

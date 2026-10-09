@@ -6,6 +6,7 @@ mod catalog;
 mod discover;
 mod float_size;
 mod floating_state;
+pub mod i18n;
 mod protocol;
 #[cfg(not(target_arch = "wasm32"))]
 mod reconcile;

@@ -75,6 +75,21 @@ Changes apply immediately and are saved atomically to
 file path. Load/save errors are shown in Settings; failed saves keep the change
 active for the current GUI.
 
+The Language field switches between English and 简体中文 immediately and saves
+the choice for the next opening. Settings, navigation and the screensaver use
+this language; Home's remaining chrome and embedded bottom retain their original
+text for now. Existing settings files default to English, and unknown language
+tags fall back to English without resetting the other preferences.
+
+UI translations use `fluent-bundle` behind the shared `src/i18n.rs` interface.
+Embedded `locales/en.ftl` and `locales/zh-CN.ftl` contain stable message keys and
+named arguments. Renderers receive an `I18n` value instead of mutating a global
+locale. Add messages to `Message` and the Fluent resources when extending a
+page; add locales to `Locale` and the resource loader to extend the Language
+field. Missing or invalid translations fall back to English. Keep shortcuts,
+protocol values and serialized settings identifiers independent of translated
+labels, and calculate layout and mouse hit areas using terminal cell widths.
+
 By default, 30 seconds without input in ZAB activates a privacy screensaver.
 Background updates and terminal resize do not reset the timer. Settings offers
 Screensaver, Monitor, Close GUI or Disabled actions; 30s, 1min or 5min delays; and
@@ -112,6 +127,8 @@ The TUI first loads the cached scan, then requests a background reconcile about 
 Titles, the last scan, and seen/started markers live in `$ZAB_STATE_DIR`, `$XDG_CACHE_HOME/zellij-agent-board`, or `~/.cache/zellij-agent-board`, in that order. Launch focus is passed directly to each TUI. Hooks publish their latest notice under `$TMPDIR/zellij-agent-board-spool` and separately maintain the turn-start marker. Hooks never launch a WASM plugin. Unread completion can emit a terminal notification.
 
 Codex `Interrupt`, Pi `agent_settled` with `aborted`, and Cursor `stop`/`afterAgentResponse` with `status=aborted` appear as `■ stopped`. Cursor `status=error`, Claude/CodeBuddy `StopFailure`, OpenCode `session.error`, and Pi `agent_settled` with `error` appear as `✗ failed`. Both clear the working timer without marking the turn done or sending a completion notification. Permission prompts (`PermissionRequest`, CodeBuddy `Notification` `permission_prompt`, OpenCode `permission.asked`) appear as `● waiting` and keep the turn start so elapsed time resumes. Claude/CodeBuddy `Notification` `idle_prompt` appears as `◑ idle-wait` and clears the turn without a completion notice. After upgrading, rerun `make install-hooks` for the CLIs you use and restart those sessions. Notices from before the new hooks were installed cannot be recovered.
+
+Codex hooks cache a resolved thread-to-pane identity under `codex-panes/` in the state directory. Before reusing it, they check the live Codex PID, pane, working directory, and current thread title. This avoids enumerating every agent during the one-second `Interrupt` deadline. Title queries cover all tabs and prefer `~/.cargo/bin/zellij` over PATH, matching the host scanner's preference; `ZAB_ZELLIJ` overrides that choice.
 
 ## Develop
 

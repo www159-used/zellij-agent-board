@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -398,6 +399,88 @@ class HookTests(unittest.TestCase):
         self.assertFalse(started.exists())
         self.assertFalse((spool.parent / "daily-4").exists())
         self.assertFalse((spool.parent / "daily-8").exists())
+
+    def test_codex_interrupt_survives_slow_process_enumeration(self):
+        payload = self._codex_shared_cwd([
+            {"id": 0, "title": "Daily task | work", "is_plugin": False},
+            {"id": 8, "title": "Other task | work", "is_plugin": False},
+        ])
+        self.hook("UserPromptSubmit", payload)
+        spool = self.root / "zellij-agent-board-spool/daily-0"
+        started = self.root / "state/started/daily-0"
+        ps = self.root / "bin/ps"
+        ps.write_text(ps.read_text().replace(
+            'if [ "$1" = "-ax" ]; then\n',
+            'if [ "$1" = "-ax" ]; then\n  sleep 2\n', 1,
+        ))
+        # Codex gives Interrupt one second, including pane resolution. A full
+        # scan of even two slow candidates must not swallow cancellation.
+        child = subprocess.Popen(
+            ["bash", str(HOOK), "Interrupt"], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env,
+            start_new_session=True,
+        )
+        try:
+            child.communicate(json.dumps(payload).encode(), timeout=1)
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.communicate()
+        self.assertIn(" interrupt ", spool.read_text(), "cancelled turn still shows working")
+        self.assertFalse(started.exists())
+
+    def test_codex_thread_title_resolution_prefers_cargo_zellij(self):
+        payload = self._codex_shared_cwd([
+            {"id": 0, "title": "Daily task | work"},
+            {"id": 8, "title": "Other task | work"},
+        ])
+        cargo_bin = Path(self.env["HOME"]) / ".cargo/bin"
+        cargo_bin.mkdir(parents=True)
+        current = self.root / "bin/zellij"
+        cargo_zellij = cargo_bin / "zellij"
+        cargo_zellij.write_text(current.read_text())
+        cargo_zellij.chmod(0o755)
+        current.write_text("#!/bin/sh\nexit 2\n")
+        self.env.pop("ZAB_ZELLIJ", None)
+        self.hook("UserPromptSubmit", payload)
+        spool = self.root / "zellij-agent-board-spool/daily-0"
+        self.assertTrue(spool.exists(), "old PATH Zellij swallowed the Codex hook")
+        self.hook("Interrupt", payload)
+        self.assertIn(" interrupt ", spool.read_text())
+
+    def test_codex_cached_interrupt_does_not_follow_a_resumed_thread(self):
+        payload = self._codex_shared_cwd([
+            {"id": 0, "title": "Daily task | work"},
+            {"id": 8, "title": "Other task | work"},
+        ])
+        self.hook("UserPromptSubmit", payload)
+        spool = self.root / "zellij-agent-board-spool/daily-0"
+        before = spool.read_bytes()
+        (self.root / "panes.json").write_text(json.dumps([
+            {"id": 0, "title": "New thread | work"},
+            {"id": 8, "title": "Other task | work"},
+        ]))
+        self.hook("Interrupt", payload)
+        self.assertEqual(spool.read_bytes(), before)
+        self.assertFalse((spool.parent / "daily-8").exists())
+
+    def test_codex_cached_interrupt_does_not_match_a_shell_reusing_the_pane(self):
+        payload = self._codex_shared_cwd([
+            {"id": 0, "title": "Daily task | work"},
+            {"id": 8, "title": "Other task | work"},
+        ])
+        self.hook("UserPromptSubmit", payload)
+        spool = self.root / "zellij-agent-board-spool/daily-0"
+        before = spool.read_bytes()
+        (self.root / "bin/ps").write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = "-ax" ]; then\n'
+            '  printf "%s\\n" "4242 zsh"\n'
+            'else\n'
+            '  printf "%s\\n" "zsh ZELLIJ_PANE_ID=0 ZELLIJ_SESSION_NAME=daily"\n'
+            'fi\n'
+        )
+        self.hook("Interrupt", payload)
+        self.assertEqual(spool.read_bytes(), before)
 
     def test_codex_shared_cwd_busy_title_keeps_tool_and_stop_hooks(self):
         panes = [

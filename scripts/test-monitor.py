@@ -253,7 +253,7 @@ class MonitorTests(unittest.TestCase):
         self.click(board, 33, 12)  # Clock style
         board.wait_setting("saver_style", "clock")
         self.assertEqual(json.loads(board.settings_path.read_text())["saver_style"], "clock")
-        self.click(board, 9, 15)  # Preview
+        self.click(board, 9, 18)  # Preview (under the Language field)
         board.read_until(b"Space / click to resume")
         board.send(b" ")
         board.read_until(b"Privacy / idle protection")
@@ -309,6 +309,30 @@ class MonitorTests(unittest.TestCase):
         self.click(board, 8, 8)
         board.read_until(b"PICK", timeout=2)
         board.close_board()
+
+    def test_language_switch_is_live_clickable_and_persists(self):
+        board = self.board()
+        board.send(b"S")
+        board.read_until(b"Privacy / idle protection")
+        self.click(board, 36, 15)  # 简体中文
+        board.read_until("隐私与空闲保护".encode())
+        board.wait_setting("language", "zh-CN")
+        self.click(board, 53, 6)  # Chinese Disabled option, using terminal cell width.
+        board.wait_setting("idle_action", "disabled")
+        self.click(board, 31, 12)  # 时钟
+        board.wait_setting("saver_style", "clock")
+        self.click(board, 9, 18)  # 预览屏保
+        board.read_until("按空格或点击恢复".encode())
+        board.send(b" ")
+        board.read_until("隐私与空闲保护".encode())
+        board.close_board()
+        reopened = self.board(settings_path=board.settings_path)
+        reopened.send(b"S")
+        reopened.read_until("隐私与空闲保护".encode())
+        self.click(reopened, 24, 15)  # English
+        reopened.read_until(b"Privacy / idle protection")
+        reopened.wait_setting("language", "en")
+        reopened.close_board()
 
 
 if __name__ == "__main__":
