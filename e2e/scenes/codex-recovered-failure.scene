@@ -1,0 +1,33 @@
+# A terminal compaction error is Failed, without an unread completion.
+size 90 12
+meta hooks=1 epoch=200
+scan demo 42 /tmp/api codex
+hook demo 42 beforeSubmitPrompt @100 ~100000
+hook demo 42 preCompact @110 ~110100
+expect status demo 42 compact
+hook demo 42 stopFailure @120 ~120100 codex_rollout
+expect status demo 42 failed
+expect screen contains failed
+expect screen contains ✗
+expect screen excludes done
+expect screen excludes working
+
+# Old tool hooks from the spool or a cached scan cannot revive Working.
+hook demo 42 postToolUse @110 ~110200
+expect status demo 42 failed
+meta hooks=1 epoch=201
+scan demo 42 /tmp/api codex
+hook demo 42 postToolUse @110 ~110200
+started demo 42 100
+expect status demo 42 failed
+expect screen excludes working
+hook demo 42 stop @120 ~120150
+expect status demo 42 failed
+expect screen excludes done
+
+# The next prompt starts normally, even within the terminal event's second.
+hook demo 42 beforeSubmitPrompt @120 ~120200
+expect status demo 42 working
+hook demo 42 stopFailure @120 ~120100 codex_rollout
+expect status demo 42 working
+expect screen excludes failed

@@ -25,5 +25,5 @@ The host process enumeration that creates and drops Agents. The only source of e
 _Avoid_: discover, pgrep (pgrep silently misses some live processes)
 
 **Hook**:
-A status notice for an Agent that already exists. It never creates a row.
+A status notice for an Agent that already exists. It never creates a row. Codex reconciliation can synthesize terminal notices from uniquely identified local turn records when delivery was missed; newer notices and turn starts take precedence.
 _Avoid_: event (the raw CLI name; the board consumes a normalized hook)

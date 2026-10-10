@@ -160,7 +160,7 @@ impl Visit {
                 let id = self.agent_id(&agent.id);
                 let session = self.session_id(&agent.id.session);
                 json!({"id": id, "session_id": session, "tool": agent.tool,
-                "status": agent.status.label(), "visited": agent.visited})
+                "status": agent.status.label(), "status_source": agent.status_source, "visited": agent.visited})
             })
             .collect();
         let state = json!({"rows": rows, "selected": board.selected,

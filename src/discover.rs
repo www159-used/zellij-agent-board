@@ -17,6 +17,8 @@ pub struct HookNotice {
     pub detail: String,
     /// Host unix epoch when the hook fired (survives plugin reopen).
     pub at_epoch: Option<u64>,
+    /// Optional millisecond ordering, while timers retain epoch seconds.
+    pub at_ms: Option<u64>,
     /// Optional wall stamp for done rows, e.g. `08-24 15:21`.
     pub at_stamp: Option<String>,
 }
@@ -73,6 +75,7 @@ pub fn parse_host_line(line: &str) -> Option<HostLine> {
             let pane_id = parts.next()?.parse().ok()?;
             let event = parts.next()?.to_string();
             let mut at_epoch = None;
+            let mut at_ms = None;
             let mut at_stamp = None;
             let mut detail_parts = Vec::new();
             for part in parts {
@@ -83,6 +86,10 @@ pub fn parse_host_line(line: &str) -> Option<HostLine> {
                         // Legacy `@08-24T15:21` wall stamp.
                         at_stamp = Some(rest.replace('T', " "));
                     }
+                    continue;
+                }
+                if let Some(millis) = part.strip_prefix('~').and_then(|rest| rest.parse().ok()) {
+                    at_ms = Some(millis);
                     continue;
                 }
                 if let Some(rest) = part.strip_prefix('+') {
@@ -96,6 +103,7 @@ pub fn parse_host_line(line: &str) -> Option<HostLine> {
                 event,
                 detail: detail_parts.join(" "),
                 at_epoch,
+                at_ms,
                 at_stamp,
             }))
         }
@@ -179,6 +187,7 @@ mod tests {
                 event: "beforeSubmitPrompt".into(),
                 detail: String::new(),
                 at_epoch: None,
+                at_ms: None,
                 at_stamp: None,
             }))
         );
@@ -192,6 +201,7 @@ mod tests {
                 event: "preToolUse".into(),
                 detail: "Shell cargo test --lib".into(),
                 at_epoch: None,
+                at_ms: None,
                 at_stamp: None,
             }))
         );
@@ -205,6 +215,7 @@ mod tests {
                 event: "stop".into(),
                 detail: String::new(),
                 at_epoch: Some(1_700_000_000),
+                at_ms: None,
                 at_stamp: Some("08-24 15:21".into()),
             }))
         );
@@ -218,6 +229,7 @@ mod tests {
                 event: "stop".into(),
                 detail: String::new(),
                 at_epoch: None,
+                at_ms: None,
                 at_stamp: Some("08-24 15:21".into()),
             }))
         );
@@ -255,5 +267,18 @@ mod tests {
                 started_at: 1_700_000_000,
             })
         );
+    }
+
+    #[test]
+    fn reads_precise_notice_ordering_and_preserves_tilde_details() {
+        let Some(HostLine::Hook(notice)) = parse_host_line(
+            "HOOK ww 3 interrupt @1700000000 ~1700000000123 +08-24T15:21 ~workspace",
+        ) else {
+            panic!("hook notice");
+        };
+        assert_eq!(notice.at_epoch, Some(1_700_000_000));
+        assert_eq!(notice.at_ms, Some(1_700_000_000_123));
+        assert_eq!(notice.at_stamp.as_deref(), Some("08-24 15:21"));
+        assert_eq!(notice.detail, "~workspace");
     }
 }

@@ -20,6 +20,9 @@ pub struct Agent {
     pub detail: String,
     /// Plugin tick when status last changed (legacy; working elapsed uses started_at).
     pub status_since: u64,
+    /// Latest accepted status notice, for merging spool and recovered evidence.
+    pub notice_at_ms: Option<u64>,
+    pub status_source: &'static str,
     /// Host unix epoch when this working turn began.
     pub started_at: Option<u64>,
     /// Host unix epoch when the agent finished (done rows).
@@ -189,6 +192,10 @@ mod tests {
         assert!(!keep_cursor_agent(&argv(&["opencode", "run"])));
         assert!(keep_cursor_agent(&argv(&["reasonix"])));
         assert!(!keep_cursor_agent(&argv(&["reasonix", "doctor"])));
+        assert!(keep_cursor_agent(&argv(&["kimi"])));
+        assert!(keep_cursor_agent(&argv(&["kimi", "--continue"])));
+        assert!(!keep_cursor_agent(&argv(&["kimi", "-p", "hello"])));
+        assert!(!keep_cursor_agent(&argv(&["kimi", "doctor"])));
         assert!(keep_cursor_agent(&argv(&["pi", "--resume"])));
         assert!(!keep_cursor_agent(&argv(&["pi", "--print", "hello"])));
     }
@@ -203,6 +210,7 @@ mod tests {
         assert_eq!(tool_label("claude"), "CC");
         assert_eq!(tool_label("opencode"), "OC");
         assert_eq!(tool_label("reasonix"), "RX");
+        assert_eq!(tool_label("kimi"), "KC");
         assert_eq!(tool_label("pi"), "PI");
     }
 
@@ -223,6 +231,8 @@ mod tests {
             pane_title: String::new(),
             detail: String::new(),
             status_since: 0,
+            notice_at_ms: None,
+            status_source: "scan",
             started_at: None,
             finished_at: None,
             visited: false,

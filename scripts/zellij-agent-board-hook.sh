@@ -106,7 +106,8 @@ def is_daemon(args):
 
 SHELLS = {"zsh", "bash", "sh", "fish", "nu", "dash", "login"}
 AGENT_BINS = {
-    "codex", "agent", "claude", "codebuddy", "opencode", "pi", "reasonix", "node",
+    "codex", "agent", "claude", "codebuddy", "opencode", "pi", "reasonix",
+    "kimi", "node",
 }
 
 def is_agentish(args):
@@ -433,7 +434,7 @@ fi
 
 if command -v python3 >/dev/null 2>&1; then
   parsed=$(EVENT="$event" python3 -c '
-import json, os, sys
+import json, os, sys, time
 raw = sys.stdin.read()
 event = os.environ.get("EVENT", "")
 try:
@@ -481,11 +482,13 @@ print(event.replace("\n", " "))
 print(detail.replace("\n", " "))
 print(status.replace("\n", " "))
 print(note.replace("\n", " "))
+print(time.time_ns() // 1000000)
 ' <<<"$payload" || true)
   event=$(printf '%s\n' "$parsed" | sed -n '1p')
   detail=$(printf '%s\n' "$parsed" | sed -n '2p')
   status=$(printf '%s\n' "$parsed" | sed -n '3p')
   note=$(printf '%s\n' "$parsed" | sed -n '4p')
+  at_ms=$(printf '%s\n' "$parsed" | sed -n '5p')
 else
   [ -n "$event" ] || event=$(printf '%s' "$payload" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
   status=$(printf '%s' "$payload" | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
@@ -532,8 +535,14 @@ esac
 [ -n "$event" ] || exit 0
 
 epoch=$(date +%s)
+if [ -n "${at_ms:-}" ]; then
+  epoch=$((at_ms / 1000))
+fi
 stamp=$(date '+%m-%dT%H:%M')
 line="HOOK ${ZELLIJ_SESSION_NAME} ${ZELLIJ_PANE_ID} ${event} @${epoch} +${stamp}"
+if [ -n "${at_ms:-}" ]; then
+  line="${line} ~${at_ms}"
+fi
 if [ -n "${detail:-}" ]; then
   line="${line} ${detail}"
 fi

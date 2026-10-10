@@ -112,6 +112,10 @@ class HookTests(unittest.TestCase):
         self.assertTrue(self.started.exists())
         self.hook("Interrupt")
         self.assertIn(" interrupt ", self.spool.read_text())
+        words = self.spool.read_text().split()
+        seconds = next(int(word[1:]) for word in words if word.startswith('@'))
+        millis = next(int(word[1:]) for word in words if word.startswith('~'))
+        self.assertEqual(millis // 1000, seconds)
         self.assertFalse(self.started.exists())
         self.hook("UserPromptSubmit")
         self.assertTrue(self.started.exists())
@@ -249,6 +253,37 @@ class HookTests(unittest.TestCase):
         })
         self.assertIn(" permissionRequest ", self.spool.read_text())
         self.assertTrue(self.started.exists())
+
+    def test_kimi_payload_resolves_inherited_pane(self):
+        # Kimi Code hooks always carry cwd/session_id; the kimi TUI process
+        # holds the same Zellij ids as the hook's inherited environment.
+        work = self.root / "work"
+        work.mkdir()
+        self._fake_ps_lsof(
+            work,
+            "if [ \"$1\" = \"-ax\" ]; then\n"
+            "  printf '%s\\n' \"5150 kimi\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "printf '%s\\n' \"kimi ZELLIJ_PANE_ID=42 ZELLIJ_SESSION_NAME=hook-test\"\n",
+        )
+        self.hook("UserPromptSubmit", {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "01HZABC",
+            "client_type": "kimi_code_cli",
+            "cwd": str(work),
+            "prompt": "fix the board",
+        })
+        self.assertIn(" beforeSubmitPrompt ", self.spool.read_text())
+        self.assertIn("fix the board", self.spool.read_text())
+        self.assertTrue(self.started.exists())
+        self.hook("Interrupt", {
+            "hook_event_name": "Interrupt",
+            "session_id": "01HZABC",
+            "cwd": str(work),
+        })
+        self.assertIn(" interrupt ", self.spool.read_text())
+        self.assertFalse(self.started.exists())
 
     def test_outside_zellij_does_not_write_state(self):
         self.env.pop("ZELLIJ_PANE_ID")
@@ -668,6 +703,45 @@ class InstallTests(unittest.TestCase):
         installer.install_reasonix(adapter, protocols, str(hook))
         again = json.loads(settings.read_text())
         self.assertEqual(len(again["hooks"]["Stop"]), 1)
+
+    def test_kimi_appends_toml_hooks_idempotently(self):
+        import importlib.util
+        import tomllib
+
+        scripts = Path(__file__).resolve().parent
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        spec = importlib.util.spec_from_file_location(
+            "install_hooks", scripts / "install-hooks.py"
+        )
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        config = root / "config.toml"
+        config.write_text('default_model = "kimi-code/kimi-for-coding"\n')
+        hook = root / "zellij-agent-board-hook.sh"
+        adapter = {"settings": str(config), "protocol": "kimi"}
+        protocols = {
+            "kimi": {
+                "events": ["UserPromptSubmit", "Stop"],
+            }
+        }
+        installer.install_kimi(adapter, protocols, str(hook))
+        data = tomllib.loads(config.read_text())
+        self.assertEqual(data["default_model"], "kimi-code/kimi-for-coding")
+        self.assertEqual(
+            data["hooks"],
+            [
+                {"event": "UserPromptSubmit", "command": f"{hook} UserPromptSubmit"},
+                {"event": "Stop", "command": f"{hook} Stop"},
+            ],
+        )
+        installer.install_kimi(adapter, protocols, str(hook))
+        again = tomllib.loads(config.read_text())
+        self.assertEqual(len(again["hooks"]), 2)
 
 
 if __name__ == "__main__":

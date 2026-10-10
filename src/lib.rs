@@ -308,6 +308,21 @@ impl Board {
 
     fn apply_notices(&mut self, hooks: Vec<HookNotice>) {
         for notice in hooks {
+            let at_ms = notice
+                .at_ms
+                .or_else(|| notice.at_epoch.map(|t| t.saturating_mul(1000)));
+            if self
+                .agents
+                .iter()
+                .find(|agent| agent.id == notice.id)
+                .is_some_and(|agent| {
+                    at_ms
+                        .zip(agent.notice_at_ms)
+                        .is_some_and(|(incoming, seen)| incoming < seen)
+                })
+            {
+                continue;
+            }
             self.apply_hook_event(
                 &notice.id,
                 &notice.event,
@@ -315,6 +330,17 @@ impl Board {
                 notice.at_epoch,
                 notice.at_stamp.as_deref(),
             );
+            if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == notice.id) {
+                if Status::from_cursor_hook(&notice.event) == Some(agent.status) {
+                    agent.notice_at_ms = at_ms.or(agent.notice_at_ms);
+                    agent.status_source =
+                        if agent.tool == "codex" && notice.detail == "codex_rollout" {
+                            "rollout"
+                        } else {
+                            "hook"
+                        };
+                }
+            }
         }
     }
 
@@ -2032,6 +2058,8 @@ impl Board {
                     .unwrap_or_default(),
                 detail: prior.map(|agent| agent.detail.clone()).unwrap_or_default(),
                 status_since: prior.map(|agent| agent.status_since).unwrap_or(self.now),
+                notice_at_ms: prior.and_then(|agent| agent.notice_at_ms),
+                status_source: prior.map(|agent| agent.status_source).unwrap_or("scan"),
                 started_at: prior.and_then(|agent| agent.started_at),
                 finished_at: prior.and_then(|agent| agent.finished_at),
                 visited: prior.is_some_and(|agent| agent.visited),
@@ -2408,6 +2436,44 @@ SCAN lp 8 agent /Users/ww/.local/bin/agent --workspace /tmp/lp
         board.ingest_notice("HOOK wait-test 7 beforeSubmitPrompt @170\n");
         assert_eq!(board.agents[0].status, Status::Working);
         assert_eq!(board.agents[0].started_at, Some(170));
+    }
+
+    #[test]
+    fn recovered_codex_failure_survives_stale_spool_and_new_prompt_wins_same_second() {
+        let mut board = Board::default();
+        let scan = "META hooks=1 epoch=100\nSCAN recovered 42 codex codex\n";
+        board.ingest(&format!(
+            "{scan}HOOK recovered 42 preCompact @100 ~100100\n"
+        ));
+        board.ingest_notice("HOOK recovered 42 stopFailure @100 ~100200 codex_rollout\n");
+        assert_eq!(board.agents[0].status, Status::Failed);
+        assert_eq!(board.agents[0].status_source, "rollout");
+        assert!(!board.needs_clock());
+        // Both a live spool reload and a cached scan may still carry old mail.
+        board.ingest_notice("HOOK recovered 42 preCompact @100 ~100100\n");
+        board.ingest(&format!("{scan}HOOK recovered 42 postToolUse @99\n"));
+        assert_eq!(board.agents[0].status, Status::Failed);
+        assert!(!board.agents[0].unread_done());
+        board.ingest_notice("HOOK recovered 42 beforeSubmitPrompt @100 ~100300\n");
+        assert_eq!(board.agents[0].status, Status::Working);
+        assert_eq!(board.agents[0].status_source, "hook");
+        board.ingest_notice("HOOK recovered 42 stopFailure @100 ~100200 codex_rollout\n");
+        assert_eq!(board.agents[0].status, Status::Working);
+    }
+
+    #[test]
+    fn recovered_codex_abort_survives_old_hooks_and_reopen() {
+        let text = "META hooks=1 epoch=200\nSCAN recovered 42 codex codex\nHOOK recovered 42 preCompact @100\nHOOK recovered 42 interrupt @110 ~110100 codex_rollout\n";
+        let mut board = Board::default();
+        board.ingest(text);
+        board.ingest_notice("HOOK recovered 42 preCompact @100\n");
+        assert_eq!(board.agents[0].status, Status::Interrupted);
+        assert_eq!(board.agents[0].started_at, None);
+        assert_eq!(board.agents[0].finished_at, None);
+        assert_eq!(board.agents[0].status_source, "rollout");
+        let mut reopened = Board::default();
+        reopened.ingest(text);
+        assert_eq!(reopened.agents, board.agents);
     }
 
     #[test]

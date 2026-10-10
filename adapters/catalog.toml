@@ -126,6 +126,42 @@ session_before_compact = "preCompact"
 session_compact = "postCompact"
 agent_end = "stop"
 
+# Kimi Code CLI: Claude-shaped event names plus Interrupt, but hooks live in
+# ~/.kimi-code/config.toml as [[hooks]] {event, matcher, command, timeout}
+# entries (TOML, not JSON). Notification is skipped on purpose: it fires on
+# background task status changes, not permission/idle prompts, and the native
+# PermissionRequest already covers waiting.
+[protocol.kimi]
+install = "kimi"
+events = [
+  "SessionStart",
+  "SessionEnd",
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "Stop",
+  "StopFailure",
+  "Interrupt",
+  "PermissionRequest",
+  "PreCompact",
+  "PostCompact",
+]
+
+[protocol.kimi.map]
+SessionStart = "sessionStart"
+SessionEnd = "sessionEnd"
+UserPromptSubmit = "beforeSubmitPrompt"
+PreToolUse = "preToolUse"
+PostToolUse = "postToolUse"
+PostToolUseFailure = "postToolUseFailure"
+Stop = "stop"
+StopFailure = "stopFailure"
+Interrupt = "interrupt"
+PermissionRequest = "permissionRequest"
+PreCompact = "preCompact"
+PostCompact = "postCompact"
+
 # Reasonix (Go CLI): Claude-shaped event names, but settings.json is a flat
 # {command, match} list — not the Claude matcher/hooks tree. Native stdin
 # uses event/toolName/toolArgs/isInterrupt/notificationType.
@@ -309,6 +345,36 @@ skip = [
   "completion",
   "version",
   "help",
+]
+
+[[adapter]]
+id = "kimi"
+badge = "KC"
+color = "#8f9fd8"
+bins = ["kimi"]
+protocol = "kimi"
+settings = "~/.kimi-code/config.toml"
+hook_dir = "~/.kimi-code/hooks"
+skip = [
+  "--version",
+  "-V",
+  "--help",
+  "-h",
+  "--prompt",
+  "-p",
+  "login",
+  "acp",
+  "web",
+  "doctor",
+  "export",
+  "migrate",
+  "upgrade",
+  "update",
+  "provider",
+  "vis",
+  "install-desktop",
+  "install-app",
+  "server",
 ]
 
 [[adapter]]

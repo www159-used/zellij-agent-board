@@ -47,6 +47,7 @@ test-rust: ## Run Rust unit tests and board scenes
 
 test-hooks: ## Test hook scripts with isolated state
 	$(PYTHON) -B scripts/test-hooks.py
+	$(PYTHON) -B scripts/test-codex-state.py
 
 test-harness: ## Test the Zellij harness without launching Zellij
 	PYTHONPATH=e2e/zellij $(PYTHON) -B -m unittest discover -s e2e/zellij/harness -p 'test_*.py'

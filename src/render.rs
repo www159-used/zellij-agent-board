@@ -1394,6 +1394,8 @@ mod tests {
             pane_title: "Add retry".into(),
             detail: "Shell cargo test --lib".into(),
             status_since: 0,
+            notice_at_ms: None,
+            status_source: "scan",
             started_at: Some(1_700_000_000),
             finished_at: None,
             visited: false,

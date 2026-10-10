@@ -19,7 +19,7 @@ GUI 每行有 `v`、`ts`（UTC epoch 秒）、`event`、`visit_id`、`seq`、`el
 | jump_result | request_seq、pipe 返回结果 ok / exit_error / spawn_error |
 | close | 关闭原因 dismiss / io_error / panic、持续秒数 |
 
-状态快照只在内容变化时记录。目前每次记录完整状态，不做行级增量，方便独立理解快照。列表 ID 在访问内稳定，不写真实 session 名或 pane ID；不记录标题、目录、搜索文本、prompt。CLI 类型保留适配器工具名称。鼠标移动不逐点记录，但绘制后的相关状态变化仍可能形成快照。
+状态快照只在内容变化时记录。目前每次记录完整状态，不做行级增量，方便独立理解快照。列表 ID 在访问内稳定，不写真实 session 名或 pane ID；不记录标题、目录、搜索文本、prompt。CLI 类型保留适配器工具名称。Agent 的 `status_source` 为 `scan`、`hook` 或 `rollout`，区分默认发现、实际 hook 和 Codex 本地终止记录恢复；不采集线程 ID、错误正文或回合记录。鼠标移动不逐点记录，但绘制后的相关状态变化仍可能形成快照。
 
 键盘记录的是映射后的操作，例如 Up；暂不区分 j 和方向上键。输入事件保留动作事实，模式进入次数根据 state 的 false → true 推导，避免把输入中的字符误计为功能使用。
 

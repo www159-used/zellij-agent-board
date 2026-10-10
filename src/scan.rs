@@ -33,6 +33,8 @@ pub fn scan_host_text() -> String {
     let mut live_keys: HashSet<String> = HashSet::new();
     let mut unplaced: Vec<Unplaced> = Vec::new();
     let mut panes_by_session: BTreeMap<String, Option<HashSet<u32>>> = BTreeMap::new();
+    let mut pane_snapshots: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut codex_panes = Vec::new();
     for pid in &pids {
         let Some(args) = args_by_pid.get(pid) else {
             continue;
@@ -74,9 +76,12 @@ pub fn scan_host_text() -> String {
         if !session_is_in_scope(&session, session_prefix.as_deref()) {
             continue;
         }
-        let listed = panes_by_session
-            .entry(session.clone())
-            .or_insert_with(|| list_terminal_pane_ids(&session));
+        let listed = panes_by_session.entry(session.clone()).or_insert_with(|| {
+            let json = pane_snapshots
+                .entry(session.clone())
+                .or_insert_with(|| list_panes_json(&session));
+            terminal_pane_ids(&session, json.as_deref()?)
+        });
         if !pane_still_open(pane, listed.as_ref()) {
             continue;
         }
@@ -89,6 +94,26 @@ pub fn scan_host_text() -> String {
         }
         out.push_str(&format!("SCAN {session} {pane} {comm} {args}\n"));
         append_saved_lines(&mut out, &key);
+        if comm == "codex" {
+            if let Some(title) = pane_snapshots
+                .get(&session)
+                .and_then(|text| text.as_deref())
+                .and_then(|text| {
+                    let items: Vec<serde_json::Value> = serde_json::from_str(text).ok()?;
+                    items.into_iter().find(|item| {
+                        item["is_plugin"] == false && item["id"].as_u64() == Some(u64::from(pane))
+                    })?["title"]
+                        .as_str()
+                        .map(str::to_owned)
+                })
+            {
+                let resume = argv
+                    .windows(2)
+                    .find(|pair| pair[0] == "resume")
+                    .map(|pair| &pair[1]);
+                codex_panes.push(serde_json::json!({"session": session, "pane": pane, "title": title, "resume_thread": resume}));
+            }
+        }
     }
     recover_title_clobbered_panes(
         &mut out,
@@ -96,6 +121,7 @@ pub fn scan_host_text() -> String {
         &unplaced,
         session_prefix.as_deref(),
     );
+    append_codex_terminal_notices(&mut out, &codex_panes);
     // A failed match (0 live keys) must not wipe hook history.
     if !live_keys.is_empty() {
         prune_spool(&live_keys);
@@ -108,6 +134,65 @@ pub fn scan_host_text() -> String {
 struct Unplaced {
     pid: u32,
     bin: String,
+}
+
+/// Recover terminal failures/interruptions that Codex did not send as hooks.
+/// One bounded, read-only batch; Python/DB absence preserves ordinary hooks.
+fn append_codex_terminal_notices(out: &mut String, panes: &[serde_json::Value]) {
+    if panes.is_empty() {
+        return;
+    }
+    let home = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".codex"));
+    let python = [
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+        "/usr/bin/python3",
+    ]
+    .into_iter()
+    .find(|path| Path::new(path).is_file())
+    .unwrap_or("python3");
+    let mut command = Command::new(python);
+    command.args(["-c", include_str!("../scripts/codex-terminal-state.py")]);
+    command.arg(serde_json::json!({"home":home,"panes":panes}).to_string());
+    let Some(output) =
+        command_output_timeout(command, Duration::from_secs(2), "codex-terminal-state", "")
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let Ok(notices) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout) else {
+        return;
+    };
+    for notice in notices {
+        let Some(session) = notice["session"].as_str() else {
+            continue;
+        };
+        let Some(pane) = notice["pane"].as_u64() else {
+            continue;
+        };
+        let Some(at_ms) = notice["at_ms"].as_u64() else {
+            continue;
+        };
+        let Some(event) = notice["event"]
+            .as_str()
+            .filter(|event| matches!(*event, "stopFailure" | "interrupt"))
+        else {
+            continue;
+        };
+        if !panes.iter().any(|candidate| {
+            candidate["session"] == session && candidate["pane"].as_u64() == Some(pane)
+        }) {
+            continue;
+        }
+        out.push_str(&format!(
+            "HOOK {session} {pane} {event} @{} ~{at_ms} codex_rollout\n",
+            at_ms / 1000
+        ));
+    }
 }
 
 fn append_saved_lines(out: &mut String, key: &str) {
@@ -394,10 +479,9 @@ pub fn places_from_list_panes_json(session: &str, json: &str) -> Vec<(AgentId, P
 /// open) so a probe glitch cannot empty the board. `Some` is the live
 /// terminal pane ids; a process whose `ZELLIJ_PANE_ID` is missing is an
 /// orphan left behind after the pane closed.
-fn list_terminal_pane_ids(session: &str) -> Option<HashSet<u32>> {
-    let json = list_panes_json(session)?;
+fn terminal_pane_ids(session: &str, json: &str) -> Option<HashSet<u32>> {
     Some(
-        places_from_list_panes_json(session, &json)
+        places_from_list_panes_json(session, json)
             .into_iter()
             .map(|(id, _)| id.pane_id)
             .collect(),

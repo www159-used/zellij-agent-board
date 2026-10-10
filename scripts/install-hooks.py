@@ -156,6 +156,40 @@ def install_codex(adapter: dict, protocols: dict, command: str) -> None:
     ensure_codex_hooks_feature()
 
 
+def install_kimi(adapter: dict, protocols: dict, command: str) -> None:
+    # Kimi Code reads [[hooks]] entries from config.toml. TOML has no
+    # stdlib writer, so new entries are appended as text; existing ones are
+    # detected by parsing with tomllib first.
+    import tomllib
+
+    path = expand_home(adapter["settings"])
+    events = protocols[adapter["protocol"]]["events"]
+    installed = []
+    if path.exists():
+        data = tomllib.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise SystemExit("config.toml is not a table")
+        hooks = data.get("hooks") or []
+        if not isinstance(hooks, list):
+            raise SystemExit("config.toml hooks is not a list")
+        installed = [item.get("command") for item in hooks if isinstance(item, dict)]
+    blocks = []
+    for event in events:
+        wanted_cmd = f"{command} {event}"
+        if wanted_cmd in installed:
+            continue
+        blocks.append(f'[[hooks]]\nevent = "{event}"\ncommand = {json.dumps(wanted_cmd)}\n')
+    if blocks:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        needs_blank = path.exists() and path.stat().st_size > 0
+        with path.open("a") as handle:
+            if needs_blank:
+                handle.write("\n")
+            handle.write("\n".join(blocks))
+    print(f"installed {command}")
+    print(f"hooks: {path}")
+
+
 def install_reasonix(adapter: dict, protocols: dict, command: str) -> None:
     # Flat {command, match} entries. Claude's matcher/hooks tree is ignored.
     path = expand_home(adapter["settings"])
@@ -218,6 +252,8 @@ def main(argv: list[str]) -> None:
             install_opencode(adapter, protocols, dest_dir)
         elif kind == "reasonix":
             install_reasonix(adapter, protocols, command)
+        elif kind == "kimi":
+            install_kimi(adapter, protocols, command)
         else:
             raise SystemExit(f"unknown install {kind} for {adapter['id']}")
 

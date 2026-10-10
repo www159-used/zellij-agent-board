@@ -4,7 +4,7 @@
 
 Zellij 浮动看板：列出正在运行的 coding agent，通过 hook 更新状态，支持搜索及跨会话跳转到对应 pane。
 
-通过声明式适配目录支持 Cursor、CodeBuddy、Claude Code、OpenCode、Codex、Reasonix 和 Pi。进程扫描决定 Agent 的增删，hook 只更新已有 Agent。后续工作见 [ROADMAP.md](../../ROADMAP.md)。
+通过声明式适配目录支持 Cursor、CodeBuddy、Claude Code、OpenCode、Codex、Reasonix、Kimi Code 和 Pi。进程扫描决定 Agent 的增删，hook 只更新已有 Agent。后续工作见 [ROADMAP.md](../../ROADMAP.md)。
 
 本项目负责看板；独立的 `zellij-agent` 项目负责浮动 agent 启动器。
 
@@ -21,7 +21,7 @@ make install-hooks
 
 `make install` 使用包内二进制；在源码目录中运行时则先构建。两者都安装到 `~/.config/zellij/plugins/`。WASM 路径可用 `ZELLIJ_AGENT_BOARD_PLUGIN_PATH` 覆盖，TUI 安装在旁边。运行时 TUI 路径可用 `ZELLIJ_AGENT_BOARD_TUI` 或插件配置里的 `tui` 覆盖。
 
-`make install-hooks` 按 `adapters/catalog.toml` 注册 hook（Cursor、CodeBuddy、Claude Code、OpenCode、Codex、Reasonix、Pi）。用 `make install-hooks ADAPTER=codex` 可只装一个适配器，默认 `ADAPTER=all` 安装全部。新的 cc 系 CLI 丢一份 TOML 到 `~/.config/zellij-agent-board/adapters/` 即可。
+`make install-hooks` 按 `adapters/catalog.toml` 注册 hook（Cursor、CodeBuddy、Claude Code、OpenCode、Codex、Reasonix、Kimi Code、Pi）。用 `make install-hooks ADAPTER=codex` 可只装一个适配器，默认 `ADAPTER=all` 安装全部。新的 cc 系 CLI 丢一份 TOML 到 `~/.config/zellij-agent-board/adapters/` 即可。
 
 ## 快捷键
 
@@ -70,7 +70,9 @@ TUI 首先读取扫描缓存，随后约每两秒请求一次后台 reconcile。
 
 标题、上次扫描及 seen/started 标记，按优先级存放在 `$ZAB_STATE_DIR`、`$XDG_CACHE_HOME/zellij-agent-board` 或 `~/.cache/zellij-agent-board`。本次打开前的焦点直接传给对应的 TUI。Hook 将最近一条通知写入 `$TMPDIR/zellij-agent-board-spool`，并单独维护本轮开始时间，不启动 WASM 插件。未读完成状态可以发出终端通知。
 
-Codex `Interrupt`、Pi `agent_settled` 且 `aborted`，以及 Cursor `stop`/`afterAgentResponse` 且 `status=aborted` 时显示为 `■ stopped`。Cursor `status=error`、Claude/CodeBuddy `StopFailure`、OpenCode `session.error`、Pi `agent_settled` 且 `error` 显示为 `✗ failed`。两者都清除本轮计时，不标记为完成，也不发送完成通知。授权提示（`PermissionRequest`、CodeBuddy `Notification` 的 `permission_prompt`、OpenCode `permission.asked`）显示为 `● waiting`，并保留本轮起点，以便恢复后继续计时。Claude/CodeBuddy `Notification` 的 `idle_prompt` 显示为 `◑ idle-wait`，清回合且不发完成通知。升级后对所用 CLI 重新运行 `make install-hooks`，并重启这些会话。安装这些 hook 之前发出的通知无法追溯恢复。
+Codex `Interrupt`、Kimi Code `Interrupt`、Pi `agent_settled` 且 `aborted`，以及 Cursor `stop`/`afterAgentResponse` 且 `status=aborted` 时显示为 `■ stopped`。Cursor `status=error`、Claude/CodeBuddy `StopFailure`、Kimi Code `StopFailure`、OpenCode `session.error`、Pi `agent_settled` 且 `error` 显示为 `✗ failed`。两者都清除本轮计时，不标记为完成，也不发送完成通知。授权提示（`PermissionRequest`、CodeBuddy `Notification` 的 `permission_prompt`、OpenCode `permission.asked`）显示为 `● waiting`，并保留本轮起点，以便恢复后继续计时。Claude/CodeBuddy `Notification` 的 `idle_prompt` 显示为 `◑ idle-wait`，清回合且不发完成通知。升级后对所用 CLI 重新运行 `make install-hooks`，并重启这些会话。其他缺失的通知无法追溯恢复。
+
+Codex 扫描还会从本地回合记录恢复漏报的中断（`■ stopped`）和终止错误（`✗ failed`）。只处理实时 pane 标题能唯一匹配到当前线程的情况；标题重复或身份不明确时不猜测。新回合开始会使旧终止记录失效，通知时间校验防止旧 spool 把状态改回 Working / Compact。读取通过 Python 和只读 SQLite 完成，仅检查有大小限制的记录尾部，不请求 API、不输出对话正文。Codex 记录格式不是稳定接口；缺少依赖、数据库不可用或格式未知时保留普通 hook 行为。
 
 ## 开发
 

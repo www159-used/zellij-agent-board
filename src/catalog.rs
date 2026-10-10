@@ -380,6 +380,7 @@ mod tests {
                 "opencode",
                 "codex",
                 "reasonix",
+                "kimi",
                 "pi"
             ]
         );
@@ -389,6 +390,7 @@ mod tests {
         assert!(catalog.wants_bin("opencode"));
         assert!(catalog.wants_bin("codex"));
         assert!(catalog.wants_bin("reasonix"));
+        assert!(catalog.wants_bin("kimi"));
         assert!(catalog.wants_bin("pi"));
         assert!(!catalog.wants_bin("vim"));
     }
@@ -461,6 +463,22 @@ mod tests {
             Some("reasonix")
         );
         assert_eq!(
+            catalog
+                .adapter_for_bin("kimi")
+                .map(|adapter| adapter.protocol.as_str()),
+            Some("kimi")
+        );
+        assert_eq!(
+            catalog.protocol("kimi").map(|p| p.install.as_str()),
+            Some("kimi")
+        );
+        assert!(catalog.protocol("kimi").is_some_and(|protocol| {
+            ["Interrupt", "StopFailure", "PostCompact"]
+                .into_iter()
+                .all(|event| protocol.events.iter().any(|item| item == event))
+                && !protocol.events.iter().any(|event| event == "Notification")
+        }));
+        assert_eq!(
             catalog.protocol("reasonix").map(|p| p.install.as_str()),
             Some("reasonix")
         );
@@ -498,6 +516,10 @@ mod tests {
             ("RX".into(), Some("#c4b08a".into()))
         );
         assert_eq!(
+            catalog.badge_for("kimi"),
+            ("KC".into(), Some("#8f9fd8".into()))
+        );
+        assert_eq!(
             catalog.badge_for("pi"),
             ("PI".into(), Some("#e09878".into()))
         );
@@ -533,6 +555,12 @@ mod tests {
         assert!(keep_process(&argv(&["reasonix", "--continue"])));
         assert!(!keep_process(&argv(&["reasonix", "run", "hello"])));
         assert!(!keep_process(&argv(&["reasonix", "-p", "hello"])));
+        assert!(keep_process(&argv(&["kimi"])));
+        assert!(keep_process(&argv(&["kimi", "--continue"])));
+        assert!(keep_process(&argv(&["kimi", "--yolo"])));
+        assert!(!keep_process(&argv(&["kimi", "-p", "hello"])));
+        assert!(!keep_process(&argv(&["kimi", "doctor"])));
+        assert!(!keep_process(&argv(&["kimi", "web"])));
         assert!(keep_process(&argv(&["pi"])));
         assert!(keep_process(&argv(&["pi", "--continue"])));
         assert!(keep_process(&argv(&["pi", "-c"])));
@@ -650,6 +678,9 @@ hook_dir = "~/.mycli/hooks"
         assert!(paths
             .iter()
             .any(|path| path.ends_with(".reasonix/settings.json")));
+        assert!(paths
+            .iter()
+            .any(|path| path.ends_with(".kimi-code/config.toml")));
         assert!(paths
             .iter()
             .any(|path| path.ends_with(".pi/agent/extensions/zellij-agent-board.js")));
