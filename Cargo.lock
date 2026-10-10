@@ -4016,7 +4016,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-agent-board"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "bottom",
  "chrono",
