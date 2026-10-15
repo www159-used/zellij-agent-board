@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Catalog adapter hook → zellij-agent-board. Always exit 0. Only report inside a Zellij pane.
 set -u
-trap 'rm -f "${spool_tmp:-}" "${started_tmp:-}"; exit 0' EXIT
+trap 'rm -f "${spool_tmp:-}" "${started_tmp:-}" "${notification_tmp:-}"; exit 0' EXIT
 
 [ -n "${ZELLIJ_PANE_ID:-}" ] || exit 0
 [ -n "${ZELLIJ_SESSION_NAME:-}" ] || exit 0
@@ -150,6 +150,32 @@ case "$event" in
     ;;
   stop|afterAgentResponse|sessionEnd|interrupt|stopFailure|idleWait)
     rm -f "$started"
+    ;;
+esac
+
+# Append attention notices independently of the per-pane latest status.
+# Keep each notice until the user explicitly acknowledges it in the inbox.
+# Cursor emits both stop and afterAgentResponse; only stop queues completion.
+case "$event" in
+  stop|permissionRequest|stopFailure)
+    if [ -n "${ZAB_STATE_DIR:-}" ]; then
+      notification_root="$ZAB_STATE_DIR"
+    elif [ -n "${XDG_DATA_HOME:-}" ]; then
+      notification_root="$XDG_DATA_HOME/zellij-agent-board"
+    elif [ -n "${HOME:-}" ]; then
+      notification_root="$HOME/.local/share/zellij-agent-board"
+    else
+      notification_root="${TMPDIR:-/tmp}/zellij-agent-board"
+    fi
+    notification_dir="$notification_root/notifications"
+    (
+      umask 077
+      mkdir -p "$notification_dir/.pending" || exit 0
+      notification_tmp=$(mktemp "$notification_dir/.pending/notice.XXXXXXXXXXXX") || exit 0
+      trap 'rm -f "${notification_tmp:-}"' EXIT
+      printf '%s\n' "$line" >"$notification_tmp" &&
+        mv "$notification_tmp" "$notification_dir/$(basename "$notification_tmp")"
+    )
     ;;
 esac
 

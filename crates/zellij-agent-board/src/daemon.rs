@@ -30,6 +30,7 @@ pub const SCAN_EVERY: Duration = Duration::from_secs(2);
 
 pub enum Request {
     Snapshot,
+    Acknowledge { notification_id: String },
     Refresh { home: String },
     Sleep { id: AgentId },
     Resume { id: AgentId },
@@ -47,6 +48,10 @@ pub fn request_at(dir: &Path, request: Request) -> io::Result<Option<Snapshot>> 
 
 pub fn snapshot() -> io::Result<Snapshot> {
     request_at(&data_dir(), Request::Snapshot)?.ok_or_else(|| io::Error::other("missing snapshot"))
+}
+
+pub fn acknowledge(notification_id: String) -> io::Result<()> {
+    request_at(&data_dir(), Request::Acknowledge { notification_id }).map(|_| ())
 }
 
 pub fn refresh(home: String) -> io::Result<()> {
@@ -130,7 +135,7 @@ pub fn serve_at(dir: &Path, legacy: &Path) -> io::Result<()> {
     write_snapshot(&endpoint(dir), socket.as_os_str().as_encoded_bytes())?;
     let mut worker: Option<thread::JoinHandle<ScanResult>> = None;
     let mut last_refresh: Option<Instant> = None;
-    let result = pump(&http, &db, &mut worker, &mut last_refresh);
+    let result = pump(&http, &db, dir, &mut worker, &mut last_refresh);
     drop(http);
     // An accepted refresh still owes the caller a committed scan. A panicked
     // worker and a failing loop are already reported by `result`.
@@ -146,6 +151,7 @@ pub fn serve_at(dir: &Path, legacy: &Path) -> io::Result<()> {
 fn pump(
     http: &crate::daemon_http::Server,
     db: &HostDatabase,
+    dir: &Path,
     worker: &mut Option<thread::JoinHandle<ScanResult>>,
     last_refresh: &mut Option<Instant>,
 ) -> io::Result<()> {
@@ -166,7 +172,13 @@ fn pump(
                 }
                 let mut stop = false;
                 let response = match call.request {
-                    Request::Snapshot => db.snapshot().map(Some),
+                    Request::Snapshot => db.snapshot().and_then(|mut snapshot| {
+                        snapshot.notifications = crate::notifications::pending(dir)?;
+                        Ok(Some(snapshot))
+                    }),
+                    Request::Acknowledge { notification_id } => {
+                        crate::notifications::acknowledge(dir, &notification_id).map(|_| None)
+                    }
                     Request::Refresh { home } => {
                         if worker.is_none()
                             && last_refresh.is_none_or(|last| last.elapsed() >= SCAN_EVERY)

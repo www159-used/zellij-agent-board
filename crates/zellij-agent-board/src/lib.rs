@@ -14,7 +14,9 @@ mod database;
 mod discover;
 mod float_size;
 mod floating_state;
+mod notifications;
 mod protocol;
+pub use notifications::Notification;
 #[cfg(not(target_arch = "wasm32"))]
 mod reconcile;
 mod render;
@@ -193,6 +195,10 @@ struct PickerState {
 
 #[derive(Debug, Default)]
 pub struct Board {
+    pub notifications: Vec<Notification>,
+    pub inbox_visible: bool,
+    pub inbox_selected: usize,
+    pub inbox_error: Option<String>,
     pub agents: Vec<Agent>,
     pub selected: usize,
     /// Pointer preview. Keyboard and the wheel own [`selected`]; hover
