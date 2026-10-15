@@ -1,0 +1,33 @@
+schema: spec-driven
+
+context: |
+  zellij-agent-board is a Rust workspace: a Zellij WASM bridge, host board-tui,
+  a local daemon, scene tests, and real-Zellij lifecycle tests.
+  Read CONTEXT.md and CONTEXT-MAP.md for project language and ownership.
+  An Agent is identified by (session, pane); Scan is the source of existence.
+  Hooks update status and never create live Agents. The latest-hook spool is
+  a status projection, not an event log. Only the daemon opens redb.
+  Slow Zellij scans must not block interactive snapshot requests.
+  See docs/design/host-state.md for persistence and failure behavior.
+  Write discussion and design prose in Chinese. Keep OpenSpec structural
+  headings and SHALL/MUST keywords in English for CLI validation.
+  Separate observed behavior, user-confirmed requirements, draft proposals,
+  and open questions. Existing prototype code does not approve a design.
+  Notifications are currently in design exploration only. The user explicitly
+  deferred deciding what counts as handled; do not implement this change yet.
+
+rules:
+  proposal:
+    - State the problem and confirmed scope before listing proposed behavior.
+    - Identify unresolved product decisions and link related prototypes.
+  specs:
+    - Give each requirement observable WHEN/THEN scenarios.
+    - Keep unresolved policy choices out of normative requirements.
+    - Record current behavior in main specs; proposed behavior stays in change specs.
+  design:
+    - Compare queue granularity, attention delivery, and handling semantics before storage.
+    - Explain identity, ordering, duplicates, lifecycle, durability, and failure recovery.
+    - Label recommendations as proposals until the user accepts them.
+  tasks:
+    - Do not create implementation tasks while critical product decisions remain open.
+    - Map each implementation task and meaningful validation to an accepted requirement.

@@ -73,6 +73,8 @@ Codex `Interrupt` and Cursor `stop`/`afterAgentResponse` with `status=aborted` a
 
 ## Develop
 
+New behavior is designed through [OpenSpec](openspec/README.md). Current notification-queue work is design exploration; the prototype is not an accepted specification.
+
 ```bash
 make help
 make check
