@@ -104,7 +104,9 @@ pub fn render_board(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) 
     buffer.set_style(area, Style::default().fg(theme().text).bg(theme().surface));
     let (content, footer) = content_and_footer(area);
 
-    if board.help_visible {
+    if board.inbox_visible {
+        render_inbox(board, content, buffer);
+    } else if board.help_visible {
         render_help(content, buffer);
     } else {
         render_list(board, home, content, buffer);
@@ -135,6 +137,60 @@ fn clamp_dim(value: usize, unlimited: u16) -> u16 {
     } else {
         value.min(128) as u16
     }
+}
+
+fn render_inbox(board: &Board, area: Rect, buffer: &mut Buffer) {
+    let block = Block::default()
+        .title(format!(" notifications ({}) ", board.notifications.len()))
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    block.render(area, buffer);
+    let [body, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+    if board.notifications.is_empty() {
+        Paragraph::new("No pending notifications").render(body, buffer);
+    } else {
+        // One line per notice keeps navigation usable in small panes.
+        let rows = usize::from(body.height).max(1);
+        let start = board.inbox_selected / rows * rows;
+        let lines: Vec<Line<'static>> = board
+            .notifications
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(rows)
+            .map(|(index, notice)| {
+                let selected = index == board.inbox_selected;
+                let line = format!(
+                    "{} {} {} {} pane {}  {}",
+                    if selected { "›" } else { " " },
+                    notice.stamp,
+                    notice.label(),
+                    notice.session,
+                    notice.pane_id,
+                    notice.detail
+                );
+                Line::styled(
+                    line,
+                    if selected {
+                        Style::default()
+                            .fg(theme().text)
+                            .bg(theme().mask)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme().text)
+                    },
+                )
+            })
+            .collect();
+        Paragraph::new(lines).render(body, buffer);
+    }
+    let message = board
+        .inbox_error
+        .as_deref()
+        .unwrap_or("Kept until you acknowledge with x");
+    Paragraph::new(message)
+        .style(Style::default().fg(theme().focus))
+        .render(status, buffer);
 }
 
 fn render_help(area: Rect, buffer: &mut Buffer) {
@@ -170,6 +226,7 @@ fn render_help(area: Rect, buffer: &mut Buffer) {
             key("wheel  C-e  C-y"),
             Span::raw("scroll, cursor stays"),
         ]),
+        Line::from(vec![key("i"), Span::raw("notifications; x acknowledges")]),
         Line::from(vec![key("s"), Span::raw("flash tips")]),
         Line::from(vec![key("/  n  N"), Span::raw("find / next / prev")]),
         Line::from(vec![key("p  Tab"), Span::raw("picker / tip jump")]),
@@ -190,7 +247,7 @@ fn render_list(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
         return;
     }
     if board.agents.is_empty() {
-        Paragraph::new("no cursor agents")
+        Paragraph::new(vec![header_line(board), Line::from("no cursor agents")])
             .style(Style::default().fg(theme().muted))
             .render(area, buffer);
         return;
@@ -652,7 +709,18 @@ fn render_picker_results(board: &Board, home: &str, area: Rect, buffer: &mut Buf
 }
 
 fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
-    let line = if board.help_visible {
+    let line = if board.inbox_visible {
+        footer_hints(
+            area.width,
+            None,
+            &[
+                ("j/k", "move"),
+                ("x", "ack"),
+                ("Enter", "go"),
+                ("Esc", "back"),
+            ],
+        )
+    } else if board.help_visible {
         footer_hints(area.width, None, &[("q", "close"), ("?", "close")])
     } else if board.is_picking() {
         Line::from(vec![
@@ -727,6 +795,7 @@ fn render_footer(board: &Board, home: &str, area: Rect, buffer: &mut Buffer) {
                 ("/", "find"),
                 ("q", "close"),
                 ("?", "more"),
+                ("i", "inbox"),
             ],
         )
     };
@@ -791,7 +860,7 @@ fn header_line(board: &Board) -> Line<'static> {
     push_count(&mut parts, board, Status::Sleeping, "sleeping");
     push_count(&mut parts, board, Status::Unknown, "unknown");
 
-    if parts.is_empty() {
+    if parts.is_empty() && board.notifications.is_empty() {
         return Line::from(Span::styled(
             "no status yet",
             Style::default().fg(theme().mask_fg),
@@ -799,6 +868,14 @@ fn header_line(board: &Board) -> Line<'static> {
     }
 
     let mut spans = Vec::new();
+    if !board.notifications.is_empty() {
+        spans.push(Span::styled(
+            format!("{} pending [i]  ", board.notifications.len()),
+            Style::default()
+                .fg(theme().focus)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     for (i, (n, label, status)) in parts.into_iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" · ", Style::default().fg(theme().mask_fg)));
@@ -1540,6 +1617,32 @@ mod tests {
         assert!(home.contains("api"));
         let away = painted(&board, 16, 110, "lp");
         assert!(away.contains("ww"));
+    }
+
+    #[test]
+    fn notification_badge_survives_empty_scan_and_inbox_scrolls_to_selection() {
+        let mut board = Board {
+            notifications: (0..30)
+                .map(|n| crate::Notification {
+                    id: format!("notice.{n}"),
+                    session: "home".into(),
+                    pane_id: n,
+                    event: "stop".into(),
+                    detail: format!("result-{n}"),
+                    at_epoch: 42,
+                    stamp: String::new(),
+                })
+                .collect(),
+            ..Board::default()
+        };
+        assert!(painted(&board, 10, 80, "").contains("30 pending [i]"));
+        board.inbox_visible = true;
+        board.inbox_selected = 29;
+        for (rows, cols) in [(5, 40), (12, 80), (25, 120)] {
+            let text = painted(&board, rows, cols, "");
+            assert!(text.contains("result-29"), "{text}");
+            assert_eq!(board.notifications.len(), 30);
+        }
     }
 
     #[test]

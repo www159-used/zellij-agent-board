@@ -476,6 +476,19 @@ impl App {
 
     fn handle_key(&mut self, event: KeyEvent) -> Loop {
         self.launch_focus = None;
+        if self.board.inbox_visible {
+            return self.handle_inbox_key(event);
+        }
+        if event.code == KeyCode::Char('i')
+            && event.modifiers.is_empty()
+            && !self.board.is_hinting()
+            && !self.board.is_searching()
+            && !self.board.is_picking()
+            && !self.board.help_visible
+        {
+            self.board.inbox_visible = true;
+            return Loop::Changed;
+        }
         // C-e / C-y: same move-together scroll as the wheel (spotlight holds
         // its screen line; the list flows under it).
         if let Some(delta) = view_scroll_delta(event) {
@@ -525,6 +538,65 @@ impl App {
         }
     }
 
+    fn handle_inbox_key(&mut self, event: KeyEvent) -> Loop {
+        if event.modifiers != KeyModifiers::NONE && event.modifiers != KeyModifiers::SHIFT {
+            return Loop::Ignored;
+        }
+        let count = self.board.notifications.len();
+        match event.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i') => {
+                self.board.inbox_visible = false;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.board.inbox_selected = self.board.inbox_selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.board.inbox_selected =
+                    (self.board.inbox_selected + 1).min(count.saturating_sub(1));
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.board.inbox_selected = 0,
+            KeyCode::End | KeyCode::Char('G') => {
+                self.board.inbox_selected = count.saturating_sub(1)
+            }
+            KeyCode::Char('x') => {
+                if let Some(notice) = self.board.notifications.get(self.board.inbox_selected) {
+                    match daemon::acknowledge(notice.id.clone()) {
+                        Ok(()) => {
+                            self.board.notifications.remove(self.board.inbox_selected);
+                            self.board.inbox_selected = self
+                                .board
+                                .inbox_selected
+                                .min(self.board.notifications.len().saturating_sub(1));
+                            self.board.inbox_error = None;
+                        }
+                        Err(error) => {
+                            self.board.inbox_error = Some(format!("Could not acknowledge: {error}"))
+                        }
+                    }
+                }
+            }
+            KeyCode::Enter | KeyCode::Char('e') => {
+                if let Some(notice) = self.board.notifications.get(self.board.inbox_selected) {
+                    // Visiting does not acknowledge. The user may still need to act.
+                    let (session, pane) = (notice.session.clone(), notice.pane_id);
+                    if self.board.select_agent(&AgentId {
+                        session: session.clone(),
+                        pane_id: pane,
+                    }) {
+                        self.board.inbox_error = None;
+                        self.dispatch_jump(&session, pane, "notification");
+                    } else {
+                        self.board.inbox_error = Some(
+                            "Agent is no longer on the board; x acknowledges this notice".into(),
+                        );
+                    }
+                }
+            }
+            _ => return Loop::Ignored,
+        }
+        Loop::Changed
+    }
+
     fn dispatch_jump(&mut self, session: &str, pane_id: u32, via: &str) {
         let request_seq = self.usage.jump(session, pane_id);
         let previous = load_last_jump(&self.jump_history);
@@ -564,6 +636,17 @@ impl App {
     /// that row, the wheel scrolls the view. Hover never steals `selected`.
     /// Right button is ignored.
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Loop {
+        if self.board.inbox_visible {
+            return match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.handle_inbox_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+                }
+                MouseEventKind::ScrollDown => {
+                    self.handle_inbox_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                }
+                _ => Loop::Ignored,
+            };
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // A press commits to a row, so the launch hint is spent.
@@ -689,11 +772,32 @@ impl App {
         let Ok(snapshot) = daemon::snapshot() else {
             return false;
         };
+        // Notifications change independently of scan revision and survive scans.
+        let mut dirty = self.board.notifications != snapshot.notifications;
+        if dirty {
+            let selected_id = self
+                .board
+                .notifications
+                .get(self.board.inbox_selected)
+                .map(|notice| notice.id.clone());
+            self.board.notifications = snapshot.notifications;
+            self.board.inbox_selected = selected_id
+                .and_then(|id| {
+                    self.board
+                        .notifications
+                        .iter()
+                        .position(|notice| notice.id == id)
+                })
+                .unwrap_or(
+                    self.board
+                        .inbox_selected
+                        .min(self.board.notifications.len().saturating_sub(1)),
+                );
+        }
         if snapshot.revision == self.revision {
-            return false;
+            return dirty;
         }
         self.revision = snapshot.revision;
-        let mut dirty = false;
         if let Some(scan) = snapshot.scan {
             dirty |= self.board.ingest(&scan);
         }
@@ -792,6 +896,44 @@ fn request_refresh(home: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod process_tests {
+
+    #[test]
+    fn inbox_navigation_and_visiting_keep_notices_until_acknowledged() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(&dir.path().join("usage.jsonl"));
+        app.board.notifications = (0..2)
+            .map(|n| zellij_agent_board::Notification {
+                id: format!("notice.{n}"),
+                session: "private".into(),
+                pane_id: 3,
+                event: "stop".into(),
+                detail: String::new(),
+                at_epoch: 42,
+                stamp: String::new(),
+            })
+            .collect();
+        app.jump_sender = |session, pane, via| {
+            assert_eq!((session, pane, via), ("private", 3, "notification"));
+            "ok"
+        };
+        for code in [
+            KeyCode::Char('i'),
+            KeyCode::Char('j'),
+            KeyCode::Enter,
+            KeyCode::Esc,
+        ] {
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+        assert!(!app.board.inbox_visible);
+        assert_eq!(app.board.inbox_selected, 1);
+        assert_eq!(app.board.notifications.len(), 2);
+        // The inbox key remains ordinary text inside a search.
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        assert!(!app.board.inbox_visible);
+        assert_eq!(app.board.search_query(), "i");
+    }
 
     #[test]
     fn picker_wheel_scrolls_but_navigation_keys_keep_the_old_mapping() {

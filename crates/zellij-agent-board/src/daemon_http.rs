@@ -130,6 +130,7 @@ async fn serve(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Route {
     Snapshot,
+    Acknowledge,
     Refresh,
     Sleep,
     Resume,
@@ -137,8 +138,9 @@ enum Route {
 }
 
 impl Route {
-    const ALL: [Route; 5] = [
+    const ALL: [Route; 6] = [
         Route::Snapshot,
+        Route::Acknowledge,
         Route::Refresh,
         Route::Sleep,
         Route::Resume,
@@ -148,6 +150,7 @@ impl Route {
     fn path(self) -> &'static str {
         match self {
             Route::Snapshot => "/v1/snapshot",
+            Route::Acknowledge => "/v1/notifications/ack",
             Route::Refresh => "/v1/refresh",
             Route::Sleep => "/v1/sleep",
             Route::Resume => "/v1/resume",
@@ -158,18 +161,31 @@ impl Route {
     fn method(self) -> Method {
         match self {
             Route::Snapshot => Method::GET,
-            Route::Refresh | Route::Sleep | Route::Resume | Route::Shutdown => Method::POST,
+            Route::Acknowledge
+            | Route::Refresh
+            | Route::Sleep
+            | Route::Resume
+            | Route::Shutdown => Method::POST,
         }
     }
 
     /// Routes that take a JSON body; the rest reject any body.
     fn wants_json_body(self) -> bool {
-        matches!(self, Route::Refresh | Route::Sleep | Route::Resume)
+        matches!(
+            self,
+            Route::Acknowledge | Route::Refresh | Route::Sleep | Route::Resume
+        )
     }
 
     fn from_path(path: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|route| route.path() == path)
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcknowledgeBody {
+    notification_id: String,
 }
 
 #[derive(Deserialize)]
@@ -231,6 +247,12 @@ async fn handle(request: HttpRequest<Incoming>, send: SyncSender<Call>) -> HttpR
     }
     let command = match route {
         Route::Snapshot => Request::Snapshot,
+        Route::Acknowledge => match serde_json::from_slice::<AcknowledgeBody>(&body) {
+            Ok(body) => Request::Acknowledge {
+                notification_id: body.notification_id,
+            },
+            Err(_) => return error(StatusCode::BAD_REQUEST, "expected notification_id string"),
+        },
         Route::Shutdown => Request::Shutdown,
         Route::Refresh => match serde_json::from_slice::<RefreshBody>(&body) {
             Ok(body) => Request::Refresh { home: body.home },
@@ -345,6 +367,10 @@ impl Drop for Connection {
 async fn request(socket: &str, command: Request) -> io::Result<Option<Snapshot>> {
     let (route, body) = match command {
         Request::Snapshot => (Route::Snapshot, Vec::new()),
+        Request::Acknowledge { notification_id } => (
+            Route::Acknowledge,
+            serde_json::to_vec(&serde_json::json!({"notification_id": notification_id}))?,
+        ),
         Request::Refresh { home } => (
             Route::Refresh,
             serde_json::to_vec(&serde_json::json!({"home": home}))?,

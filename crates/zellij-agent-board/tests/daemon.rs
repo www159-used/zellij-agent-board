@@ -212,3 +212,69 @@ fn incomplete_http_headers_and_bodies_do_not_block_other_clients() {
     request_at(dir.path(), Request::Shutdown).unwrap();
     wait_until(|| !dir.path().join("daemon.endpoint").exists());
 }
+
+#[test]
+fn notifications_survive_closed_board_and_daemon_restart_until_explicit_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let hook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/zellij-agent-board-hook.sh");
+    for event in ["stop", "beforeSubmitPrompt", "stopFailure", "preToolUse"] {
+        assert!(Command::new("bash")
+            .arg(&hook)
+            .arg(event)
+            .env("ZAB_STATE_DIR", dir.path())
+            .env("TMPDIR", dir.path())
+            .env("ZELLIJ_SESSION_NAME", "notification-test")
+            .env("ZELLIJ_PANE_ID", "42")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+    }
+    let mut server = Server::start(dir.path());
+    wait_until(|| request_at(dir.path(), Request::Snapshot).is_ok());
+    let first = request_at(dir.path(), Request::Snapshot).unwrap().unwrap();
+    assert_eq!(first.notifications.len(), 2);
+    assert_eq!(first.notifications[0].label(), "done");
+    assert_eq!(first.notifications[1].label(), "failed");
+    assert_eq!(
+        request_at(dir.path(), Request::Snapshot)
+            .unwrap()
+            .unwrap()
+            .notifications,
+        first.notifications
+    );
+    request_at(
+        dir.path(),
+        Request::Acknowledge {
+            notification_id: first.notifications[0].id.clone(),
+        },
+    )
+    .unwrap();
+    // An acknowledgement is per notice, and retry does not eat the next item.
+    request_at(
+        dir.path(),
+        Request::Acknowledge {
+            notification_id: first.notifications[0].id.clone(),
+        },
+    )
+    .unwrap();
+    assert!(request_at(
+        dir.path(),
+        Request::Acknowledge {
+            notification_id: "notice.../../scan".into()
+        }
+    )
+    .is_err());
+    request_at(dir.path(), Request::Shutdown).unwrap();
+    wait_until(|| server.0.try_wait().unwrap().is_some());
+    let mut restarted = Server::start(dir.path());
+    wait_until(|| request_at(dir.path(), Request::Snapshot).is_ok());
+    let after = request_at(dir.path(), Request::Snapshot).unwrap().unwrap();
+    assert_eq!(after.notifications, first.notifications[1..]);
+    assert_eq!(after.revision, first.revision); // Queue changes need no scan revision.
+    request_at(dir.path(), Request::Shutdown).unwrap();
+    wait_until(|| restarted.0.try_wait().unwrap().is_some());
+}

@@ -17,6 +17,8 @@ const SCHEMA: &str = "1";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub notifications: Vec<crate::Notification>,
     pub revision: u64,
     pub scan: Option<String>,
     pub places: String,
@@ -169,6 +171,7 @@ impl HostDatabase {
         drop(table);
         drop(tx);
         Ok(Snapshot {
+            notifications: Vec::new(),
             revision,
             scan,
             places,

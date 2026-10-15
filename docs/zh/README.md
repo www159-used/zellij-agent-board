@@ -65,6 +65,10 @@ TUI 自动启动或连接本地 `board-tui --daemon`，通过 Unix socket 上的
 
 focus 和 seen/started 标记仍存放在 `$ZAB_STATE_DIR`、`$XDG_CACHE_HOME/zellij-agent-board` 或 `~/.cache/zellij-agent-board`。本次打开前的焦点直接传给对应的 TUI。Hook 继续通过 `$TMPDIR/zellij-agent-board-spool` 上报通知，不直接打开数据库；未读完成仍可发送终端通知。
 
+完成（`stop`）、待授权和失败也会进入持久化通知队列，按发布时间从旧到新排列。看板顶部显示待处理数量；按 `i` 打开通知列表，`j/k` 选择，`Enter` 跳到对应 Agent，`x` 确认选中的一条，`Esc` 返回看板。打开看板或跳转都不会自动确认。即使 Agent 开始了新一轮、退出，或看板和 daemon 重启，旧通知也会一直保留，直到手动确认。
+
+Hook 为每条通知单独写入私有文件，目录依次取 `$ZAB_STATE_DIR/notifications`、`$XDG_DATA_HOME/zellij-agent-board/notifications`、`~/.local/share/zellij-agent-board/notifications`。按发布时间排序，同时间用稳定 ID 排序；确认一条不会删掉同一 pane 的新通知。daemon 在快照中返回队列，并提供 `POST /v1/notifications/ack`，请求体为 `{"notification_id":"..."}`。Cursor 配套的 `afterAgentResponse` 不会再入队一条完成通知。升级后需重新运行 `make install-hooks`，并重启对应 Agent 会话。
+
 `board-tui --snapshot` 输出已提交快照的 JSON，也可通过 `curl --unix-socket` 请求 `GET /v1/snapshot`；`--reconcile` 请求后台刷新，成功只表示已接收请求。`make install` 会停掉正在运行的 daemon，使新装二进制生效；重开看板即可（会自动拉起新版 daemon）。也可手动运行 `board-tui --daemon-stop` 再打开看板。详见 [存储设计](../design/host-state.md)。
 
 Codex `Interrupt` 以及 Cursor `stop`/`afterAgentResponse` 且 `status=aborted` 时显示为 `■ stopped`。Cursor `status=error`、Claude/CodeBuddy `StopFailure`、OpenCode `session.error` 显示为 `✗ failed`。两者都清除本轮计时，不标记为完成，也不发送完成通知。授权提示（`PermissionRequest`、CodeBuddy `Notification` 的 `permission_prompt`、OpenCode `permission.asked`）显示为 `● waiting`，并保留本轮起点，以便恢复后继续计时。Claude/CodeBuddy `Notification` 的 `idle_prompt` 显示为 `◑ idle-wait`，清回合且不发完成通知。升级后对所用 CLI 重新运行 `make install-hooks`，并重启这些会话。安装这些 hook 之前发出的通知无法追溯恢复。

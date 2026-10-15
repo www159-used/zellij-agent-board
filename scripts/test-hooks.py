@@ -31,6 +31,39 @@ class HookTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_notifications_accumulate_across_turns_without_latest_hook_overwrite(self):
+        queue = self.root / "state" / "notifications"
+        self.hook("stop", {"message": "first completion"})
+        first = next(queue.glob("notice.*"))
+        self.hook("beforeSubmitPrompt")
+        self.hook("stop", {"message": "second completion"})
+        self.hook("preToolUse")
+        self.assertIn("preToolUse", self.spool.read_text())
+        notices = list(queue.glob("notice.*"))
+        self.assertEqual(len(notices), 2)
+        self.assertIn("first completion", first.read_text())
+        self.assertEqual(first.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list((queue / ".pending").iterdir()), [])
+
+    def test_queue_only_includes_attention_notices_and_not_duplicate_completion(self):
+        self.hook("stop")
+        self.hook("afterAgentResponse")
+        self.hook("Interrupt")
+        self.hook("Notification", {"notification_type": "idle_prompt"})
+        self.hook("PermissionRequest")
+        self.hook("StopFailure", {"error": "failed"})
+        queue = self.root / "state" / "notifications"
+        events = sorted(p.read_text().split()[3] for p in queue.glob("notice.*"))
+        self.assertEqual(events, ["permissionRequest", "stop", "stopFailure"])
+
+    def test_concurrent_notices_are_never_overwritten(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as workers:
+            list(workers.map(lambda n: self.hook("stop", {"message": f"completion {n}"}), range(16)))
+        notices = list((self.root / "state" / "notifications").glob("notice.*"))
+        self.assertEqual(len(notices), 16)
+        self.assertEqual(len({p.read_text() for p in notices}), 16)
+
     def test_readers_keep_old_markers_during_prompt_publication(self):
         old_hook = b"HOOK hook-test 42 sessionStart @1\n"
         old_start = b"STARTED hook-test 42 1\n"
